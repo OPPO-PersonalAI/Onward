@@ -1,12 +1,12 @@
 {
   "channel": "daily",
-  "version": "2.1.0-daily.20260419.1",
-  "tag": "v2.1.0-daily.20260419.1",
+  "version": "2.1.0-daily.20260419.2",
+  "tag": "v2.1.0-daily.20260419.2",
   "platform": "windows",
   "arch": "x64",
-  "artifactName": "Onward.2-v2.1.0-daily.20260419.1-windows-x64.exe",
-  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260419.1/Onward.2-v2.1.0-daily.20260419.1-windows-x64.exe",
-  "sha256": "998928f325379b6c70ca9242d7fab816be7d21162a9c4233b359e52d88687967",
-  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260419.1\n\nChanges since `v2.1.0-daily.20260416.2`.\n\n## New Features\n- Add PDF + EPUB reader, Git Diff/History compare, and autotest to Project Editor\n- Add pan/zoom to Mermaid diagrams in preview\n- Add sidebar auto-scroll for Outline and File Browser\n- Add context-menu send-and-execute to Task(s) in Prompt Notebook\n- Add color-tag shortcut buttons in Prompt Notebook editor\n\n## Improvements\n- Adopt \"Under Development <version>-<branch>\" naming for dev builds\n- Auto-resize Tasks list to compress Prompt editor\n- Share filename-search index across Tabs via watcher-backed cache\n- Shorten pinned-drag long-press delay to 100ms\n- Align Git Diff Viewer visuals with Git History's Pierre palette\n- Unify PDF/EPUB/code outline into a shared OutlinePanel\n- Unify copy toast across views\n\n## Bug Fixes\n- Scope Esc handler to the active terminal\n- Cap Task Filter chips to the active task count\n- Fix click-jump and save-in-place in Git Diff Viewer; group diffs by repo\n- Fix async target capture in copy-path\n- Fix nested Git submodule history and diff handling\n- Stop fighting xterm's native scroll follow\n",
-  "publishedAt": "2026-04-19T08:51:40.911Z"
+  "artifactName": "Onward.2-v2.1.0-daily.20260419.2-windows-x64.exe",
+  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260419.2/Onward.2-v2.1.0-daily.20260419.2-windows-x64.exe",
+  "sha256": "cc10f468e57a18b4599d253801929e09b6c106e186aa25d54c06bcf6a97ea5e3",
+  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260419.2\n\nChanges since `v2.1.0-daily.20260419.1`.\n\n## New Features\n- Update prompt save-as-new label and regression docs\n\n## Bug Fixes\n- Fix subpage restore and add typecheck gate\n",
+  "publishedAt": "2026-04-19T14:21:04.199Z"
 }
