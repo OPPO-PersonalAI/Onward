@@ -1,12 +1,12 @@
 {
   "channel": "daily",
-  "version": "2.1.0-daily.20260419.2",
-  "tag": "v2.1.0-daily.20260419.2",
+  "version": "2.1.0-daily.20260428.1",
+  "tag": "v2.1.0-daily.20260428.1",
   "platform": "macos",
   "arch": "x64",
-  "artifactName": "Onward.2-v2.1.0-daily.20260419.2-macos-x64.zip",
-  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260419.2/Onward.2-v2.1.0-daily.20260419.2-macos-x64.zip",
-  "sha256": "8ce31ddca841b7ed754947b2c0e639b6d6b1bfa61fa5fb69e10f5c0ed2584f58",
-  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260419.2\n\nChanges since `v2.1.0-daily.20260419.1`.\n\n## New Features\n- Update prompt save-as-new label and regression docs\n\n## Bug Fixes\n- Fix subpage restore and add typecheck gate\n",
-  "publishedAt": "2026-04-19T14:21:04.013Z"
+  "artifactName": "Onward.2-v2.1.0-daily.20260428.1-macos-x64.zip",
+  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260428.1/Onward.2-v2.1.0-daily.20260428.1-macos-x64.zip",
+  "sha256": "bf9bddc095fadaa62dab1eb1daad45f9d19f1ad9d574ad7fd02a2a8afe15ca1f",
+  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260428.1\n\nChanges since `v2.1.0-daily.20260419.2`.\n\n## New Features\n- Merge branch 'full-test-before-daily-push' into master\n- Merge branch 'macos-blank-task-info-codex' into master\n- Add working directory copy feedback\n- Merge branch 'macos-blank-task-info-kimi2.6' into master\n- Extract useCwdCopyHandler hook and add WDC regression suite\n- Move performance-heavy work off renderer\n- Update third party notices formatting\n- Merge branch 'vscode-arch-codex' into master\n- Merge origin/master: integrate off-renderer worker refactor with local IPC typing & terminal recovery\n- Point full regression testing to full-regression-checklist\n- Suppress consent dialog in autotest mode\n- Full Regression Checklist v0.2 + strip Chinese from CLAUDE.md\n- Per-operation coverage for PTY, git/proc exec, ripgrep, markdown, IPC, window events\n- Remove stray rendering-architecture analysis note\n- Per-Task tid lanes + end-to-end PTY data-flow coverage\n- Add Task Terminal title menu with quick-name shortcuts\n- Merge branch 'feat_0424' into master\n- Add performance trace instrumentation\n- Merge branch 'regression_gate_0424' into master\n- Stabilize codex perf-trace merge, harden no-auto-commit rule, English-only docs\n- Prefix project-local skills with ow_\n\n## Bug Fixes\n- Add full regression gate to push-daily-build\n- Harden build gates: type-safe IPC + predev/pre-push/CI smoke-launch\n- Fix terminal renderer recovery after surface loss\n- Unstick EPUB render, speed up preview-search debug hook 10x\n- Chrome trace JSON + traces/ artefact standardization + v0.3 regression\n- Submodule filter, watcher-driven freshness, snapshot service\n- Rebuild panzoom after Markdown session-cache restore\n- Harden autotest tmp-dir cleanup, document ONWARD_GIT_* env vars\n- Merge branch 'event_trace_gate_0424_codex' into master\n- Restructure test/ layout, slim test docs, add clean-test-data tool\n- Clean up post-restructure path drift, add ow_full_regression_test skill\n- Fix GitHistoryViewer programmatic selection and post-restructure autotest paths\n- Restructure ow_full_regression_test skill into modes, add --clean mode\n- Extend new-feature SOP with Step 0 (Discover before authoring)\n- Stabilize project editor preview navigation\n",
+  "publishedAt": "2026-04-28T13:57:32.786Z"
 }
