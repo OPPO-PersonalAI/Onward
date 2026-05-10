@@ -1032,16 +1032,26 @@ export class TerminalSessionManager {
   }
 
   private trimPendingData(session: TerminalSession, maxBytes: number): void {
+    let droppedBytes = 0
     while (session.pendingDataBytes > maxBytes && session.pendingData.length > 1) {
       const dropped = session.pendingData.shift()!
       session.pendingDataBytes -= dropped.length
+      droppedBytes += dropped.length
     }
 
-    if (session.pendingDataBytes <= maxBytes || session.pendingData.length === 0) return
+    if (session.pendingDataBytes > maxBytes && session.pendingData.length > 0) {
+      const retained = session.pendingData[0].slice(-maxBytes)
+      droppedBytes += session.pendingData[0].length - retained.length
+      session.pendingData[0] = retained
+      session.pendingDataBytes = retained.length
+    }
 
-    const retained = session.pendingData[0].slice(-maxBytes)
-    session.pendingData[0] = retained
-    session.pendingDataBytes = retained.length
+    // Drops still count toward the main-process flow-control unacked
+    // budget — without this ACK, paused PTYs would never resume because
+    // the renderer would never deliver these bytes to xterm.
+    if (droppedBytes > 0) {
+      window.electronAPI.terminal.ackData(session.id, droppedBytes)
+    }
   }
 
   private consumePendingDataChunk(session: TerminalSession, maxBytes: number): string | null {
@@ -1465,34 +1475,47 @@ export class TerminalSessionManager {
   }
 
   private writeTerminalData(session: TerminalSession, data: string): void {
-    // Just hand the bytes to xterm. xterm's native isUserScrolling handles
-    // auto-follow: if the user is at the bottom we stay at the bottom; if they
-    // scrolled up we keep their position. No programmatic scroll on output.
+    // Use xterm's async callback overload so the PTY-side flow
+    // control can ACK only after the parser has consumed the data.
+    // Without this, node-pty would keep producing (e.g. during a
+    // `git clone`) faster than xterm parses, and progress redraws
+    // could be split across IPC flushes.
+    //
+    // xterm.js's native isUserScrolling handles auto-follow: if the
+    // user is at the bottom we stay at the bottom; if they scrolled
+    // up we keep their position. No programmatic scroll on output.
     const t0 = performance.now()
     const traceStartUs = performanceTrace.nowUs()
     const flowId = performanceTrace.getActiveTerminalFlow(session.id)
-    session.terminal.write(data)
-    const durationMs = performance.now() - t0
-    perfMonitor.recordXtermWrite(durationMs)
-    perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_XTERM_WRITE, {
-      bytes: data.length,
-      durationMs: +durationMs.toFixed(2)
-    }, session.id)
-    performanceTrace.recordComplete('terminal.render.flush', traceStartUs, {
-      terminalId: session.id,
-      visible: session.visible,
-      bytes: data.length,
-      pendingBytes: session.pendingDataBytes,
-      xtermDurationMs: +durationMs.toFixed(3),
-      flowId: flowId ?? undefined
-    }, 'terminal')
-    if (flowId) {
-      performanceTrace.recordFlowEnd('terminal.render.flush', flowId, {
-        terminalId: session.id,
+    const sessionId = session.id
+    const visible = session.visible
+    const pendingBytesAtSubmit = session.pendingDataBytes
+    session.terminal.write(data, () => {
+      const durationMs = performance.now() - t0
+      perfMonitor.recordXtermWrite(durationMs)
+      perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_XTERM_WRITE, {
         bytes: data.length,
-        xtermDurationMs: +durationMs.toFixed(3)
+        durationMs: +durationMs.toFixed(2)
+      }, sessionId)
+      performanceTrace.recordComplete('terminal.render.flush', traceStartUs, {
+        terminalId: sessionId,
+        visible,
+        bytes: data.length,
+        pendingBytes: pendingBytesAtSubmit,
+        xtermDurationMs: +durationMs.toFixed(3),
+        flowId: flowId ?? undefined
       }, 'terminal')
-    }
+      if (flowId) {
+        performanceTrace.recordFlowEnd('terminal.render.flush', flowId, {
+          terminalId: sessionId,
+          bytes: data.length,
+          xtermDurationMs: +durationMs.toFixed(3)
+        }, 'terminal')
+      }
+      // ACK the parsed chars so the main process can resume node-pty
+      // if it was paused by the flow-control HIGH watermark.
+      window.electronAPI.terminal.ackData(sessionId, data.length)
+    })
   }
 
   private activateInteractiveBoost(id: string): void {

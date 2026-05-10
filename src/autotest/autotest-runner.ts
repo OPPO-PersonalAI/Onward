@@ -42,6 +42,7 @@ import { testTerminalArchitectureBaseline } from './test-terminal-architecture-b
 import { testPromptInputLatency, testPromptInputLongtail } from './test-prompt-input-latency'
 import { testTerminalFocusActivation } from './test-terminal-focus-activation'
 import { testTerminalStress } from './test-terminal-stress'
+import { testTerminalCrProgress } from './test-terminal-cr-progress'
 import { testImageDiff } from './test-image-diff'
 import { testPdfEpubPreview } from './test-pdf-epub-preview'
 import { testPdfEpubDiff } from './test-pdf-epub-diff'
@@ -171,6 +172,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testTerminalAutofollow(ctx)
       collectSuiteResults('TerminalAutofollow', results)
       await sleep(400)
+    }
+
+    if (!ctx.cancelled() && shouldRun('terminal-cr-progress')) {
+      log('phase0.11:begin')
+      const results = await testTerminalCrProgress(ctx)
+      collectSuiteResults('TerminalCrProgress', results)
+      await sleep(300)
     }
 
     if (!ctx.cancelled() && shouldRun('terminal-title-rename')) {

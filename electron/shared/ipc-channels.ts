@@ -167,6 +167,7 @@ export const IPC = {
   TELEMETRY_GET_CONSENT: 'telemetry:get-consent',
   TELEMETRY_SET_CONSENT: 'telemetry:set-consent',
   TELEMETRY_TRACK: 'telemetry:track',
+  TERMINAL_ACK_DATA: 'terminal:ack-data',
   TERMINAL_BUFFER_RESPONSE: 'terminal:buffer-response',
   TERMINAL_CONFIG_LOAD: 'terminal-config:load',
   TERMINAL_CONFIG_SAVE: 'terminal-config:save',

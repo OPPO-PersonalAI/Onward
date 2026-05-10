@@ -119,6 +119,7 @@ export interface TerminalAPI {
   setBufferFastPath: (id: string, enabled: boolean) => void
   setOutputVisibility: (id: string, visible: boolean) => void
   notifyInteractiveInput: (id: string) => void
+  ackData: (id: string, charCount: number) => void
   dispose: (id: string) => Promise<boolean>
   onData: (callback: (id: string, data: string) => void) => () => void
   onExit: (callback: (id: string, exitCode: number, signal?: number) => void) => () => void

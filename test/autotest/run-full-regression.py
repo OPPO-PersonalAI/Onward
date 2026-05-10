@@ -107,6 +107,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-telemetry-autotest.sh",
     "test/autotest/run-terminal-architecture-baseline-autotest.sh",
     "test/autotest/run-terminal-autofollow-autotest.sh",
+    "test/autotest/run-terminal-cr-progress-autotest.sh",
     "test/autotest/run-terminal-focus-activation-autotest.sh",
     "test/autotest/run-terminal-perf-autotest.sh",
     "test/autotest/run-terminal-stress-autotest.sh",

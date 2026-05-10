@@ -117,16 +117,13 @@ class TerminalDataBuffer {
   private visible = true
   private firstPushAt = 0
 
-  // IPC flush interval.  The previous value of 16 ms (~60 fps) sent up to
-  // 360 IPC messages/s across 6 terminals, saturating the renderer's main
-  // thread with callback processing alone.  100 ms (~10 fps per terminal)
-  // reduces IPC traffic to ~60 msgs/s while the renderer-side throttle
-  // (50 ms rAF) still provides smooth visual updates by coalescing writes.
-  // Terminal text remains highly responsive — 100 ms of buffering is
-  // imperceptible for human reading of scrolling output.
-  private static readonly FLUSH_INTERVAL_MS = 100
-  // Force flush when buffer exceeds 64KB (keeps large bursts responsive)
-  private static readonly FORCE_FLUSH_BYTES = 64 * 1024
+  // 5 ms IPC batch matches VS Code's TerminalDataBufferer cadence and
+  // keeps PTY output landing on the renderer at the rate xterm can
+  // parse without falling behind. The 1 MB force-flush ceiling is a
+  // memory-safety net; in practice the per-terminal flow control
+  // (HIGH/LOW watermarks) keeps the buffer far below it.
+  private static readonly FLUSH_INTERVAL_MS = 5
+  private static readonly FORCE_FLUSH_BYTES = 1024 * 1024
   private static readonly HIDDEN_MAX_BYTES = 512 * 1024
 
   constructor(
@@ -285,6 +282,25 @@ const terminalDataBuffers = new Map<string, TerminalDataBuffer>()
 const terminalFastPathState = new Map<string, boolean>()
 const terminalOutputVisibilityState = new Map<string, boolean>()
 const terminalBracketedPasteState = new Map<string, boolean>()
+
+// Per-terminal PTY flow-control state. Without back-pressure, a `git
+// clone` of a large repo can flood node-pty's IPty.onData callback
+// faster than xterm parses the bytes, so progress redraws (the
+// `<text>\x1b[K\r` pattern) end up split across multiple flushes and
+// xterm scrolls instead of overwriting the line in place. Pausing the
+// PTY when more than HIGH_WATERMARK chars are unacked, and resuming
+// when the renderer has parsed enough to drop below LOW_WATERMARK,
+// keeps the pipeline at a depth where xterm's parser sees each redraw
+// as a contiguous run. Watermark values match VS Code's
+// FlowControlConstants.
+const FLOW_HIGH_WATERMARK_CHARS = 100_000
+const FLOW_LOW_WATERMARK_CHARS = 5_000
+
+interface TerminalFlowState {
+  unacked: number
+  paused: boolean
+}
+const terminalFlowState = new Map<string, TerminalFlowState>()
 
 // Buffer request waiting queue
 interface TerminalBufferResult {
@@ -809,6 +825,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
           bracketedPasteMode,
           flowId: performanceTrace.getTaskFlowId(id) ?? undefined
         }, 'pty')
+
+        // Flow control: count chars in flight; pause node-pty if the
+        // renderer has fallen far enough behind that we'd otherwise
+        // chop progress redraws across flushes.
+        let flow = terminalFlowState.get(id)
+        if (!flow) {
+          flow = { unacked: 0, paused: false }
+          terminalFlowState.set(id, flow)
+        }
+        flow.unacked += data.length
+        if (!flow.paused && flow.unacked > FLOW_HIGH_WATERMARK_CHARS) {
+          flow.paused = true
+          ptyProcess.pause()
+        }
+
         dataBuffer.push(data)
 
         // Notify git watch on PTY output (throttled) instead of on every keystroke
@@ -1084,6 +1115,19 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     if (buf) buf.notifyInteractiveInput()
   })
 
+  // Renderer ACK after xterm has parsed `charCount` bytes of PTY output.
+  // Drives the back-pressure loop that pause()d node-pty when the
+  // unacked depth crossed FLOW_HIGH_WATERMARK_CHARS.
+  ipcMain.on(IPC.TERMINAL_ACK_DATA, (_, id: string, charCount: number) => {
+    const flow = terminalFlowState.get(id)
+    if (!flow) return
+    flow.unacked = Math.max(0, flow.unacked - charCount)
+    if (flow.paused && flow.unacked <= FLOW_LOW_WATERMARK_CHARS) {
+      flow.paused = false
+      ptyManager.get(id)?.resume()
+    }
+  })
+
   // Resize terminal
   ipcMain.handle(IPC.TERMINAL_RESIZE, (_, id: string, cols: number, rows: number) => {
     return performanceTrace.timeSync('ipc.invoke', {
@@ -1106,6 +1150,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     terminalFastPathState.delete(id)
     terminalOutputVisibilityState.delete(id)
     terminalBracketedPasteState.delete(id)
+    terminalFlowState.delete(id)
     ipcDataCounters.delete(id)
     gitWatchManager?.unsubscribe(id)
     const result = ptyManager.dispose(id)
@@ -1555,6 +1600,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       buf.dispose()
       terminalDataBuffers.delete(terminalId)
     }
+    terminalFlowState.delete(terminalId)
     ipcDataCounters.delete(terminalId)
     gitWatchManager?.unsubscribe(terminalId)
     ptyManager.dispose(terminalId)
@@ -2035,6 +2081,7 @@ export function cleanupIpcHandlers(): void {
   terminalDataBuffers.clear()
   terminalFastPathState.clear()
   terminalOutputVisibilityState.clear()
+  terminalFlowState.clear()
   if (terminalIpcDiagTimer) {
     clearInterval(terminalIpcDiagTimer)
     terminalIpcDiagTimer = null

@@ -82,6 +82,7 @@ point at files under `test/unittest/`.
 | Bug fix: host surface events and later old-canvas restore events do not recreate or disturb WebGL while cooldown-backed DOM fallback is active | `run-terminal-focus-activation` (TFA-16, TFA-17, TFA-18) |
 | Terminal output rendering perf (frame budget, longtask) | `run-terminal-perf` (TP-*) |
 | Multi-task terminal stress under concurrent output | `run-terminal-stress` (ST-*) |
+| PTY pipeline: high-volume `<text>\x1b[K\r` redraw burst (the `git clone --progress` pattern) collapses to one line per phase in the xterm buffer (smoke test for the VS Code-aligned flow-control + 5 ms batching pipeline; the original visual scrolling regression is verified manually, see `electron/main/ipc-handlers.ts`) | `run-terminal-cr-progress` (TCR-00..02) |
 | Off-renderer scheduling architecture invariants | `run-terminal-architecture-baseline` (TAB-00, TAB-01) |
 | Terminal layout / state restore across app restart | (`shouldRun('terminal-state-persistence')`, no shell runner) |
 | Per-Task font override (style settings) | (`shouldRun('per-agent-font')`, no shell runner) |
