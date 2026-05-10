@@ -139,6 +139,7 @@ run('electron-vite', ['build'])
 const q = process.platform === 'win32' ? '"' : ''
 run('electron-builder', [
   `${q}-c.productName=${productName}${q}`,
+  `${q}-c.executableName=${productName}${q}`,
   `${q}-c.extraMetadata.productName=${productName}${q}`,
   '-c.extraMetadata.buildChannel=dev',
   `${q}-c.extraMetadata.branch=${branch}${q}`,
