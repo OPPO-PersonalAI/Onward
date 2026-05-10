@@ -145,6 +145,19 @@ if (process.env.ONWARD_DISABLE_GPU === '1') {
   app.commandLine.appendSwitch('disable-gpu')
 }
 
+// Linux Chromium refuses to start as root unless --no-sandbox is set
+// (https://crbug.com/638180). Cloud / containerised CI runners typically
+// execute as root; gating on ONWARD_AUTOTEST=1 keeps every production /
+// developer build fully sandboxed as before.
+if (
+  process.platform === 'linux' &&
+  process.env.ONWARD_AUTOTEST === '1' &&
+  typeof process.getuid === 'function' &&
+  process.getuid() === 0
+) {
+  app.commandLine.appendSwitch('no-sandbox')
+}
+
 // Exit confirmation dialog (exported for use by tray-manager)
 export async function confirmQuit(): Promise<boolean> {
   const { displayName } = getAppInfo()

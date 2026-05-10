@@ -59,6 +59,7 @@ set ONWARD_TELEMETRY_RESET_CONSENT=1
 | `ONWARD_REPO_ROOT` | path | Repo-root override used by `perf-trace-logger` and autotest runners to resolve where `traces/` lives. Set automatically by the regression harness; only needed manually when launching a packaged build outside the checkout. |
 | `ONWARD_DEBUG_CAPTURE` | `1` | Auto-capture renderer screenshots to temp dir after load |
 | `ONWARD_DISABLE_GPU` | `1` | Disable hardware acceleration and GPU compositing |
+| `ONWARD_AUTOTEST` (interaction, Linux-as-root) | (existing flag) | Linux-only, autotest-only: when `process.getuid() === 0` and `ONWARD_AUTOTEST=1`, the main process appends `--no-sandbox` to the Chromium command line. Linux Chromium refuses to start as root unless `--no-sandbox` is set (https://crbug.com/638180), which blocks autotest runs inside containerised CI / cloud sandboxes that execute as root. Production builds, developer macOS / Windows builds, and Linux developers running as a normal user are unaffected. |
 | `ONWARD_USER_DATA_DIR` | path | Override the userData directory (settings, state, telemetry) |
 | `ONWARD_BUILD` | `dev` / `prod` | Override build channel detection |
 | `ONWARD_BRANCH` | string | Override branch name in app identity |
