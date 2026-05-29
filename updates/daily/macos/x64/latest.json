@@ -1,12 +1,12 @@
 {
   "channel": "daily",
-  "version": "2.1.0-daily.20260505.1",
-  "tag": "v2.1.0-daily.20260505.1",
+  "version": "2.1.0-daily.20260529.1",
+  "tag": "v2.1.0-daily.20260529.1",
   "platform": "macos",
   "arch": "x64",
-  "artifactName": "Onward.2-v2.1.0-daily.20260505.1-macos-x64.zip",
-  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260505.1/Onward.2-v2.1.0-daily.20260505.1-macos-x64.zip",
-  "sha256": "212ca99dc34ce407c97cac3e65e9761904acab5a61e70072f63e611ec28a841d",
-  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260505.1\n\nChanges since `v2.1.0-daily.20260428.1`.\n\n## New Features\n- Merge branch '0429-task-name-change-cc' into master\n- Stop ThirdPartyNotices.txt CRLF/LF flips on every build\n- Extend Task layout to 8 grid plus Custom presets\n- Merge branch 'extend-task-number-cb' into master\n- Enforce English-only autotest selectors\n- Split latency-class from throughput-class in repeat-inside-the-test rule and require user-confirmed budget\n- Add click-anywhere virtual cursor for Prompt textarea + per-Tab Canvas/Line toggle\n- Add always-on trace store, diagnostic bundle export, unify perf-trace\n\n## Bug Fixes\n- Add Task-name auto-follow Git branch and Feature x Test index\n- Merge branch 'master' into 0429-bug-terminal-blank-cc\n- Recover blank Task after macOS Spaces / Win virtual desktop swipe\n- Add prompt editor right-click context menu\n- Merge branch '0429-bug-terminal-blank-cc' into master\n- Stabilize TFA-09..12 by routing host surface events through manager directly\n- Add pre-commit text-lint hook, repeat-inside-the-test authoring rule, and full-regression --repeat secondary gate\n- Strengthen prompt editor send transform coverage\n",
-  "publishedAt": "2026-05-05T14:02:10.423Z"
+  "artifactName": "Onward.2-v2.1.0-daily.20260529.1-macos-x64.zip",
+  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260529.1/Onward.2-v2.1.0-daily.20260529.1-macos-x64.zip",
+  "sha256": "e9e8d4b6c8bedeb82a8d2ddb3333383e057c3d184c364c19ad75458c61cb3579",
+  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260529.1\n\nChanges since `v2.1.0-daily.20260505.1`.\n\n## New Features\n- Add per-project diff content cache, click-latency tracking, UI polish\n- Update prompt input defaults and menu order\n- Git diff: refine performance diagnostics and hunk actions\n- Add pinned prompt send from terminal context menu\n- Refactor subpage navigation state memory\n\n## Bug Fixes\n- Improve Git diff state mirroring and editor navigation\n- Forward Cmd+P/Escape from PDF iframe and collapse empty diff panes\n- Add Git Diff perf diagnostics panel and fix click-latency undercount\n- Support large file and binary viewing\n- Skip 1300 ms safety timer on cached Markdown preview reveal\n- Align terminal WebGL fallback with VS Code\n- Fix prompt menu viewport handling and input mode persistence\n- Support large gif previews\n- Stabilize markdown preview reopen and editor restore\n- Eliminate Project Editor reopen flash and panel-toggle afterimage\n- Drop PDF/EPUB size caps, stream EPUB via file://, fix latch race\n- Git diff: rework diagnostics panel with two-layer cache taxonomy\n- Git: move status watching onto GitStateMirror worker\n- Add HTML Preview controls\n- Avoid FSEvents watcher crashes\n- Preserve color output in spawned tasks\n- Align diff display mode labels\n- Align HTML refresh and zsh startup\n- Recover watcher failures and stale diff models\n- Refresh stale diffs and guard large files\n- Align diff defaults and task status\n- Stabilize terminal cwd and task status\n- Break GitStateMirror status/index watcher feedback loop\n- Seal OSC 7 phantom cwd via reject IPC + lock with autotests\n- Seal cross-tab mirror staleness via canonical-key bookkeeping\n- Fix WebGL texture atlas corruption when 6+ tasks render simultaneously\n",
+  "publishedAt": "2026-05-29T08:02:54.110Z"
 }
