@@ -1,12 +1,12 @@
 {
   "channel": "daily",
-  "version": "2.1.0-daily.20260530.1",
-  "tag": "v2.1.0-daily.20260530.1",
+  "version": "2.1.0-daily.20260601.1",
+  "tag": "v2.1.0-daily.20260601.1",
   "platform": "macos",
   "arch": "x64",
-  "artifactName": "Onward.2-v2.1.0-daily.20260530.1-macos-x64.zip",
-  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260530.1/Onward.2-v2.1.0-daily.20260530.1-macos-x64.zip",
-  "sha256": "b26948fba0dc8f74a53cd8e03d8cf535a4cba314afab6c57034e474f02180117",
-  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260530.1\n\nChanges since `v2.1.0-daily.20260529.1`.\n\n## Bug Fixes\n- Harden full-regression suite for Windows compatibility\n- Restore Windows Task cwd tracking via shell integration\n- Fix two issues found during macOS CWD test verification\n",
-  "publishedAt": "2026-05-30T02:49:00.179Z"
+  "artifactName": "Onward.2-v2.1.0-daily.20260601.1-macos-x64.zip",
+  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260601.1/Onward.2-v2.1.0-daily.20260601.1-macos-x64.zip",
+  "sha256": "a09fef4f5db73b5b02f80c9898420bdf60005a78f7170778f3a34adc1540284d",
+  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260601.1\n\nChanges since `v2.1.0-daily.20260530.1`.\n\n## Bug Fixes\n- Fixed high idle CPU usage on Windows caused by the terminal repeatedly flipping the working-directory path separator.\n",
+  "publishedAt": "2026-06-01T07:29:15.270Z"
 }
