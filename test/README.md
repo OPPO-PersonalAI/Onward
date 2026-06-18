@@ -215,6 +215,7 @@ point at files under `test/unittest/`.
 |---|---|
 | Markdown preview renders highlight / image / outline | `run-project-editor-markdown-navigation` (PMN-01..09) |
 | HTML source editing plus WebContents preview with local file assets, HTTP script access, persistent force refresh, splitter drag, WebContents search, HTML Preview zoom, browser-aligned refresh shortcut, and scroll-preserving fresh reload | `run-project-editor-html-preview` (PHTML-00..16) |
+| Open Browser (address-bar in-app browser): local HTML file + sibling file:// subresources (any-file), resolver scheme rules (file:// / localhost+IP http / domain https), reload, zoom in/reset/out + renderer sync, Esc keep-alive vs ✕ destroy, auto-refresh tick + scroll restore, native preset menu + interval clamp | `run-open-browser` (OB-01..12) |
 | Project Editor File Browser collapse / expand | `run-project-editor-markdown-navigation` (PMN-03b..03d) |
 | Outline scroll memory across switches and reopens | `run-project-editor-markdown-navigation` (PMN-13..17, PMN-40..44) |
 | Code-outline (TS / py) symbols + scroll memory | `run-project-editor-markdown-navigation` (PMN-18..23) |

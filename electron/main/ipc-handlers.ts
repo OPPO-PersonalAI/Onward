@@ -1581,6 +1581,38 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle(
+    IPC.BROWSER_SHOW_AUTO_REFRESH_MENU,
+    (
+      _,
+      options: { currentIntervalMs: number | null; labels: { off: string; items: Array<{ ms: number; label: string }> } }
+    ) => {
+      return new Promise<{ intervalMs: number | null } | null>((resolve) => {
+        const { currentIntervalMs, labels } = options
+        const items: Electron.MenuItemConstructorOptions[] = [
+          {
+            label: labels.off,
+            type: 'radio',
+            checked: currentIntervalMs == null,
+            click: () => resolve({ intervalMs: null })
+          },
+          { type: 'separator' },
+          ...labels.items.map((item) => ({
+            label: item.label,
+            type: 'radio' as const,
+            checked: currentIntervalMs === item.ms,
+            click: () => resolve({ intervalMs: item.ms })
+          }))
+        ]
+        const menu = Menu.buildFromTemplate(items)
+        menu.popup({
+          window: mainWindow,
+          callback: () => resolve(null)
+        })
+      })
+    }
+  )
+
+  ipcMain.handle(
     IPC.BROWSER_SHOW_COOKIE_MENU,
     (_, options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => {
       return new Promise<{ action: string; rememberCookies?: boolean } | null>((resolve) => {
@@ -2461,6 +2493,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.BROWSER_GET_NAV_STATE)
   ipcMain.removeHandler(IPC.BROWSER_CLEAR_COOKIES)
   ipcMain.removeHandler(IPC.BROWSER_SET_REMEMBER_COOKIES)
+  ipcMain.removeHandler(IPC.BROWSER_SHOW_AUTO_REFRESH_MENU)
   ipcMain.removeHandler(IPC.BROWSER_SHOW_COOKIE_MENU)
   ipcMain.removeHandler(IPC.COMMAND_PRESET_LOAD)
   ipcMain.removeHandler(IPC.COMMAND_PRESET_SAVE)

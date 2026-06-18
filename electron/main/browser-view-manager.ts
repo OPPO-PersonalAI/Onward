@@ -5,19 +5,27 @@
 
 import { BrowserWindow, WebContentsView, session, type Event as ElectronEvent, type WebContents } from 'electron'
 import { fileURLToPath } from 'url'
+import { homedir } from 'os'
 import { isAbsolute, relative, resolve } from 'path'
 import { IPC } from '../shared/ipc-channels'
 import {
+  HTML_PREVIEW_DEFAULT_ZOOM_FACTOR,
   isHtmlPreviewRefreshShortcut,
   normalizeHtmlPreviewZoomFactor,
   stepHtmlPreviewZoomFactor
 } from '../../src/utils/html-file'
+import { resolveBrowserInputToUrl } from '../../src/utils/browser-url'
+import { performanceTrace } from './performance-trace'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 const BROWSER_PARTITION = 'persist:browser'
 
 export interface BrowserCreateOptions {
   allowFile?: boolean
   fileRoot?: string
+  // When true, any local file:// URL is permitted (no fileRoot containment). Used by the
+  // Open Browser panel; the Project Editor HTML Preview keeps the root-restricted model.
+  allowAnyFile?: boolean
 }
 
 export interface BrowserScrollState {
@@ -80,7 +88,12 @@ interface BrowserViewInfo {
   isFullscreen: boolean
   savedBounds: { x: number; y: number; width: number; height: number } | null
   allowFile: boolean
+  allowAnyFile: boolean
   fileRoot: string | null
+  // Authoritative zoom factor for this view. We track it ourselves instead of reading
+  // webContents.getZoomFactor() mid-gesture, because Chromium's wheel-zoom applies its own
+  // 1.2^level step before the 'zoom-changed' event fires (see infra/trace.md / Electron #17747).
+  zoomFactor: number
   findFallback: {
     query: string
     matches: number
@@ -132,14 +145,17 @@ class BrowserViewManager {
       isFullscreen: false,
       savedBounds: null,
       allowFile: Boolean(options?.allowFile),
+      allowAnyFile: Boolean(options?.allowAnyFile),
       fileRoot: normalizeFileRoot(options?.fileRoot),
+      zoomFactor: HTML_PREVIEW_DEFAULT_ZOOM_FACTOR,
       findFallback: {
         query: '',
         matches: 0,
         activeMatchOrdinal: 0
       }
     }
-    if (info.allowFile && !info.fileRoot) {
+    // A root-restricted file view needs a valid root; an "any local file" view does not.
+    if (info.allowFile && !info.allowAnyFile && !info.fileRoot) {
       try {
         view.webContents.close()
       } catch {
@@ -152,8 +168,9 @@ class BrowserViewManager {
 
     this.setupEventForwarding(id, info)
 
-    if (url && url !== 'about:blank') {
-      if (!this.isAllowedUrlForInfo(info, url)) {
+    const initialUrl = url ? this.normalizeUrl(url) : null
+    if (initialUrl && initialUrl !== 'about:blank') {
+      if (!this.isAllowedUrlForInfo(info, initialUrl)) {
         this.views.delete(id)
         try {
           view.webContents.close()
@@ -162,7 +179,7 @@ class BrowserViewManager {
         }
         return { success: false, id, error: 'URL is not allowed for this browser view' }
       }
-      void view.webContents.loadURL(url)
+      void view.webContents.loadURL(initialUrl)
     }
 
     return { success: true, id }
@@ -256,9 +273,28 @@ class BrowserViewManager {
     if (!info || info.view.webContents.isDestroyed()) {
       return { success: false, error: `Browser view ${id} is not available` }
     }
-    const nextZoomFactor = normalizeHtmlPreviewZoomFactor(zoomFactor)
-    info.view.webContents.setZoomFactor(nextZoomFactor)
+    const nextZoomFactor = this.applyZoomFactor(id, info, zoomFactor, 'renderer')
     return { success: true, zoomFactor: nextZoomFactor }
+  }
+
+  // Single funnel for every zoom path (toolbar button, keyboard, Ctrl+wheel, did-finish-load
+  // resync). Clamps, applies to the WebContents, updates the authoritative factor, and
+  // notifies the renderer so the toolbar % readout stays in sync.
+  private applyZoomFactor(
+    id: string,
+    info: BrowserViewInfo,
+    zoomFactor: number,
+    source: 'renderer' | 'shortcut'
+  ): number {
+    const next = normalizeHtmlPreviewZoomFactor(zoomFactor)
+    try {
+      info.view.webContents.setZoomFactor(next)
+    } catch {
+      // Ignore zoom application failures on a tearing-down view.
+    }
+    info.zoomFactor = next
+    this.emitZoomFactorChanged(id, next, source)
+    return next
   }
 
   async evaluateForTest(id: string, script: string): Promise<{ success: boolean; value?: unknown; error?: string }> {
@@ -515,6 +551,11 @@ class BrowserViewManager {
     wc.on('will-navigate', (event, url) => {
       if (!this.isAllowedUrlForInfo(info, url)) {
         event.preventDefault()
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_BROWSER_URL_REJECTED, {
+          protocol: (() => { try { return new URL(url).protocol } catch { return 'invalid' } })(),
+          allowFile: info.allowFile,
+          allowAnyFile: info.allowAnyFile
+        })
       }
     })
 
@@ -572,6 +613,35 @@ class BrowserViewManager {
     wc.on('did-stop-loading', () => {
       send(IPC.BROWSER_LOADING_CHANGED, false)
       this.sendNavState(id)
+    })
+
+    // Ctrl/Cmd + mouse wheel (and, on some platforms, trackpad pinch) requests a zoom step.
+    // 'zoom-changed' is notification-only — Chromium already applied its default 1.2^level
+    // step — so we override with our own clamped 50%-200%/10% ladder from the authoritative
+    // factor and re-broadcast so the toolbar % readout follows.
+    wc.on('zoom-changed', (_event, zoomDirection) => {
+      const direction = zoomDirection === 'out' ? 'out' : 'in'
+      const next = this.applyZoomFactor(id, info, stepHtmlPreviewZoomFactor(info.zoomFactor, direction), 'shortcut')
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_BROWSER_ZOOM_CHANGED, {
+        direction,
+        zoomPercent: Math.round(next * 100)
+      })
+    })
+
+    wc.on('did-finish-load', () => {
+      // Re-sync the authoritative zoom with whatever Chromium kept after navigation so the
+      // toolbar % readout stays honest. We do NOT force a value here (no persistence asked for):
+      // same-origin reloads keep the user's zoom; cross-origin navigations reset to that
+      // origin's stored level and the readout reflects that.
+      try {
+        const current = normalizeHtmlPreviewZoomFactor(wc.getZoomFactor())
+        if (current !== info.zoomFactor) {
+          info.zoomFactor = current
+          this.emitZoomFactorChanged(id, current, 'shortcut')
+        }
+      } catch {
+        // Ignore on a destroyed view.
+      }
     })
 
     wc.on('enter-html-full-screen', () => {
@@ -636,9 +706,7 @@ class BrowserViewManager {
           : key === '-' || key === '_' || code === 'numpadsubtract'
             ? 'out'
             : 'in'
-        const nextZoomFactor = stepHtmlPreviewZoomFactor(wc.getZoomFactor(), direction)
-        wc.setZoomFactor(nextZoomFactor)
-        this.emitZoomFactorChanged(id, nextZoomFactor, 'shortcut')
+        this.applyZoomFactor(id, info, stepHtmlPreviewZoomFactor(info.zoomFactor, direction), 'shortcut')
         return
       }
 
@@ -773,27 +841,15 @@ class BrowserViewManager {
   }
 
   private normalizeUrl(input: string): string | null {
-    const trimmed = input.trim()
-    if (!trimmed) return null
-    if (trimmed === 'about:blank') return trimmed
-
-    if (/^https?:\/\//i.test(trimmed)) {
-      try {
-        return new URL(trimmed).toString()
-      } catch {
-        return null
-      }
+    const resolved = resolveBrowserInputToUrl(input, { homeDir: homedir() })
+    // Breadcrumb: a typed path/host was resolved to a local file:// URL, so "did my local
+    // file open?" is answerable from a trace without re-running the bug.
+    if (resolved && resolved.startsWith('file:') && !/^\s*file:/i.test(input)) {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_BROWSER_LOCAL_FILE_RESOLVE, {
+        inputLen: input.length
+      })
     }
-
-    if (/^(localhost|[\d.]+)(:\d+)?(\/.*)?$/i.test(trimmed) || /^[^\s]+\.[^\s]+$/.test(trimmed)) {
-      try {
-        return new URL(`https://${trimmed}`).toString()
-      } catch {
-        return null
-      }
-    }
-
-    return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`
+    return resolved
   }
 
   private findInfoByWebContentsId(webContentsId: number | undefined): BrowserViewInfo | null {
@@ -812,7 +868,9 @@ class BrowserViewManager {
     try {
       const parsed = new URL(url)
       if (parsed.protocol === 'data:' || parsed.protocol === 'blob:') return true
-      if (parsed.protocol !== 'file:' || !info.fileRoot) return false
+      if (parsed.protocol !== 'file:') return false
+      if (info.allowAnyFile) return true
+      if (!info.fileRoot) return false
       return isPathInsideRoot(fileURLToPath(parsed), info.fileRoot)
     } catch {
       return false

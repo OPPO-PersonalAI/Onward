@@ -1353,7 +1353,7 @@ export interface CodingAgentAPI {
 }
 
 export interface BrowserAPI {
-  create: (id: string, url?: string, options?: { allowFile?: boolean; fileRoot?: string }) => Promise<{ success: boolean; id: string; error?: string }>
+  create: (id: string, url?: string, options?: { allowFile?: boolean; fileRoot?: string; allowAnyFile?: boolean }) => Promise<{ success: boolean; id: string; error?: string }>
   destroy: (id: string) => Promise<boolean>
   navigate: (id: string, url: string) => Promise<boolean>
   goBack: (id: string) => Promise<boolean>
@@ -1367,6 +1367,7 @@ export interface BrowserAPI {
   clearCookies: (maxAge?: number) => Promise<{ removed: number }>
   setRememberCookies: (rememberCookies: boolean) => Promise<{ rememberCookies: boolean }>
   showCookieMenu: (options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => Promise<{ action: string; rememberCookies?: boolean } | null>
+  showAutoRefreshMenu: (options: { currentIntervalMs: number | null; labels: { off: string; items: Array<{ ms: number; label: string }> } }) => Promise<{ intervalMs: number | null } | null>
   evaluateForTest: (id: string, script: string) => Promise<{ success: boolean; value?: unknown; error?: string }>
   getZoomFactor: (id: string) => Promise<{ success: boolean; zoomFactor?: number; error?: string }>
   setZoomFactor: (id: string, zoomFactor: number) => Promise<{ success: boolean; zoomFactor?: number; error?: string }>
@@ -2266,7 +2267,7 @@ const debugAPI: DebugAPI = {
 }
 
 const browserAPI: BrowserAPI = {
-  create: (id: string, url?: string, options?: { allowFile?: boolean; fileRoot?: string }) => {
+  create: (id: string, url?: string, options?: { allowFile?: boolean; fileRoot?: string; allowAnyFile?: boolean }) => {
     return ipcRenderer.invoke(IPC.BROWSER_CREATE, id, url, options)
   },
   destroy: (id: string) => {
@@ -2307,6 +2308,9 @@ const browserAPI: BrowserAPI = {
   },
   showCookieMenu: (options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => {
     return ipcRenderer.invoke(IPC.BROWSER_SHOW_COOKIE_MENU, options) as Promise<{ action: string; rememberCookies?: boolean } | null>
+  },
+  showAutoRefreshMenu: (options: { currentIntervalMs: number | null; labels: { off: string; items: Array<{ ms: number; label: string }> } }) => {
+    return ipcRenderer.invoke(IPC.BROWSER_SHOW_AUTO_REFRESH_MENU, options) as Promise<{ intervalMs: number | null } | null>
   },
   evaluateForTest: (id: string, script: string) => {
     return ipcRenderer.invoke(IPC.BROWSER_EVALUATE_FOR_TEST, id, script) as Promise<{ success: boolean; value?: unknown; error?: string }>

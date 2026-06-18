@@ -6,19 +6,36 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '../../i18n/useI18n'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import {
+  formatHtmlPreviewZoomPercent,
+  HTML_PREVIEW_MAX_ZOOM_FACTOR,
+  HTML_PREVIEW_MIN_ZOOM_FACTOR,
+  stepHtmlPreviewZoomFactor
+} from '../../utils/html-file'
+import {
+  AUTO_REFRESH_PRESETS_MS,
+  clampAutoRefreshIntervalMs,
+  formatAutoRefreshInterval
+} from '../../utils/browser-url'
+import type { BrowserScrollState } from '../../types/electron'
 import './BrowserPanel.css'
 
 interface BrowserPanelProps {
   isOpen: boolean
+  // Esc / toggle-off / overlay → hide and KEEP the view cached (path memory).
   onClose: () => void
   terminalId: string
   initialUrl?: string | null
   onUrlChange?: (url: string) => void
   forceHidden?: boolean
   isActive?: boolean
+  // Auto Refresh interval in ms (null = off). Per-terminal, in-session.
+  autoRefreshIntervalMs?: number | null
+  onAutoRefreshChange?: (next: number | null) => void
 }
 
-let browserIdCounter = 0
 let sharedRememberCookies = true
 const rememberCookiesSubscribers = new Set<(rememberCookies: boolean) => void>()
 
@@ -36,6 +53,22 @@ function updateSharedRememberCookies(next: boolean): void {
   }
 }
 
+interface BrowserPanelDebugApi {
+  getBrowserId: () => string | null
+  getZoomFactor: () => number
+  getViewZoomFactor: () => Promise<number | null>
+  stepZoom: (direction: 'in' | 'out' | 'reset') => Promise<number>
+  openUrl: (url: string) => Promise<void>
+  reload: () => void
+  // The keep-alive close path (what Esc / toggle-off invoke): hides & caches, never destroys.
+  closeKeepAlive: () => void
+  evaluate: (script: string) => Promise<unknown>
+  getScrollState: () => Promise<BrowserScrollState | null>
+  setAutoRefresh: (intervalMs: number | null) => void
+  triggerAutoRefreshTick: () => Promise<void>
+  wasDestroyed: () => boolean
+}
+
 export function BrowserPanel({
   isOpen,
   onClose,
@@ -43,7 +76,9 @@ export function BrowserPanel({
   initialUrl,
   onUrlChange,
   forceHidden = false,
-  isActive = true
+  isActive = true,
+  autoRefreshIntervalMs = null,
+  onAutoRefreshChange
 }: BrowserPanelProps) {
   const { t } = useI18n()
   const [url, setUrl] = useState('')
@@ -56,6 +91,7 @@ export function BrowserPanel({
   const [isViewReady, setIsViewReady] = useState(false)
   const [hasVisibleView, setHasVisibleView] = useState(false)
   const [rememberCookies, setRememberCookies] = useState(sharedRememberCookies)
+  const [zoomFactor, setZoomFactor] = useState(1)
 
   const placeholderRef = useRef<HTMLDivElement>(null)
   const urlInputRef = useRef<HTMLInputElement>(null)
@@ -63,8 +99,15 @@ export function BrowserPanel({
   const browserIdRef = useRef<string | null>(null)
   const forceHiddenRef = useRef(forceHidden)
   const hasVisibleViewRef = useRef(false)
+  const isLoadingRef = useRef(false)
+  const destroyOnUnmountRef = useRef(false)
+  const wasDestroyedRef = useRef(false)
+  const pendingScrollRestoreRef = useRef<BrowserScrollState | null>(null)
 
-  useSubpageEscape({ isOpen: isOpen && !forceHidden && isActive, onEscape: onClose })
+  useSubpageEscape({
+    isOpen: isOpen && !forceHidden && isActive,
+    onEscape: onClose
+  })
 
   useEffect(() => {
     setRememberCookies(sharedRememberCookies)
@@ -118,41 +161,101 @@ export function BrowserPanel({
   }, [hasVisibleView, isOpen, isViewReady, scheduleSyncBounds])
 
   useEffect(() => {
+    isLoadingRef.current = isLoading
+  }, [isLoading])
+
+  // View lifecycle: detect-or-create on open; HIDE (cache) on Esc/toggle, DESTROY only on ✕.
+  useEffect(() => {
     if (!isOpen) return
 
-    const id = `browser-${terminalId}-${++browserIdCounter}`
+    const id = `browser-${terminalId}`
     const startUrl = (initialUrl ?? '').trim()
-    const shouldShowView = startUrl.length > 0
 
     browserIdRef.current = id
-    setUrl(startUrl)
-    setInputUrl(startUrl)
-    setTitle('')
-    setIsLoading(shouldShowView)
-    setCanGoBack(false)
-    setCanGoForward(false)
-    setIsFullscreen(false)
+    destroyOnUnmountRef.current = false
+    wasDestroyedRef.current = false
     setIsViewReady(false)
-    setHasVisibleView(shouldShowView)
-    hasVisibleViewRef.current = shouldShowView
+    setIsFullscreen(false)
 
-    window.electronAPI.browser.create(id, startUrl || undefined).then((result) => {
-      if (browserIdRef.current !== id || !result.success) return
+    let cancelled = false
+
+    void (async () => {
+      const nav = await window.electronAPI.browser.getNavState(id)
+      if (cancelled || browserIdRef.current !== id) return
+
+      if (nav) {
+        // Reattach a cached view (path memory after an Esc exit).
+        perfTrace(PERF_TRACE_EVENT.RENDERER_BROWSER_REATTACH, { urlLen: nav.url.length })
+        setUrl(nav.url)
+        setInputUrl(nav.url)
+        setTitle(nav.title)
+        setIsLoading(nav.isLoading)
+        setCanGoBack(nav.canGoBack)
+        setCanGoForward(nav.canGoForward)
+        const visible = nav.url.trim() !== '' && nav.url !== 'about:blank'
+        setHasVisibleView(visible)
+        hasVisibleViewRef.current = visible
+        setIsViewReady(true)
+        const zf = await window.electronAPI.browser.getZoomFactor(id)
+        if (!cancelled && zf?.success && typeof zf.zoomFactor === 'number') {
+          setZoomFactor(zf.zoomFactor)
+        }
+        requestAnimationFrame(() => {
+          syncBounds()
+          requestAnimationFrame(syncBounds)
+        })
+        return
+      }
+
+      // Create a fresh view. Open Browser allows any local file (no fileRoot restriction).
+      const shouldShowView = startUrl.length > 0
+      setUrl(startUrl)
+      setInputUrl(startUrl)
+      setTitle('')
+      setIsLoading(shouldShowView)
+      setCanGoBack(false)
+      setCanGoForward(false)
+      setHasVisibleView(shouldShowView)
+      hasVisibleViewRef.current = shouldShowView
+      setZoomFactor(1)
+
+      const result = await window.electronAPI.browser.create(id, startUrl || undefined, {
+        allowFile: true,
+        allowAnyFile: true
+      })
+      if (cancelled || browserIdRef.current !== id || !result.success) return
       setIsViewReady(true)
+      const zf = await window.electronAPI.browser.getZoomFactor(id)
+      if (!cancelled && zf?.success && typeof zf.zoomFactor === 'number') {
+        setZoomFactor(zf.zoomFactor)
+      }
       requestAnimationFrame(() => {
         syncBounds()
         requestAnimationFrame(syncBounds)
       })
-    })
+    })()
 
     return () => {
+      cancelled = true
+      const activeId = browserIdRef.current
       browserIdRef.current = null
       hasVisibleViewRef.current = false
       setIsViewReady(false)
       setHasVisibleView(false)
-      window.electronAPI.browser.destroy(id).catch(() => {
-        // Ignore destroy races during teardown.
-      })
+      if (activeId) {
+        if (destroyOnUnmountRef.current) {
+          wasDestroyedRef.current = true
+          perfTrace(PERF_TRACE_EVENT.RENDERER_BROWSER_DESTROY, {})
+          window.electronAPI.browser.destroy(activeId).catch(() => {
+            // Ignore destroy races during teardown.
+          })
+        } else {
+          perfTrace(PERF_TRACE_EVENT.RENDERER_BROWSER_CACHE_HIDE, {})
+          window.electronAPI.browser.hide(activeId).catch(() => {
+            // Ignore hide races during teardown.
+          })
+        }
+      }
       if (rafRef.current) {
         cancelAnimationFrame(rafRef.current)
       }
@@ -199,6 +302,16 @@ export function BrowserPanel({
     const unsubLoading = window.electronAPI.browser.onLoadingChanged((id, loading) => {
       if (id !== browserIdRef.current) return
       setIsLoading(loading)
+      // Auto-refresh scroll-position memory: restore after the reload settles.
+      if (!loading && pendingScrollRestoreRef.current) {
+        const target = pendingScrollRestoreRef.current
+        pendingScrollRestoreRef.current = null
+        window.setTimeout(() => {
+          const browserId = browserIdRef.current
+          if (!browserId || browserId !== id) return
+          void window.electronAPI.browser.restoreScrollState(browserId, target)
+        }, 50)
+      }
     })
 
     const unsubNav = window.electronAPI.browser.onNavStateChanged((id, state) => {
@@ -220,6 +333,11 @@ export function BrowserPanel({
       onClose()
     })
 
+    const unsubZoom = window.electronAPI.browser.onZoomFactorChanged((id, nextZoomFactor) => {
+      if (id !== browserIdRef.current) return
+      setZoomFactor(nextZoomFactor)
+    })
+
     return () => {
       unsubUrl()
       unsubTitle()
@@ -227,6 +345,7 @@ export function BrowserPanel({
       unsubNav()
       unsubFullscreen()
       unsubEscape()
+      unsubZoom()
     }
   }, [isOpen, onClose, onUrlChange, syncBounds])
 
@@ -259,13 +378,13 @@ export function BrowserPanel({
     const id = browserIdRef.current
     if (!id) return
 
-    if (isLoading) {
+    if (isLoadingRef.current) {
       void window.electronAPI.browser.stop(id)
       return
     }
 
     void window.electronAPI.browser.reload(id)
-  }, [isLoading])
+  }, [])
 
   useEffect(() => {
     if (!isOpen) return
@@ -275,6 +394,75 @@ export function BrowserPanel({
     })
     return unsubscribe
   }, [handleReload, isOpen])
+
+  const stepZoom = useCallback(async (direction: 'in' | 'out' | 'reset', source: 'toolbar' | 'debug') => {
+    const id = browserIdRef.current
+    if (!id) return zoomFactor
+    const next = stepHtmlPreviewZoomFactor(zoomFactor, direction)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_BROWSER_ZOOM, {
+      source,
+      direction,
+      zoomPercent: Math.round(next * 100)
+    })
+    const result = await window.electronAPI.browser.setZoomFactor(id, next)
+    if (result?.success && typeof result.zoomFactor === 'number') {
+      setZoomFactor(result.zoomFactor)
+      return result.zoomFactor
+    }
+    return next
+  }, [zoomFactor])
+
+  // ── Auto Refresh ──────────────────────────────────────────────────────────
+  const runAutoRefreshTick = useCallback(async () => {
+    const id = browserIdRef.current
+    if (!id) return
+    if (isLoadingRef.current) return
+    try {
+      const res = await window.electronAPI.browser.getScrollState(id)
+      if (res?.success && res.state) {
+        pendingScrollRestoreRef.current = res.state
+      }
+    } catch {
+      // Ignore scroll-capture failures; still refresh.
+    }
+    perfTrace(PERF_TRACE_EVENT.RENDERER_BROWSER_AUTO_REFRESH_TICK, {})
+    void window.electronAPI.browser.reload(id)
+  }, [])
+
+  useEffect(() => {
+    if (!isOpen || !isViewReady) return
+    if (forceHidden || !isActive) return
+    const intervalMs = clampAutoRefreshIntervalMs(autoRefreshIntervalMs)
+    if (intervalMs == null) return
+    const timer = window.setInterval(() => {
+      void runAutoRefreshTick()
+    }, intervalMs)
+    return () => window.clearInterval(timer)
+  }, [isOpen, isViewReady, forceHidden, isActive, autoRefreshIntervalMs, runAutoRefreshTick])
+
+  const autoRefreshPresetLabel = useCallback((ms: number): string => {
+    if (ms % 60_000 === 0) {
+      const minutes = ms / 60_000
+      return minutes === 1
+        ? t('browserPanel.autoRefreshMinute')
+        : t('browserPanel.autoRefreshMinutes', { n: minutes })
+    }
+    return t('browserPanel.autoRefreshSeconds', { n: Math.round(ms / 1000) })
+  }, [t])
+
+  const handleShowAutoRefreshMenu = useCallback(async () => {
+    const result = await window.electronAPI.browser.showAutoRefreshMenu({
+      currentIntervalMs: autoRefreshIntervalMs ?? null,
+      labels: {
+        off: t('browserPanel.autoRefreshOff'),
+        items: AUTO_REFRESH_PRESETS_MS.map((ms) => ({ ms, label: autoRefreshPresetLabel(ms) }))
+      }
+    })
+    if (!result) return
+    const next = clampAutoRefreshIntervalMs(result.intervalMs)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_BROWSER_AUTO_REFRESH_TOGGLE, { intervalMs: next })
+    onAutoRefreshChange?.(next)
+  }, [autoRefreshIntervalMs, autoRefreshPresetLabel, onAutoRefreshChange, t])
 
   const handleShowCookieMenu = useCallback(async () => {
     const result = await window.electronAPI.browser.showCookieMenu({
@@ -301,7 +489,61 @@ export function BrowserPanel({
     }
   }, [rememberCookies, t])
 
+  const handleCloseButton = useCallback(() => {
+    // The ✕ button fully destroys the cached view (Esc only hides it).
+    destroyOnUnmountRef.current = true
+    onClose()
+  }, [onClose])
+
+  // Autotest debug bridge (no-op in user builds). Gated on isOpen && isViewReady so ONLY the
+  // active open panel registers the singleton, and closing the panel removes it — that makes
+  // "the global is gone" a correct closed/destroyed signal for the autotest.
+  useEffect(() => {
+    if (!window.electronAPI?.debug?.autotest) return
+    if (!isOpen || !isViewReady) return
+    const debugWindow = window as Window & { __onwardBrowserPanelDebug?: BrowserPanelDebugApi }
+    debugWindow.__onwardBrowserPanelDebug = {
+      getBrowserId: () => browserIdRef.current,
+      getZoomFactor: () => zoomFactor,
+      getViewZoomFactor: async () => {
+        const id = browserIdRef.current
+        if (!id) return null
+        const res = await window.electronAPI.browser.getZoomFactor(id)
+        return res?.success && typeof res.zoomFactor === 'number' ? res.zoomFactor : null
+      },
+      stepZoom: (direction) => stepZoom(direction, 'debug'),
+      openUrl: async (nextUrl) => { await handleNavigate(nextUrl) },
+      reload: () => handleReload(),
+      closeKeepAlive: () => onClose(),
+      evaluate: async (script) => {
+        const id = browserIdRef.current
+        if (!id) return null
+        const res = await window.electronAPI.browser.evaluateForTest(id, script)
+        return res?.success ? res.value : null
+      },
+      getScrollState: async () => {
+        const id = browserIdRef.current
+        if (!id) return null
+        const res = await window.electronAPI.browser.getScrollState(id)
+        return res?.success && res.state ? res.state : null
+      },
+      setAutoRefresh: (intervalMs) => onAutoRefreshChange?.(clampAutoRefreshIntervalMs(intervalMs)),
+      triggerAutoRefreshTick: () => runAutoRefreshTick(),
+      wasDestroyed: () => wasDestroyedRef.current
+    }
+    return () => {
+      if (debugWindow.__onwardBrowserPanelDebug) {
+        delete debugWindow.__onwardBrowserPanelDebug
+      }
+    }
+  }, [isOpen, isViewReady, zoomFactor, stepZoom, handleNavigate, handleReload, onClose, onAutoRefreshChange, runAutoRefreshTick])
+
   if (!isOpen) return null
+
+  const modifierLabel = window.electronAPI.platform === 'darwin' ? '⌘' : 'Ctrl'
+  const zoomPercent = formatHtmlPreviewZoomPercent(zoomFactor)
+  const autoRefreshActive = clampAutoRefreshIntervalMs(autoRefreshIntervalMs) != null
+  const autoRefreshBadge = autoRefreshActive ? formatAutoRefreshInterval(autoRefreshIntervalMs as number) : ''
 
   return (
     <div className={`browser-panel-cell${isFullscreen ? ' fullscreen' : ''}`}>
@@ -367,6 +609,53 @@ export function BrowserPanel({
           title={title || url || ''}
         />
 
+        <div className="browser-panel-zoom-controls" aria-label={t('browserPanel.zoomControls')}>
+          <button
+            className="browser-panel-nav-btn browser-panel-zoom-btn browser-panel-zoom-out-btn"
+            onClick={() => void stepZoom('out', 'toolbar')}
+            disabled={zoomFactor <= HTML_PREVIEW_MIN_ZOOM_FACTOR}
+            title={t('browserPanel.zoomOut', { key: `${modifierLabel}+-` })}
+            aria-label={t('browserPanel.zoomOut', { key: `${modifierLabel}+-` })}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M3 7.25h10v1.5H3v-1.5Z" />
+            </svg>
+          </button>
+          <button
+            className="browser-panel-zoom-level-btn"
+            onClick={() => void stepZoom('reset', 'toolbar')}
+            title={t('browserPanel.zoomReset', { key: `${modifierLabel}+0` })}
+            aria-label={t('browserPanel.zoomLevel', { percent: zoomPercent })}
+          >
+            {zoomPercent}
+          </button>
+          <button
+            className="browser-panel-nav-btn browser-panel-zoom-btn browser-panel-zoom-in-btn"
+            onClick={() => void stepZoom('in', 'toolbar')}
+            disabled={zoomFactor >= HTML_PREVIEW_MAX_ZOOM_FACTOR}
+            title={t('browserPanel.zoomIn', { key: `${modifierLabel}++` })}
+            aria-label={t('browserPanel.zoomIn', { key: `${modifierLabel}++` })}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M7.25 3h1.5v4.25H13v1.5H8.75V13h-1.5V8.75H3v-1.5h4.25V3Z" />
+            </svg>
+          </button>
+        </div>
+
+        <button
+          className={`browser-panel-nav-btn browser-panel-auto-refresh-btn${autoRefreshActive ? ' active' : ''}`}
+          onClick={handleShowAutoRefreshMenu}
+          title={t('browserPanel.autoRefresh')}
+          aria-label={t('browserPanel.autoRefresh')}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.428A6 6 0 1 1 8 2v1z" />
+            <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z" />
+            <path d="M8.5 5.5a.5.5 0 0 0-1 0v3a.5.5 0 0 0 .252.434l2 1.2a.5.5 0 1 0 .496-.868L8.5 8.234V5.5z" />
+          </svg>
+          {autoRefreshActive && <span className="browser-panel-auto-refresh-badge">{autoRefreshBadge}</span>}
+        </button>
+
         <button
           className="browser-panel-nav-btn"
           onClick={handleShowCookieMenu}
@@ -378,7 +667,7 @@ export function BrowserPanel({
           </svg>
         </button>
 
-        <button className="browser-panel-nav-btn close-btn" onClick={onClose} title={t('browserPanel.close')}>
+        <button className="browser-panel-nav-btn close-btn" onClick={handleCloseButton} title={t('browserPanel.close')}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
             <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z" />
           </svg>

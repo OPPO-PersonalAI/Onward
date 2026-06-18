@@ -115,3 +115,52 @@
   display: none;
 }
 
+/* ───────── Zoom controls ───────── */
+.browser-panel-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.browser-panel-zoom-level-btn {
+  min-width: 40px;
+  height: 24px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-family: inherit;
+}
+
+.browser-panel-zoom-level-btn:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text-1);
+}
+
+/* ───────── Auto Refresh (native menu trigger) ───────── */
+.browser-panel-auto-refresh-btn {
+  width: auto;
+  min-width: 24px;
+  gap: 4px;
+  padding: 0 6px;
+}
+
+.browser-panel-auto-refresh-btn.active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+.browser-panel-auto-refresh-badge {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
