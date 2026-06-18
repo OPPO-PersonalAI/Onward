@@ -46,6 +46,7 @@ export const IPC = {
   BROWSER_SET_REMEMBER_COOKIES: 'browser:set-remember-cookies',
   BROWSER_SET_ZOOM_FACTOR: 'browser:set-zoom-factor',
   BROWSER_SHOW: 'browser:show',
+  BROWSER_SHOW_AUTO_REFRESH_MENU: 'browser:show-auto-refresh-menu',
   BROWSER_SHOW_COOKIE_MENU: 'browser:show-cookie-menu',
   BROWSER_STOP: 'browser:stop',
   BROWSER_STOP_FIND_IN_PAGE: 'browser:stop-find-in-page',

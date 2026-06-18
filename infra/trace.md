@@ -393,6 +393,9 @@ Routed onto per-Task virtual tid (`task-<shortId>` on main, `-rnd` suffix on ren
 | `RENDERER_TERMINAL_DATA_SCHEDULER_ENQUEUE` | `renderer:terminal-data.scheduler-enqueue` | `i` | Slow-path branch — bytes entered the per-task queue |
 | `RENDERER_TERMINAL_DATA_SCHEDULER_FLUSH` | `renderer:terminal-data.scheduler-flush` | `X` (has `durationMs`) | `src/terminal/terminal-output-scheduler.ts::flush` — aggregate slice (no terminalId) + per-Task slice (with bytes consumed) |
 | `RENDERER_TERMINAL_DATA_XTERM_WRITE` | `renderer:terminal-data.xterm-write` | `X` (has `durationMs`) | `src/terminal/terminal-session-manager.ts::writeTerminalData` — actual `session.terminal.write()` cost |
+| `MAIN_BROWSER_ZOOM_CHANGED` | `main:browser.zoom-changed` | `i` | `electron/main/browser-view-manager.ts` — Open Browser Ctrl/Cmd+wheel (and macOS pinch) zoom. Fires inside the `zoom-changed` handler after re-clamping to the 50–200%/10% ladder. Tags `direction`, `zoomPercent`. |
+| `MAIN_BROWSER_LOCAL_FILE_RESOLVE` | `main:browser.local-file-resolve` | `i` | `electron/main/browser-view-manager.ts::normalizeUrl` — a typed address-bar path/host was resolved to a local `file://` URL. Breadcrumb for "did my local file open?". Tags `inputLen` only (no path content). |
+| `MAIN_BROWSER_URL_REJECTED` | `main:browser.url-rejected` | `i` | `electron/main/browser-view-manager.ts` — `will-navigate` blocked a URL via `isAllowedUrlForInfo`. Tags `protocol`, `allowFile`, `allowAnyFile`. Off-hot-path (not the per-subresource `onBeforeRequest`). |
 
 ### 2.2 Worker threads (pid=1, dedicated tid lane per worker)
 
@@ -552,6 +555,12 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_PROJECT_HTML_PREVIEW_RELOAD` | `renderer:project.html-preview-reload` | `i` | `ProjectEditor.tsx::requestHtmlPreviewReload` — fires when an HTML preview is forced to remount after save, external file change, or manual refresh. Payload tags `reason`, `pathLen`, `reloadKey`, and preserved scroll Y; no file content is recorded. |
 | `RENDERER_PROJECT_HTML_PREVIEW_SEARCH` | `renderer:project.html-preview-search` | `i` | `ProjectEditor.tsx::runHtmlPreviewSearch` — fires when the HTML preview search query or next/previous navigation is sent to the WebContents. Payload tags query length and navigation direction only; no search text is recorded. |
 | `RENDERER_PROJECT_HTML_PREVIEW_ZOOM` | `renderer:project.html-preview-zoom` | `i` | `ProjectEditor.tsx::setHtmlPreviewZoomFactorState` — fires when the HTML Preview zoom factor changes through toolbar, renderer shortcut, WebContents shortcut, restore, or debug path. Payload tags `source`, zoom percent, and active path length only. |
+| `RENDERER_BROWSER_ZOOM` | `renderer:browser.zoom` | `i` | `BrowserPanel.tsx::stepZoom` — Open Browser toolbar/debug zoom step. Tags `source`, `direction`, `zoomPercent`. |
+| `RENDERER_BROWSER_CACHE_HIDE` | `renderer:browser.cache-hide` | `i` | `BrowserPanel.tsx` unmount cleanup — Esc/toggle exit hid and KEPT the view cached (path memory). No payload. |
+| `RENDERER_BROWSER_REATTACH` | `renderer:browser.reattach` | `i` | `BrowserPanel.tsx` mount — reattached a cached view on reopen. Tags `urlLen`. |
+| `RENDERER_BROWSER_DESTROY` | `renderer:browser.destroy` | `i` | `BrowserPanel.tsx` unmount cleanup — the ✕ button fully destroyed the view. No payload. |
+| `RENDERER_BROWSER_AUTO_REFRESH_TOGGLE` | `renderer:browser.auto-refresh-toggle` | `i` | `BrowserPanel.tsx::handleShowAutoRefreshMenu` — auto-refresh interval changed via the native preset menu. Tags `intervalMs` (null = off). |
+| `RENDERER_BROWSER_AUTO_REFRESH_TICK` | `renderer:browser.auto-refresh-tick` | `i` | `BrowserPanel.tsx::runAutoRefreshTick` — one auto reload (≥5s cadence); captures scroll then reloads. No payload. |
 | `RENDERER_PROJECT_FILE_BROWSER_COLLAPSE` | `renderer:project.file-browser-collapse` | `i` | `ProjectEditor.tsx::setFileBrowserCollapsedState` — fires when the left File Browser sidebar is collapsed or expanded. Payload tags collapsed state, source, sidebar mode, and prior width. |
 | `RENDERER_PROJECT_EDITOR_REOPEN_RESTORE` | `renderer:project.editor-reopen-restore` | `X` | `ProjectEditor.tsx` close/reopen restore path — duration from Project Editor reopening to either retained-view reuse or persisted-state restore completion. Payload: `cause`, `durationMs`, `filePathLen`, `markdownCacheMode`. |
 | `RENDERER_PROJECT_SUBPAGE_NAVIGATE` | `renderer:project.subpage-navigate` | `i` | Two sites in `ProjectEditor.tsx` dispatching `subpage:navigate` for diff / history |

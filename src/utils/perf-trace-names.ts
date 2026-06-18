@@ -243,6 +243,19 @@ export const PERF_TRACE_EVENT = {
   RENDERER_PROJECT_SUBPAGE_NAVIGATE: 'renderer:project.subpage-navigate',
   RENDERER_PROJECT_SEARCH_GLOBAL: 'renderer:project.search.global',
 
+  // ───────── Open Browser (address-bar in-app browser) ─────────
+  // Renderer-side BrowserPanel toolbar actions + view lifecycle.
+  RENDERER_BROWSER_ZOOM: 'renderer:browser.zoom',
+  RENDERER_BROWSER_CACHE_HIDE: 'renderer:browser.cache-hide',
+  RENDERER_BROWSER_REATTACH: 'renderer:browser.reattach',
+  RENDERER_BROWSER_DESTROY: 'renderer:browser.destroy',
+  RENDERER_BROWSER_AUTO_REFRESH_TOGGLE: 'renderer:browser.auto-refresh-toggle',
+  RENDERER_BROWSER_AUTO_REFRESH_TICK: 'renderer:browser.auto-refresh-tick',
+  // Main-process breadcrumbs for the WebContentsView backend.
+  MAIN_BROWSER_ZOOM_CHANGED: 'main:browser.zoom-changed',
+  MAIN_BROWSER_LOCAL_FILE_RESOLVE: 'main:browser.local-file-resolve',
+  MAIN_BROWSER_URL_REJECTED: 'main:browser.url-rejected',
+
   // ───────── Renderer — IPC bridge latency (end-to-end) ─────────
   // Wrap `window.electronAPI.*` hot-path calls with a `ph:'X'` span so
   // renderer→main→renderer round trips show up on the renderer thread

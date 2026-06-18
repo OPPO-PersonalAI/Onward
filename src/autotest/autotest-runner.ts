@@ -54,6 +54,7 @@ import { testPdfEpubPreview } from './test-pdf-epub-preview'
 import { testPdfEpubDiff } from './test-pdf-epub-diff'
 import { testProjectEditorMarkdownNavigation } from './test-project-editor-markdown-navigation'
 import { testProjectEditorHtmlPreview } from './test-project-editor-html-preview'
+import { testOpenBrowser } from './test-open-browser'
 import { testGlobalSearch } from './test-global-search'
 import { testFileIndexCacheUi } from './test-file-index-cache-ui'
 import { testSettingsUpdate } from './test-settings-update'
@@ -367,6 +368,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.852:begin')
       const results = await testProjectEditorHtmlPreview(ctx)
       collectSuiteResults('ProjectEditorHtmlPreview', results)
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('open-browser')) {
+      log('phase0.853:begin')
+      const results = await testOpenBrowser(ctx)
+      collectSuiteResults('OpenBrowser', results)
       await sleep(500)
     }
 

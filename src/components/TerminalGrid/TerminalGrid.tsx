@@ -370,6 +370,11 @@ export const TerminalGrid = memo(function TerminalGrid({
   })
   const [browserOpenTerminals, setBrowserOpenTerminals] = useState<Set<string>>(new Set())
   const [lastBrowserUrls, setLastBrowserUrls] = useState<Record<string, string>>({})
+  // Per-terminal Auto Refresh interval in ms (null = off; in-session, survives Esc keep-alive).
+  const [browserAutoRefresh, setBrowserAutoRefresh] = useState<Record<string, number | null>>({})
+  // Terminals that have ever opened a browser, so the removal cleanup can destroy the
+  // cached WebContentsView even after an Esc exit (which keeps the view alive in the main process).
+  const browserEverOpenedRef = useRef<Set<string>>(new Set())
   const [isSubpageSwitching, setIsSubpageSwitching] = useState(false)
 
   // Terminal context menu state
@@ -815,6 +820,18 @@ export const TerminalGrid = memo(function TerminalGrid({
   useEffect(() => {
     const validTerminalIds = new Set(terminals.map(term => term.id))
 
+    // Leak guard: destroy the cached WebContentsView for any terminal that was removed.
+    // Esc keep-alive leaves the view alive in the main process, so closing/removing the
+    // terminal is the only place that must explicitly tear it down.
+    for (const id of [...browserEverOpenedRef.current]) {
+      if (!validTerminalIds.has(id)) {
+        browserEverOpenedRef.current.delete(id)
+        window.electronAPI.browser.destroy(`browser-${id}`).catch(() => {
+          // Ignore destroy races for an already-gone view.
+        })
+      }
+    }
+
     setBrowserOpenTerminals(prev => {
       const next = new Set<string>()
       prev.forEach(id => {
@@ -830,6 +847,13 @@ export const TerminalGrid = memo(function TerminalGrid({
         Object.entries(prev).filter(([terminalId]) => validTerminalIds.has(terminalId))
       )
       return next
+    })
+
+    setBrowserAutoRefresh(prev => {
+      const next = Object.fromEntries(
+        Object.entries(prev).filter(([terminalId]) => validTerminalIds.has(terminalId))
+      )
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next
     })
   }, [terminals])
 
@@ -1754,6 +1778,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   }, [setTerminalStatus])
 
   const handleOpenBrowser = useCallback((terminalId: string, initialUrl?: string | null) => {
+    browserEverOpenedRef.current.add(terminalId)
     if (typeof initialUrl === 'string' && initialUrl.trim()) {
       setLastBrowserUrls(prev => ({ ...prev, [terminalId]: initialUrl.trim() }))
     }
@@ -1781,10 +1806,15 @@ export const TerminalGrid = memo(function TerminalGrid({
       if (next.has(terminalId)) {
         next.delete(terminalId)
       } else {
+        browserEverOpenedRef.current.add(terminalId)
         next.add(terminalId)
       }
       return next
     })
+  }, [])
+
+  const handleBrowserAutoRefreshChange = useCallback((terminalId: string, intervalMs: number | null) => {
+    setBrowserAutoRefresh(prev => ({ ...prev, [terminalId]: intervalMs }))
   }, [])
 
   useEffect(() => {
@@ -2919,6 +2949,8 @@ export const TerminalGrid = memo(function TerminalGrid({
                   }}
                   forceHidden={hidden || globalOverlayActive}
                   isActive={activeTerminalId === termInfo.id}
+                  autoRefreshIntervalMs={browserAutoRefresh[termInfo.id] ?? null}
+                  onAutoRefreshChange={(intervalMs) => handleBrowserAutoRefreshChange(termInfo.id, intervalMs)}
                 />
                 {showTerminalOverlay && (
                   <div

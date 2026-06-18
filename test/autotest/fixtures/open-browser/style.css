@@ -1,0 +1,10 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+body { margin: 0; }
+/* Distinct color so the autotest can prove the sibling file:// stylesheet loaded. */
+#ob-sentinel { color: rgb(0, 128, 255); font-size: 20px; }
+/* Tall block so the page is scrollable for the auto-refresh scroll-restore assertion. */
+.ob-tall { height: 3000px; }
