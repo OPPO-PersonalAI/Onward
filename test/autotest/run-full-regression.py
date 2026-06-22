@@ -497,6 +497,151 @@ def force_kill_tree(proc: "subprocess.Popen") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Environment pre-flight — fail fast when the installed node_modules has
+# drifted from the committed dependency spec.
+#
+# This is the structural form of the skill's self-heal "install incomplete"
+# rows: instead of discovering a stale / unpatched dependency 30 minutes into a
+# build+run cycle (a red WebGL-atlas assertion, or a runner that can't resolve
+# the Electron binary at runtime), assert the two highest-signal invariants up
+# front and abort in ~1 second with an actionable fix.
+#
+# Scope is deliberately honest: this catches THIS class of drift — the Electron
+# binary and the @xterm/addon-webgl global-monotonic patch — NOT every possible
+# dependency-integrity problem. Add a new (name, fn) row to `preflight_env_check`
+# when a future "the install must look like X" signal is discovered.
+#
+# Cross-platform by construction: pure pathlib + byte search, no shell, no
+# platform branch. Runs identically under `py` on Windows and `python3` on
+# macOS / Linux, so Windows gets the same fast-fail with zero extra wiring.
+# ---------------------------------------------------------------------------
+
+# Sentinel emitted by the global-monotonic AtlasPage version backport
+# (PR #5883) that the @xterm/addon-webgl patch applies: every page version is
+# drawn from a single ever-increasing counter via `constructor._nv`. The
+# UNPATCHED 0.18.0 bundle contains zero occurrences; the patched bundle has
+# several. If the addon is version-bumped and the patch's mechanism changes,
+# update this token to whatever marker the new patch introduces.
+WEBGL_PATCH_SENTINEL = b"_nv"
+
+
+def _check_electron_binary(repo_root: Path) -> Optional[str]:
+    """Failure detail, or None when the Electron binary is present.
+
+    `electron`'s postinstall writes path.txt (the relative path to the platform
+    binary inside dist/) and downloads dist/. pnpm's default "ignored build
+    scripts" can skip that download, leaving require('electron') unresolvable —
+    which silently breaks any runner that resolves the binary at runtime.
+    Platform-neutral: path.txt content differs per OS (Electron.app/… vs
+    electron.exe vs electron) but the "referenced file exists" check is identical.
+    """
+    electron_dir = repo_root / "node_modules" / "electron"
+    if not electron_dir.is_dir():
+        return "node_modules/electron is absent (dependencies not installed)"
+    path_txt = electron_dir / "path.txt"
+    if not path_txt.is_file():
+        return "node_modules/electron/path.txt is missing (electron postinstall did not run)"
+    try:
+        rel = path_txt.read_text(encoding="utf-8").strip()
+    except OSError as e:  # noqa: BLE001
+        return f"could not read node_modules/electron/path.txt: {e}"
+    if not rel:
+        return "node_modules/electron/path.txt is empty"
+    binary = electron_dir / "dist" / rel
+    if not binary.exists():
+        return f"electron binary missing at node_modules/electron/dist/{rel} (postinstall download skipped)"
+    return None
+
+
+def _check_webgl_patch(repo_root: Path) -> Optional[str]:
+    """Failure detail, or None when the addon-webgl patch is applied.
+
+    Only enforced while package.json still declares the @xterm/addon-webgl patch
+    under pnpm.patchedDependencies — removing the patch from the spec therefore
+    retires this invariant automatically, leaving no stale check behind.
+    """
+    pkg = repo_root / "package.json"
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None  # cannot read the spec — do not block on a parse error here
+    patched = (data.get("pnpm") or {}).get("patchedDependencies") or {}
+    if not any(k.startswith("@xterm/addon-webgl@") for k in patched):
+        return None  # spec no longer patches the addon — invariant retired
+    bundle = repo_root / "node_modules" / "@xterm" / "addon-webgl" / "lib" / "addon-webgl.js"
+    if not bundle.is_file():
+        return "node_modules/@xterm/addon-webgl/lib/addon-webgl.js is missing (dependency not installed)"
+    try:
+        blob = bundle.read_bytes()
+    except OSError as e:  # noqa: BLE001
+        return f"could not read the addon-webgl bundle: {e}"
+    if WEBGL_PATCH_SENTINEL not in blob:
+        return (
+            "addon-webgl bundle is UNPATCHED — the global-monotonic atlas "
+            "page-version fix is absent (this ships WebGL terminal corruption "
+            "under multi-task render load)"
+        )
+    return None
+
+
+def _check_native_modules(repo_root: Path) -> Optional[str]:
+    """Failure detail, or None when the app's compiled native module is present.
+
+    The project's own postinstall (`electron-rebuild -w node-pty,better-sqlite3`)
+    rebuilds these against Electron's ABI. If that postinstall was interrupted —
+    or never ran because an earlier dependency build aborted the install — the
+    .node is absent and every SQLite suite fails at runtime with a module-load
+    error. better_sqlite3's output path (build/Release/) is stable across
+    platforms, so a presence check is platform-neutral. Only enforced when
+    better-sqlite3 is actually installed (else the project no longer uses it).
+    """
+    installed = list(repo_root.glob("node_modules/.pnpm/better-sqlite3@*"))
+    if not installed:
+        return None  # dependency absent from this tree — nothing to assert
+    built = list(repo_root.glob(
+        "node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    ))
+    if not built:
+        return (
+            "better_sqlite3.node is missing — the project postinstall "
+            "(electron-rebuild) did not produce the Electron-ABI native module "
+            "(SQLite suites will fail at runtime with a module-load error)"
+        )
+    return None
+
+
+def preflight_env_check(emit) -> bool:
+    """Assert the installed node_modules matches the committed dependency spec.
+
+    Returns True when healthy. On failure, emits an actionable report and
+    returns False so the caller can abort before the expensive build+run cycle.
+    """
+    invariants = [
+        ("Electron binary installed", _check_electron_binary),
+        ("WebGL addon-webgl patch applied", _check_webgl_patch),
+        ("App native module built", _check_native_modules),
+    ]
+    failures: List["tuple[str, str]"] = []
+    for name, fn in invariants:
+        detail = fn(REPO_ROOT)
+        if detail:
+            failures.append((name, detail))
+    if not failures:
+        return True
+    emit("ERROR: environment pre-flight failed — node_modules has drifted from the committed dependency spec.")
+    for name, detail in failures:
+        emit(f"  ✗ {name}: {detail}")
+    emit("")
+    emit("  Fix (reconcile node_modules to the spec, then re-run):")
+    emit("    pnpm install                              # applies pnpm.patchedDependencies")
+    emit("    node node_modules/electron/install.js     # if the Electron binary is missing")
+    emit("")
+    emit("  Bypass (only after a deliberate version bump that changed a sentinel):")
+    emit("    --skip-env-check   (or set ONWARD_SKIP_ENV_PREFLIGHT=1)")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Optional pre-build
 # ---------------------------------------------------------------------------
 
@@ -844,6 +989,13 @@ def main() -> int:
         help="Print the planned script list (post-filter) and exit.",
     )
     parser.add_argument(
+        "--skip-env-check", action="store_true",
+        help=(
+            "Skip the node_modules-vs-spec pre-flight. Use only after a "
+            "deliberate version bump that changed a checked sentinel."
+        ),
+    )
+    parser.add_argument(
         "--include-update-e2e", action="store_true",
         help=(
             "Include the update-channel E2E suites (UPDATE_E2E_SCRIPTS) in the "
@@ -869,6 +1021,20 @@ def main() -> int:
     if args.repeat < 1:
         sys.stderr.write("ERROR: --repeat must be >= 1.\n")
         return 2
+
+    # Environment pre-flight: abort in ~1s if node_modules drifted from the
+    # committed spec, instead of failing 30 min into a build+run cycle. Skipped
+    # for --list (pure inspection) and when explicitly bypassed. Runs once here
+    # for both the single-run and --repeat paths (the latter spawns children
+    # that would re-check anyway, but failing before any spawn is cheaper).
+    if (
+        not args.list
+        and not args.skip_env_check
+        and os.environ.get("ONWARD_SKIP_ENV_PREFLIGHT") != "1"
+    ):
+        if not preflight_env_check(lambda m: print(m, flush=True)):
+            return 3
+
     if args.repeat > 1:
         return run_repeated(args)
 

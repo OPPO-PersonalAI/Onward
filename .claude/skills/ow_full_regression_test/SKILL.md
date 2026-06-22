@@ -56,6 +56,27 @@ failure — leave it for the user / repair mode. The goal of this
 section is narrow and literal: get every test case to *execute*
 (pass, fail, or legitimately skip), not to make any case pass.
 
+### Pre-flight env check (fail fast, before the build)
+
+`run-full-regression.py` runs a cross-platform **environment pre-flight**
+before `--build` (and before the runner list on a no-build run). It asserts
+the installed `node_modules` matches the committed dependency spec for the
+highest-signal drift classes — the **Electron binary** (`path.txt` + the
+referenced `dist/` binary present), the **`@xterm/addon-webgl` patch**
+(the global-monotonic `_nv` sentinel present, enforced only while
+`package.json` still declares that patch), and the **app native module**
+(`better_sqlite3.node` present, i.e. the project's `electron-rebuild`
+postinstall actually ran). On drift it aborts in ~1 s
+(exit 3) with the exact remedy (`pnpm install`,
+`node node_modules/electron/install.js`) instead of failing 30 min into a
+build+run cycle as a red WebGL-atlas assertion or a runner that can't resolve
+Electron. It is pure `pathlib` + byte-search in the Python orchestrator, so it
+runs identically under `py` on Windows and `python3` on macOS/Linux. Bypass
+with `--skip-env-check` (or `ONWARD_SKIP_ENV_PREFLIGHT=1`) only after a
+deliberate version bump that changed a sentinel; `--list` skips it. This is a
+structural front-stop for the same drift the *Heal-and-retry loop* below
+heals — the loop still applies to anything the pre-flight does not cover.
+
 ### Heal-and-retry loop
 
 When a run-bearing step fails for an environment reason:

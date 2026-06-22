@@ -528,18 +528,24 @@ export async function testProjectEditorSqlite(ctx: AutotestContext): Promise<Tes
     )
     if (!folderMenuReady || cancelled()) return results
 
-    if (!findTreeItemByPath(stressFixturePath)) {
-      getApi()?.clickLocateFileButton?.()
-    }
     const stressFileInTreeReady = await waitFor(
       'sqlite-tree-stress-file-visible',
       () => {
-        const bounds = getApi()?.getFileBrowserActiveRowBounds?.()
-        return Boolean(
-          findTreeItemByPath(stressFixturePath) &&
-          bounds?.found &&
-          Math.abs(bounds.centerOffsetRatio) <= 0.6
-        )
+        // The file context menu opens via a synthetic event on the row's DOM
+        // node, which only requires the row to be RENDERED in the virtualized
+        // tree — NOT scrolled to any particular (e.g. centered) offset. So gate
+        // only on the row existing in the DOM, and re-trigger locate each poll
+        // so a missed/interrupted first scroll self-heals instead of
+        // dead-waiting the full timeout. The previous gate also required
+        // bounds.found && |centerOffsetRatio| <= 0.6 (a scroll-settle race on
+        // the ACTIVE row, not necessarily this file's row), which made the
+        // assertion flaky under cold-cache first runs even though the menu —
+        // the actual thing under test — opened fine regardless of scroll.
+        if (findTreeItemByPath(stressFixturePath)) {
+          return true
+        }
+        getApi()?.clickLocateFileButton?.()
+        return false
       },
       8000
     )
