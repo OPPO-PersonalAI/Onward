@@ -37,6 +37,16 @@ export async function testGitCrossPlatform(ctx: AutotestContext): Promise<TestRe
   const getHistoryApi = () => window.__onwardGitHistoryDebug
   const getDiffApi = () => window.__onwardGitDiffDebug
   let persistedSplitRatio: number | null = null
+  let originalSplitViewMode: 'auto' | 'split' | 'inline' | null = null
+  // The path of the file XP-09b selected to drive the split editor. XP-09c must
+  // re-select it after reopen: closing the diff intentionally clears the per-repo
+  // selection memory (GitDiffViewer clearCurrentMemorySelection on isOpen->false),
+  // so a fresh reopen leaves selectedFile === null and the Monaco diff editor never
+  // mounts — without a mounted editor there is no live pane to measure the restored
+  // split ratio against. The persisted ratio itself survives in localStorage / UI
+  // prefs and is re-applied via splitViewDefaultRatio when the editor remounts on
+  // re-selection, exactly as a real user reopening + clicking the file would see.
+  let persistedSplitSelectionPath: string | null = null
 
   // ================================================================
   // Section 1: CWD & Path Resolution
@@ -242,17 +252,79 @@ export async function testGitCrossPlatform(ctx: AutotestContext): Promise<TestRe
 
   // XP-09b: Git Diff split view ratio can be changed away from the default
   if (!cancelled()) {
-    const ready = await waitFor('XP-09b-diff-selected-ready', () => {
+    // The Git Diff viewer does NOT auto-select the first file on a fresh open —
+    // selection is only restored from per-repo memory (see
+    // resolveGitDiffRestoredSelection); with no prior selection it leaves
+    // selectedFile === null, so isSelectedReady() would never become true here.
+    // Explicitly select the first text file (isSelectedReady() requires a
+    // non-binary, non-image/pdf/epub file: it asserts !state.isBinary), mirroring
+    // a real user clicking a file, then wait for its content to load.
+    await waitFor('XP-09b-diff-list-loaded', () => {
+      const a = getDiffApi()
+      return Boolean(a?.isOpen() && (a.getFileList?.()?.length ?? 0) > 0)
+    }, LOAD_TIMEOUT_MS)
+    const fileList = getDiffApi()?.getFileList?.() ?? []
+    const textFile = fileList.find((file) =>
+      !file.isImage && !file.isPdf && !file.isEpub && !file.isSubmoduleEntry
+    )
+    if (textFile) {
+      getDiffApi()?.selectFileByPath?.(textFile.filename)
+      // Remember which file drives the split editor so XP-09c can re-select it
+      // after reopen (selection memory is cleared on close — see the note at the
+      // persistedSplitSelectionPath declaration).
+      persistedSplitSelectionPath = textFile.filename
+    }
+    const ready = textFile ? await waitFor('XP-09b-diff-selected-ready', () => {
       const a = getDiffApi()
       return Boolean(a?.isOpen() && a.isSelectedReady?.())
-    }, LOAD_TIMEOUT_MS)
+    }, LOAD_TIMEOUT_MS) : false
+    // The autotest window's diff-editor container is narrow (file list + editor
+    // share the width, leaving the editor well under DIFF_INLINE_BREAKPOINT=900px).
+    // With the default 'auto' split mode, Monaco auto-collapses to inline view
+    // (useInlineViewWhenSpaceIsLimited), so getDiffLayoutMode() reports 'inline',
+    // measureDiffSplitState() returns ratio:null, and dragDiffSplitRatio() bails
+    // (mode !== 'side-by-side') with applied:false. Force the explicit 'split' mode
+    // — exactly what a real user does via the Split toggle — which sets
+    // renderSideBySide:true and disables the inline breakpoint, guaranteeing a
+    // draggable side-by-side sash regardless of container width.
+    let splitModeForced = false
+    if (ready) {
+      const a = getDiffApi()
+      // Remember the user's current split mode so we can restore it after XP-09c
+      // (forcing 'split' persists to localStorage; we must not leave the user's
+      // diff preference permanently flipped by the test).
+      originalSplitViewMode = a?.getSplitViewMode?.() ?? originalSplitViewMode
+      splitModeForced = Boolean(a?.setSplitViewMode?.('split'))
+      if (splitModeForced) {
+        await waitFor('XP-09b-diff-side-by-side', () => {
+          const api2 = getDiffApi()
+          return api2?.getResponsiveLayoutState?.()?.mode === 'side-by-side'
+        }, QUICK_TIMEOUT_MS)
+      }
+    }
     const api = getDiffApi()
-    if (ready && api?.dragSplitViewRatio && api.getSplitViewState) {
+    const layoutMode = api?.getResponsiveLayoutState?.()?.mode ?? null
+    if (ready && layoutMode === 'side-by-side' && api?.setSplitViewRatio && api.getSplitViewState) {
       const currentRatio = api.getSplitViewState()?.ratio ?? 0.5
       const targetRatio = currentRatio >= 0.5 ? 0.38 : 0.62
       const beforeRatio = currentRatio
       await sleep(120)
-      const applied = await api.dragSplitViewRatio(targetRatio)
+      // Drive the split ratio through the dedicated setSplitViewRatio API rather
+      // than a synthetic Monaco sash drag. The sash is only a few px wide and the
+      // autotest window's diff editor is narrow, so a dispatched mouse-drag is
+      // inherently fragile (hit-testing, pointer capture) and non-deterministic
+      // under EDR scheduling jitter. setSplitViewRatio persists the ratio
+      // (localStorage + UI prefs via persistDiffSplitRatio) AND applies it to the
+      // live editor (updateOptions splitViewDefaultRatio) — exactly the path the
+      // user's Split toggle + drag commits, and exactly what XP-09c restores from.
+      const applied = Boolean(api.setSplitViewRatio(targetRatio))
+      // Monaco applies splitViewDefaultRatio on its next layout pass; poll the
+      // measured pane ratio until it converges near the target instead of reading
+      // a single pre-layout sample.
+      await waitFor('XP-09b-diff-ratio-applied', () => {
+        const measured = getDiffApi()?.getSplitViewState?.()?.ratio ?? null
+        return measured !== null && Math.abs(measured - targetRatio) <= 0.08
+      }, QUICK_TIMEOUT_MS)
       const splitState = getDiffApi()?.getSplitViewState?.() ?? null
       const afterRatio = splitState?.ratio ?? null
       const storedRatioRaw = window.localStorage.getItem(DIFF_SPLIT_STORAGE_KEY)
@@ -278,17 +350,31 @@ export async function testGitCrossPlatform(ctx: AutotestContext): Promise<TestRe
         actualRatio: splitState?.ratio ?? null,
         originalWidth: splitState?.originalWidth ?? null,
         modifiedWidth: splitState?.modifiedWidth ?? null,
+        splitModeForced,
+        layoutMode,
         tolerance: splitRatioTolerance,
         platform
       })
-    } else if ((api?.getFileList()?.length ?? 0) === 0) {
+    } else if ((api?.getFileList()?.length ?? 0) === 0 || !textFile) {
+      // No diff files at all, or no non-binary text file to drive the split editor —
+      // the split-view ratio surface has nothing to render, so skip rather than fail.
       _assert('XP-09b-diff-split-ratio-applies', true, {
         skipped: true,
-        reason: 'no diff files to render split editor',
+        reason: !textFile ? 'no text file to render split editor' : 'no diff files to render split editor',
+        fileCount: api?.getFileList()?.length ?? 0,
         platform
       })
     } else {
-      results.push({ name: 'XP-09b-diff-split-ratio-applies', ok: false, detail: { reason: 'diff editor not ready' } })
+      _assert('XP-09b-diff-split-ratio-applies', false, {
+        reason: 'diff editor not ready or not side-by-side',
+        ready,
+        splitModeForced,
+        layoutMode,
+        hasSetRatioApi: Boolean(api?.setSplitViewRatio),
+        hasSplitStateApi: Boolean(api?.getSplitViewState),
+        responsiveLayout: api?.getResponsiveLayoutState?.() ?? null,
+        platform
+      })
     }
   }
 
@@ -310,10 +396,46 @@ export async function testGitCrossPlatform(ctx: AutotestContext): Promise<TestRe
         }, 4000)
         const reopened = closed ? await (async () => {
           window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId, source: 'debug' } }))
-          return waitFor('XP-09c-diff-reopen', () => {
+          // Wait for the reopened diff to finish loading its file list. We do NOT
+          // wait on isSelectedReady() here: closing cleared the selection memory,
+          // so the reopened viewer auto-selects nothing (selectedFile === null)
+          // and isSelectedReady() would never resolve. Reopen success is "the
+          // panel is open and the diff result has loaded".
+          const loaded = await waitFor('XP-09c-diff-reopen', () => {
             const a = getDiffApi()
-            return Boolean(a?.isOpen() && a.getTiming().diffLoadedAt !== null && a.isSelectedReady?.())
+            return Boolean(
+              a?.isOpen() &&
+              a.getTiming().diffLoadedAt !== null &&
+              (a.getFileList?.()?.length ?? 0) > 0
+            )
           }, LOAD_TIMEOUT_MS)
+          if (!loaded) return false
+          // Re-select the same file XP-09b drove the split editor with (mirrors a
+          // user clicking the file again after reopen). This remounts the Monaco
+          // diff editor, which applies the persisted splitViewDefaultRatio from
+          // localStorage / UI prefs — the value XP-09c is here to verify.
+          if (persistedSplitSelectionPath) {
+            getDiffApi()?.selectFileByPath?.(persistedSplitSelectionPath)
+          }
+          // Ensure the forced 'split' mode is still in effect so the editor renders
+          // side-by-side (XP-09b forced it; a fresh load may re-evaluate the
+          // responsive layout). getSplitViewState only measures a side-by-side pane.
+          getDiffApi()?.setSplitViewMode?.('split')
+          const ready = await waitFor('XP-09c-diff-reselect-ready', () => {
+            const a = getDiffApi()
+            return Boolean(a?.isOpen() && a.isSelectedReady?.())
+          }, LOAD_TIMEOUT_MS)
+          if (!ready) return false
+          // The restored ratio is applied on the editor's next layout pass; poll
+          // until the measured pane ratio converges near the persisted value
+          // instead of reading a single pre-layout sample.
+          await waitFor('XP-09c-diff-ratio-restored', () => {
+            const measured = getDiffApi()?.getSplitViewState?.()?.ratio ?? null
+            return measured !== null &&
+              persistedSplitRatio !== null &&
+              Math.abs(measured - persistedSplitRatio) <= splitRatioTolerance
+          }, QUICK_TIMEOUT_MS)
+          return true
         })() : false
         const splitState = getDiffApi()?.getSplitViewState?.() ?? null
         const restoredRatio = splitState?.ratio ?? null
@@ -324,8 +446,11 @@ export async function testGitCrossPlatform(ctx: AutotestContext): Promise<TestRe
         _assert('XP-09c-diff-split-ratio-restored', restored, {
           closed,
           reopened,
+          reselectedPath: persistedSplitSelectionPath,
           expectedRatio: persistedSplitRatio,
           restoredRatio,
+          layoutMode: getDiffApi()?.getResponsiveLayoutState?.()?.mode ?? null,
+          selectedReady: getDiffApi()?.isSelectedReady?.() ?? false,
           originalWidth: splitState?.originalWidth ?? null,
           modifiedWidth: splitState?.modifiedWidth ?? null,
           tolerance: splitRatioTolerance,
@@ -334,6 +459,11 @@ export async function testGitCrossPlatform(ctx: AutotestContext): Promise<TestRe
       } else {
         results.push({ name: 'XP-09c-diff-split-ratio-restored', ok: false, detail: { reason: 'not open' } })
       }
+    }
+    // Restore the user's original split-view mode so the test does not leave the
+    // real app's diff preference permanently flipped to forced 'split'.
+    if (originalSplitViewMode !== null && originalSplitViewMode !== 'split') {
+      getDiffApi()?.setSplitViewMode?.(originalSplitViewMode)
     }
   }
 

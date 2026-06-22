@@ -68,12 +68,14 @@ import {
   foldSubmoduleLoadObservation,
   type SubmoduleLoadObservation
 } from './submoduleLoadObservation'
-import { resolveGitDiffSplitViewMode, type GitDiffSplitViewMode } from './diffSplitViewMode'
+import { resolveDiffInlineGate, resolveGitDiffSplitViewMode, type GitDiffSplitViewMode } from './diffSplitViewMode'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { raceWithTimeout } from '../../utils/race-with-timeout'
+import { isWatchdogTimeoutError, makeWatchdogTimeoutError } from './watchdogTimeoutError'
 import '../../styles/path-copy-toast.css'
 import './GitDiffViewer.css'
 
@@ -129,6 +131,43 @@ const MAX_DIFF_SPLIT_RATIO = 0.9
 const DIFF_SPLIT_RATIO_EPSILON = 0.002
 const DIFF_INLINE_BREAKPOINT = 900
 const DIFF_REVEAL_TIMEOUT_MS = 2000
+// Subpage-switch-back restore (afterEnter) polls for the previously selected
+// file to reappear in the freshly loaded diff list. On a fast host the list is
+// ready within a few hundred ms, but a cold diff file-list spawn behind an EDR
+// (endpoint-detection) agent can take ~8-10s before the first `files[]` lands.
+// The deadline only governs how long we wait before giving up — it never
+// changes behaviour on a fast host (the loop breaks the instant `target` is
+// found) — so widening it from the old 2.5s purely closes the EDR cold-start
+// gap where the restore used to abort early and leave the selection null.
+const COLD_DIFF_RESTORE_BUDGET_MS = 20000
+// Renderer-side watchdog for a single `getDiff` IPC round-trip. The main-process
+// git worker has its own request timeout, and when it rejects, the handler's
+// rejection normally propagates back to the renderer `invoke`. But on an
+// EDR-throttled host a wedged/deduped worker reply can leave the renderer
+// `invoke` promise pending indefinitely (observed: the worker logged
+// "Git IPC worker request timed out: getDiff" yet the renderer await never
+// settled, so `loadDiff`'s finally never ran, the in-flight lock leaked, and
+// every later load + Keep/Deny froze until the 180s autotest kill). This
+// watchdog races the invoke so `loadDiff` always reaches its finally and
+// releases the lock. The ceiling is wide enough that a healthy slow load on EDR
+// (cold full diff ~8-10s) never trips it; only a truly wedged worker does.
+const DIFF_LOAD_IPC_TIMEOUT_MS = 30000
+// Upper bound for an in-flight-skip caller waiting on `waitForLoadIdle`. Even
+// with the IPC watchdog above, this is a belt-and-suspenders ceiling so a
+// queued caller (e.g. Keep/Deny's post-action reload) can never block forever
+// if the idle-waiter resolution is ever missed. It must exceed
+// DIFF_LOAD_IPC_TIMEOUT_MS so a normal in-flight load (released by the
+// watchdog) resolves the waiter the proper way first.
+const DIFF_LOAD_IDLE_WAIT_CEILING_MS = 35000
+// Watchdog-timeout error tagging lives in watchdogTimeoutError.ts so loadDiff's
+// catch can tell a renderer-side watchdog abort (the underlying getDiff invoke
+// never settled — the worker may still be churning behind an EDR-throttled,
+// concurrency-1 lane) apart from a genuine load failure. The two must NOT be
+// treated the same: a genuine failure surfaces the empty error result, but a
+// watchdog abort on a slow-but-live reload must NOT blank an already-painted file
+// list — doing so silently destroyed the user's diff list and broke Keep/Deny +
+// sibling file lookups in the round-4 image-diff regression. Extracted as a pure
+// module so the decision is unit-testable without importing this heavy component.
 const TOKENIZE_SETTLE_QUIET_MS = 100
 const TOKENIZE_SETTLE_CAP_MS = 5000
 // Hunk widget installation is bounded to the selected-file/model settle
@@ -1038,11 +1077,32 @@ function getDiffPaneElement(
 }
 
 function getDiffLayoutMode(
-  editor: monacoTypes.editor.IStandaloneDiffEditor
+  editor: monacoTypes.editor.IStandaloneDiffEditor,
+  splitViewMode: GitDiffSplitViewMode
 ): DiffLayoutMode {
-  const containerWidth = editor.getContainerDomNode().getBoundingClientRect().width
-  if (Number.isFinite(containerWidth) && containerWidth > 0 && containerWidth <= DIFF_INLINE_BREAKPOINT) {
+  // Honour the user's explicit split-view preference, mirroring the actual
+  // Monaco render options (see renderSideBySide / renderSideBySideInlineBreakpoint
+  // / useInlineViewWhenSpaceIsLimited where the diff editor is constructed):
+  //   - 'inline': renderSideBySide=false → the editor never shows two panes.
+  //   - 'split':  renderSideBySide=true AND the inline breakpoint is disabled
+  //               (renderSideBySideInlineBreakpoint=undefined), so Monaco keeps
+  //               two side-by-side panes EVEN when the container is narrower than
+  //               DIFF_INLINE_BREAKPOINT. The width short-circuit below must NOT
+  //               fire here, or this reporter would lie about the real layout and
+  //               measureDiffSplitState()/dragDiffSplitRatio() would wrongly bail,
+  //               making the sash undraggable for a user who forced Split mode in
+  //               a narrow window.
+  //   - 'auto':  the breakpoint is active (renderSideBySideInlineBreakpoint set),
+  //               so a narrow container collapses to inline — keep the width gate.
+  const gate = resolveDiffInlineGate(splitViewMode)
+  if (gate === 'force-inline') {
     return 'inline'
+  }
+  if (gate === 'width-gate') {
+    const containerWidth = editor.getContainerDomNode().getBoundingClientRect().width
+    if (Number.isFinite(containerWidth) && containerWidth > 0 && containerWidth <= DIFF_INLINE_BREAKPOINT) {
+      return 'inline'
+    }
   }
 
   const originalPane = getDiffPaneElement(editor, 'original')
@@ -1284,6 +1344,12 @@ export function GitDiffViewer({
     return isGitDiffFileListViewMode(saved) ? saved : 'tree'
   })
   const [splitViewMode, setSplitViewModeState] = useState<GitDiffSplitViewMode>(() => readStoredSplitViewMode())
+  // Mirror of splitViewMode for stale-closure-free reads inside layout-measuring
+  // useCallbacks (measureDiffSplitState / dragDiffSplitRatio) whose dependency
+  // arrays must stay empty. getDiffLayoutMode needs the current mode so it can
+  // skip the inline width-breakpoint when the user has forced 'split'.
+  const splitViewModeRef = useRef<GitDiffSplitViewMode>(splitViewMode)
+  splitViewModeRef.current = splitViewMode
   const [collapsedDiffTreeDirs, setCollapsedDiffTreeDirs] = useState<Set<string>>(() => new Set())
   const [imageDisplayMode, setImageDisplayMode] = useState<ImageDisplayMode>(() => {
     const prefs = getUIPreferences()
@@ -2359,7 +2425,7 @@ export function GitDiffViewer({
   ): DiffSplitState | null => {
     const editor = editorOverride ?? diffEditorRef.current
     if (!editor) return null
-    const mode = getDiffLayoutMode(editor)
+    const mode = getDiffLayoutMode(editor, splitViewModeRef.current)
     const originalLayoutWidth = editor.getOriginalEditor().getLayoutInfo().width
     const modifiedLayoutWidth = editor.getModifiedEditor().getLayoutInfo().width
     const layoutWidth = originalLayoutWidth + modifiedLayoutWidth
@@ -2444,7 +2510,7 @@ export function GitDiffViewer({
   const dragDiffSplitRatio = useCallback(async (nextRatio: number) => {
     const editor = diffEditorRef.current
     if (!editor) return false
-    if (getDiffLayoutMode(editor) !== 'side-by-side') return false
+    if (getDiffLayoutMode(editor, splitViewModeRef.current) !== 'side-by-side') return false
     const container = editor.getContainerDomNode()
     const diffRoot = container.classList.contains('monaco-diff-editor')
       ? container
@@ -2727,7 +2793,29 @@ export function GitDiffViewer({
       return Promise.resolve()
     }
     return new Promise<void>((resolve) => {
-      loadIdleWaitersRef.current.push(resolve)
+      let settled = false
+      const settle = () => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+        resolve()
+      }
+      // Belt-and-suspenders ceiling: even if the in-flight load never resolves
+      // its idle waiters (lock leak), the queued caller (e.g. Keep/Deny's
+      // post-action reload) self-heals instead of hanging until the autotest /
+      // app is killed. The normal path resolves via resolveLoadIdleWaiters()
+      // long before this fires.
+      const timer = window.setTimeout(() => {
+        if (settled) return
+        const index = loadIdleWaitersRef.current.indexOf(settle)
+        if (index >= 0) loadIdleWaitersRef.current.splice(index, 1)
+        debugLog('diff:load:idle-wait-ceiling', {
+          inFlight: loadInFlightRef.current,
+          queued: loadQueuedRef.current
+        })
+        settle()
+      }, DIFF_LOAD_IDLE_WAIT_CEILING_MS)
+      loadIdleWaitersRef.current.push(settle)
     })
   }, [])
 
@@ -2753,6 +2841,44 @@ export function GitDiffViewer({
     })
     return true
   }, [])
+
+  // Race a getDiff invoke against a renderer-side watchdog. The main worker has
+  // its own timeout, but a wedged/deduped reply can leave the renderer invoke
+  // pending forever (see DIFF_LOAD_IPC_TIMEOUT_MS). Rejecting here guarantees
+  // loadDiff's try/catch/finally runs, releasing the in-flight lock + idle
+  // waiters instead of deadlocking Keep/Deny and every later load.
+  const getDiffWithWatchdog = useCallback(
+    (
+      targetCwd: string,
+      diffOptions: { scope: 'root-only' | 'full'; force: boolean }
+    ): Promise<GitDiffResult> => {
+      return raceWithTimeout(
+        window.electronAPI.git.getDiff(targetCwd, diffOptions),
+        DIFF_LOAD_IPC_TIMEOUT_MS,
+        () => {
+          // Diagnostic breadcrumb: the renderer invoke never settled and the
+          // watchdog released loadDiff so the in-flight lock + idle waiters are
+          // freed instead of deadlocking Keep/Deny and every later load.
+          perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_LOAD_IPC_TIMEOUT, {
+            scope: diffOptions.scope,
+            force: diffOptions.force,
+            timeoutMs: DIFF_LOAD_IPC_TIMEOUT_MS
+          })
+          debugLog('diff:load:ipc-timeout', {
+            cwd: targetCwd,
+            scope: diffOptions.scope,
+            force: diffOptions.force,
+            timeoutMs: DIFF_LOAD_IPC_TIMEOUT_MS
+          })
+        },
+        // Tag the error so loadDiff's catch can distinguish a watchdog abort
+        // (preserve the visible list) from a genuine load failure (surface the
+        // empty error result). See watchdogTimeoutError.ts.
+        (ms) => makeWatchdogTimeoutError(ms)
+      )
+    },
+    []
+  )
 
   const loadDiff = useCallback(async (options?: { reset?: boolean; silent?: boolean; force?: boolean }) => {
     if (DEBUG_GIT_DIFF) {
@@ -2855,7 +2981,7 @@ export function GitDiffViewer({
     try {
       const stagedLoad = Boolean(options?.reset)
       const initialScope = stagedLoad ? 'root-only' : 'full'
-      const initialResult = await window.electronAPI.git.getDiff(cwd, { scope: initialScope, force: Boolean(options?.force) })
+      const initialResult = await getDiffWithWatchdog(cwd, { scope: initialScope, force: Boolean(options?.force) })
       if (loadTokenRef.current !== currentToken) return
 
       // Submodule two-stage DECOUPLE (prewarm-cache audit fix #3): paint the
@@ -2889,7 +3015,7 @@ export function GitDiffViewer({
       // remain on screen the whole time).
       const needsFullPass = stagedLoad && initialResult.success && Boolean(initialResult.submodulesLoading)
       if (needsFullPass) {
-        const fullResult = await window.electronAPI.git.getDiff(cwd, { scope: 'full', force: Boolean(options?.force) })
+        const fullResult = await getDiffWithWatchdog(cwd, { scope: 'full', force: Boolean(options?.force) })
         if (loadTokenRef.current !== currentToken) return
         applyLoadedDiffResult(fullResult, cwd, previousSelection)
         markDiffLoadedForTiming('full-submodule-load', {
@@ -2910,15 +3036,37 @@ export function GitDiffViewer({
       }
     } catch (error) {
       if (loadTokenRef.current !== currentToken) return
-      setDiffResult({
-        success: false,
-        cwd: cwd || '',
-        isGitRepo: false,
-        gitInstalled: true,
-        files: [],
-        error: t('gitDiff.error.loadFailed', { error: String(error) })
-      })
-      debugLog('diff:load:error', { cwd, token: currentToken, error: String(error) })
+      // A renderer-side watchdog abort means the getDiff invoke never settled
+      // (the worker is still churning behind an EDR-throttled concurrency-1 lane,
+      // or its reply was lost and the lane only frees at the worker's own 90s
+      // timeout). It is NOT a confirmed load failure. If we already hold a
+      // non-empty file list, PRESERVE it: blanking to an empty error result here
+      // silently destroyed the user's diff list and broke Keep/Deny + sibling
+      // file lookups (round-4 image-diff regression). The in-flight lock is still
+      // released in `finally`, so the deadlock fix this watchdog provides stays
+      // intact — we only stop it from also wiping good data.
+      const existing = diffResultRef.current
+      if (isWatchdogTimeoutError(error) && existing && (existing.files?.length ?? 0) > 0) {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_LOAD_WATCHDOG_PRESERVED, {
+          cwd: cwd || '',
+          fileCount: existing.files?.length ?? 0
+        })
+        debugLog('diff:load:watchdog-preserved', {
+          cwd,
+          token: currentToken,
+          fileCount: existing.files?.length ?? 0
+        })
+      } else {
+        setDiffResult({
+          success: false,
+          cwd: cwd || '',
+          isGitRepo: false,
+          gitInstalled: true,
+          files: [],
+          error: t('gitDiff.error.loadFailed', { error: String(error) })
+        })
+        debugLog('diff:load:error', { cwd, token: currentToken, error: String(error) })
+      }
     } finally {
       loadInFlightRef.current = false
       if (loadQueuedRef.current) {
@@ -2929,7 +3077,7 @@ export function GitDiffViewer({
         resolveLoadIdleWaiters()
       }
     }
-  }, [applyLoadedDiffResult, cwd, cwdPending, markDiffLoadedForTiming, resetViewerState, resolveLoadIdleWaiters, t, waitForLoadIdle])
+  }, [applyLoadedDiffResult, cwd, cwdPending, getDiffWithWatchdog, markDiffLoadedForTiming, resetViewerState, resolveLoadIdleWaiters, t, waitForLoadIdle])
 
   const refreshChanges = useCallback(async () => {
     if (!cwd || isRefreshingChanges) return false
@@ -5659,7 +5807,7 @@ export function GitDiffViewer({
         const editor = diffEditorRef.current
         const container = editor?.getContainerDomNode() ?? null
         return {
-          mode: editor ? getDiffLayoutMode(editor) : null,
+          mode: editor ? getDiffLayoutMode(editor, splitViewMode) : null,
           containerWidth: container ? Math.round(container.getBoundingClientRect().width) : null,
           inlineBreakpoint: DIFF_INLINE_BREAKPOINT,
           useInlineViewWhenSpaceIsLimited: splitViewMode === 'auto'
@@ -7018,7 +7166,7 @@ export function GitDiffViewer({
         }
         // The diff list may still be loading when the switch completes; poll
         // briefly for the file to appear, then select it.
-        const deadline = Date.now() + 2500
+        const deadline = Date.now() + COLD_DIFF_RESTORE_BUDGET_MS
         let target: GitFileStatus | null = null
         for (;;) {
           const files = diffResultRef.current?.files ?? []

@@ -227,6 +227,8 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
     if ((!injected || staleState?.selectedRepoRoot !== staleRepoRoot) || cancelled()) return results
 
     window.dispatchEvent(new CustomEvent('git-history:open', { detail: { terminalId: terminalB } }))
+    // Terminal B's repo is COLD on first switch: its git-history spawn is EDR-taxed
+    // (unlike terminal A's already-warm main repo), so allow a larger budget.
     const switchedToB = await waitFor(
       'phase3.5-history-switch-b',
       () => {
@@ -234,7 +236,7 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
         if (!api?.isOpen()) return false
         return normalizePath(api.getActiveCwd?.() ?? '') === normalizePath(fixtureRoot)
       },
-      12000
+      30000
     )
     _assert('GHMS-08-switch-history-to-terminal-b', switchedToB, {
       expected: normalizePath(fixtureRoot),
@@ -242,13 +244,16 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
     })
     if (!switchedToB || cancelled()) return results
 
+    // Terminal B's repo is COLD: its first git-history load pays the EDR spawn tax,
+    // unlike GHMS-06 above which loads the already-warm main repo at 12s. Use a
+    // larger budget so the cold-repo load is not force-failed by EDR latency.
     const reloadedOnB = await waitFor(
       'phase3.5-history-loaded-b',
       () => {
         const api = getHistoryApi()
         return Boolean(api && api.getCommitCount() > 0 && !api.isLoading())
       },
-      12000
+      30000
     )
     const finalState = getHistoryApi()?.getRepoState?.() ?? null
     _assert('GHMS-09-reload-current-repo-on-terminal-b', reloadedOnB, {
@@ -345,10 +350,13 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
       4000
     )
     window.dispatchEvent(new CustomEvent('git-history:open', { detail: { terminalId: terminalB } }))
+    // Reopening history on terminal B reloads its (cold, EDR-taxed) repo history;
+    // the restore can only run once that fresh load completes. Match the cold-repo
+    // budget used by GHMS-08/GHMS-09 above rather than the warm-repo 12s.
     const reopenedForRestore = await waitFor(
       'phase3.5-history-reopen-for-restore',
       () => Boolean(getHistoryApi()?.isOpen() && !getHistoryApi()?.isLoading()),
-      12000
+      30000
     )
     const restoredSelection = reopenedForRestore && await waitFor(
       'phase3.5-history-selection-restored',
@@ -357,7 +365,7 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
         return api?.getSelectedShas?.()[0] === selectedShaBeforeRestore &&
           api?.getSelectedFile?.()?.filename === 'history-vscode.txt'
       },
-      12000
+      30000
     )
     _assert('GHMS-13-vscode-history-view-state-restored', Boolean(
       closedForRestore &&

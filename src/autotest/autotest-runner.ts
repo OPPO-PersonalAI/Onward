@@ -50,6 +50,7 @@ import { testTerminalFocusActivation } from './test-terminal-focus-activation'
 import { testTerminalStress } from './test-terminal-stress'
 import { testRenderCorruptionStress } from './test-render-corruption-stress'
 import { testImageDiff } from './test-image-diff'
+import { testImageHistoryDiff } from './test-image-history-diff'
 import { testPdfEpubPreview } from './test-pdf-epub-preview'
 import { testPdfEpubDiff } from './test-pdf-epub-diff'
 import { testProjectEditorMarkdownNavigation } from './test-project-editor-markdown-navigation'
@@ -675,6 +676,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testImageDiff(ctx)
       collectSuiteResults('ImageDiff', results)
       await ctx.reopenProjectEditor('phase5.55-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('image-history-diff')) {
+      log('phase5.555:begin')
+      await ctx.reopenProjectEditor('phase5.555-setup')
+      await sleep(300)
+      const results = await testImageHistoryDiff(ctx)
+      collectSuiteResults('ImageHistoryDiff', results)
+      await ctx.reopenProjectEditor('phase5.555-cleanup')
       await sleep(500)
     }
 

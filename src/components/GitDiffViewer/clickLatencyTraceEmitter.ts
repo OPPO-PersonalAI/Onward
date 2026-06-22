@@ -63,7 +63,13 @@ export function buildClickPhaseTraceRecords(
     records.push({ event, payload: { ...base, durationMs: round2(durationMs) } })
   }
 
-  pushSpan(CLICK_PHASE_EVENT_NAMES.IPC, measurement.ipcStartAt, measurement.ipcEndAt)
+  // Use clickAt as the IPC start fallback when ipcStartAt is null. Under EDR a
+  // re-click of the same fileKey between markIpcStart and markIpcEnd allocates a
+  // fresh active with ipcStartAt=null while the original markIpcEnd still sets
+  // ipcEndAt -> the sealed measurement has ipcEndAt set but ipcStartAt null.
+  // clickAt is always set at start(), so it is the safe lower bound for the IPC
+  // span. Mirrors the ?? fallback pattern used for the later spans below.
+  pushSpan(CLICK_PHASE_EVENT_NAMES.IPC, measurement.ipcStartAt ?? measurement.clickAt, measurement.ipcEndAt)
   pushSpan(CLICK_PHASE_EVENT_NAMES.STATE_SET, measurement.ipcEndAt, measurement.stateSetAt)
   pushSpan(CLICK_PHASE_EVENT_NAMES.MODEL_BIND, measurement.stateSetAt, measurement.modelBoundAt)
   pushSpan(CLICK_PHASE_EVENT_NAMES.MOUNT, measurement.modelBoundAt ?? measurement.stateSetAt, measurement.editorReadyAt)

@@ -72,7 +72,9 @@ test('canonicalization is idempotent (no second-pass drift), all platforms', () 
   const cases: Array<[(v: string | null | undefined) => string | null, string]> = [
     [win, 'D:\\Users\\80253146'], [win, 'D:/Users/80253146'], [win, '\\\\srv\\sh\\c'],
     [mac, '/private/var/folders/31/T//proj'], [mac, '/var/folders/31/T/proj/'],
-    [mac, '~/projects/repo'], [linux, '/private/var/x']
+    [mac, '~/projects/repo'], [linux, '/private/var/x'],
+    // '.'-segment inputs must also be idempotent (collapse once, then stable).
+    [win, 'D:\\x\\repo\\.'], [mac, '/Users/x/./repo/.'], [win, 'C:\\.']
   ]
   for (const [fn, input] of cases) {
     const once = fn(input)
@@ -86,6 +88,34 @@ test('trailing slash is stripped (but root "/" is kept)', () => {
   assert.equal(mac('/Users/x/repo/'), '/Users/x/repo')
   assert.equal(mac('/'), '/')
   assert.equal(mac('~/Projects/repo/'), '~/Projects/repo')
+})
+
+test('a trailing "/." (current-dir alias) collapses and converges with the bare path', () => {
+  // Regression: the GSM two-task test feeds terminal B `makeEquivalentCwdAlias`
+  // = `path.join(repo, '.')` -> `<repo>/.`, while the other writer emits
+  // `<repo>`. canonicalize MUST collapse `/.`, or terminal.lastCwd ping-pongs
+  // and storms the renderer (setTerminalLastCwd hit 1707/s, renders 569/s in
+  // the failing run). This is the exact gap that shipped the storm.
+  assert.equal(win('D:/x/repo/.'), 'D:/x/repo')
+  assert.equal(win('D:/x/repo/.'), win('D:/x/repo'))
+  // The exact divergence: backslash-with-dot vs forward-slash bare.
+  assert.equal(win('D:\\x\\repo\\.'), 'D:/x/repo')
+  assert.equal(win('D:\\x\\repo\\.'), win('D:/x/repo'))
+  assert.equal(mac('/Users/x/repo/.'), '/Users/x/repo')
+  assert.equal(mac('/Users/x/repo/.'), mac('/Users/x/repo'))
+  assert.equal(linux('/home/x/repo/.'), '/home/x/repo')
+})
+
+test('interior "/./" segments collapse (and combine with a trailing "/.")', () => {
+  assert.equal(win('D:/x/./repo'), 'D:/x/repo')
+  assert.equal(mac('/Users/x/./repo'), '/Users/x/repo')
+  assert.equal(win('D:/x/./repo/.'), 'D:/x/repo')
+})
+
+test('a "/." at a root keeps the root', () => {
+  assert.equal(win('C:/.'), 'C:/')
+  assert.equal(win('C:\\.'), 'C:/')
+  assert.equal(mac('/.'), '/')
 })
 
 test('POSIX paths and home-relative paths stay intact', () => {

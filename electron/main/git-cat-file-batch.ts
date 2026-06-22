@@ -51,6 +51,7 @@ import { resolve } from 'path'
 
 import { getReadonlyExecEnv } from './git-utils'
 import { isBatchSupportedPlatform, resolveBatchGitExecutable } from './git-cat-file-batch-platform'
+import { shouldRespawnForIndexGeneration } from './git-cat-file-ref'
 import { requiresGitLargeFileConfirmation, type GitLargeFilePromptOptions } from './git-large-file-policy'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
@@ -68,7 +69,7 @@ export interface CatFileBatchResult {
 
 // Re-exported from the dependency-free module so callers (git-utils) keep a
 // single import site while the pure logic stays unit-testable in plain node.
-export { isMutableIndexRef } from './git-cat-file-ref'
+export { isMutableIndexRef, shouldRespawnForIndexGeneration } from './git-cat-file-ref'
 
 const NL = 0x0a // '\n'
 
@@ -87,10 +88,18 @@ class RepoCatFileProcess {
     | null = null
   // Serialize requests onto one process — batch responses come in input order.
   private tail: Promise<unknown> = Promise.resolve()
+  // Index-generation token (`mtime:size` of `.git/index`) captured at the moment
+  // the CURRENT process was spawned. `git cat-file --batch` snapshots the index
+  // at process start, so this is the snapshot's identity. When a later index-ref
+  // read carries a DIFFERENT token (the index mutated via stage / unstage /
+  // partial-stage), `read()` disposes + respawns so the new process snapshots the
+  // CURRENT index — the freshness invariant that keeps GDS-22 / GDS-33 green.
+  // null until the first index-aware spawn; an immutable-only read never sets it.
+  private spawnedIndexGeneration: string | null = null
 
   constructor(private readonly repoRoot: string, private readonly gitExecutable: string) {}
 
-  private ensureProc(): ChildProcessWithoutNullStreams {
+  private ensureProc(indexGeneration: string | null): ChildProcessWithoutNullStreams {
     if (this.proc && !this.proc.killed) return this.proc
     // Resolve the per-platform command (win32 = system git; darwin = placeholder;
     // others = null → not enabled). Null here is a programming error because the
@@ -130,6 +139,10 @@ class RepoCatFileProcess {
     })
     this.proc = proc
     this.buf = Buffer.alloc(0)
+    // Record the index snapshot identity this process was spawned with. The
+    // batch's in-memory index now corresponds to this token; reads carrying a
+    // different token force a respawn (see read()).
+    this.spawnedIndexGeneration = indexGeneration
     return proc
   }
 
@@ -173,11 +186,50 @@ class RepoCatFileProcess {
     }
   }
 
-  /** Read an object by ref through the long-running process. Serialized. */
-  read(ref: string, options?: GitLargeFilePromptOptions): Promise<CatFileBatchResult> {
+  /**
+   * Read an object by ref through the long-running process. Serialized.
+   *
+   * `indexGeneration` is the `.git/index` stat token (`mtime:size`) the CALLER
+   * captured for an INDEX ref (`:<path>`), or null for an immutable ref. When it
+   * differs from the token the running process was spawned with, the process is
+   * disposed + respawned so the new process snapshots the CURRENT index before
+   * the read — guaranteeing index refs never return a stale pre-mutation blob
+   * (GDS-22 / GDS-33 freshness invariant). Immutable refs (null token) never
+   * trigger a respawn.
+   */
+  read(
+    ref: string,
+    options?: GitLargeFilePromptOptions,
+    indexGeneration: string | null = null
+  ): Promise<CatFileBatchResult> {
     const run = () => new Promise<CatFileBatchResult>((resolveOuter, rejectOuter) => {
+      // Freshness gate: if this is an index read and the on-disk index mutated
+      // since the running process snapshotted it, drop the stale process so the
+      // ensureProc() below spawns a fresh one against the current index. Runs
+      // inside the serialized chain, so no in-flight read can observe the swap.
+      if (this.proc && !this.proc.killed &&
+          shouldRespawnForIndexGeneration(this.spawnedIndexGeneration, indexGeneration)) {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_CATFILE_INDEX_REF_BATCHED, {
+          repoRoot: this.repoRoot,
+          action: 'respawn-stale-index',
+          spawnedToken: this.spawnedIndexGeneration ?? '',
+          requestToken: indexGeneration ?? ''
+        })
+        this.dispose()
+      }
       let proc: ChildProcessWithoutNullStreams
-      try { proc = this.ensureProc() } catch (e) { rejectOuter(e); return }
+      try { proc = this.ensureProc(indexGeneration) } catch (e) { rejectOuter(e); return }
+      // Diagnostic + perf breadcrumb: an INDEX ref was served from the batch
+      // (the hot per-file read this optimization moved off the per-call spawn
+      // path). Immutable refs (null token) are already covered by the
+      // batch-spawned / fallback events, so only tag the index path here.
+      if (indexGeneration !== null) {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_CATFILE_INDEX_REF_BATCHED, {
+          repoRoot: this.repoRoot,
+          action: 'served',
+          requestToken: indexGeneration
+        })
+      }
 
       // First read just the header to honor the large-file gate WITHOUT buffering
       // a huge blob: we peek the size, and if gated, kill+respawn (rare) so the
@@ -219,6 +271,9 @@ class RepoCatFileProcess {
     const proc = this.proc
     this.proc = null
     this.pending = null
+    // Clear the snapshot identity so the next ensureProc() always records the
+    // fresh token rather than inheriting the disposed process's stale one.
+    this.spawnedIndexGeneration = null
     if (proc && !proc.killed) {
       try { proc.stdin.end() } catch { /* ignore */ }
       try { proc.kill() } catch { /* ignore */ }
@@ -246,7 +301,12 @@ class GitCatFileBatchManager {
     repoRoot: string,
     gitExecutable: string,
     ref: string,
-    options?: GitLargeFilePromptOptions
+    options?: GitLargeFilePromptOptions,
+    // Index-generation token (`mtime:size` of `.git/index`) for INDEX refs, or
+    // null for immutable refs (HEAD:path, commit:path, blob oid). The caller
+    // resolves it from the repo's gitDir; the batch uses it to respawn against
+    // the current index when it changed since spawn (GDS-22 / GDS-33 freshness).
+    indexGeneration: string | null = null
   ): Promise<CatFileBatchResult> {
     const key = this.keyFor(repoRoot)
     let entry = this.byRepo.get(key)
@@ -254,7 +314,7 @@ class GitCatFileBatchManager {
       entry = new RepoCatFileProcess(repoRoot, gitExecutable)
       this.byRepo.set(key, entry)
     }
-    return entry.read(ref, options)
+    return entry.read(ref, options, indexGeneration)
   }
 
   disposeRepo(repoRoot: string): void {

@@ -130,6 +130,13 @@ function clickSubpageButton(target: 'diff' | 'editor' | 'history'): boolean {
   return true
 }
 
+// Under EDR-instrumented Windows hosts every git process spawn is taxed
+// (observed 1.3-12.9 s each), so the COLD first Git-Diff load can take well
+// over the default 8 s budget (measured 8321 ms). Warm loads are ~1.7 s.
+// Use a generous cold-load budget for the first diff mount / file list / first
+// selection so a slow EDR spawn does not time out 300 ms early and cascade.
+const COLD_DIFF_LOAD_BUDGET_MS = 20000
+
 function getGitDiffApi() {
   return window.__onwardGitDiffDebug
 }
@@ -242,15 +249,36 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
       }, 8000)
     }
 
+    // Wait for a subpage switcher button to be present AND enabled before
+    // clicking it. Under EDR the target panel (history/diff) can finish its
+    // cold mount slightly after the click would fire, leaving the switcher
+    // button transiently disabled; a one-shot clickSubpageButton() then returns
+    // false and the dependent assertion cascades. Poll the button instead.
+    const waitForSubpageButtonAndClick = async (
+      label: string,
+      target: 'diff' | 'editor' | 'history',
+      timeoutMs = COLD_DIFF_LOAD_BUDGET_MS
+    ) => {
+      return await waitFor(`subpage-navigation-button-click:${label}`, () => {
+        const button = getSubpageButton(target)
+        if (!button || button.disabled) return false
+        button.click()
+        return true
+      }, timeoutMs)
+    }
+
     const waitForGitDiffOpen = async (label: string) => {
-      return await waitFor(`subpage-navigation-diff-open:${label}`, () => Boolean(getGitDiffApi()?.isOpen()), 8000)
+      // Cold first mount under EDR can exceed the default 8 s; use the cold budget.
+      return await waitFor(`subpage-navigation-diff-open:${label}`, () => Boolean(getGitDiffApi()?.isOpen()), COLD_DIFF_LOAD_BUDGET_MS)
     }
 
     const waitForDiffFile = async (label: string, filePath: string) => {
+      // The file list is populated by a git spawn; on a cold EDR-taxed load this
+      // can take >8 s, so poll up to the cold-load budget before giving up.
       return await waitFor(`subpage-navigation-diff-file:${label}`, () => {
         const files = getGitDiffApi()?.getFileList?.() ?? []
         return files.some((file) => file.filename === filePath || file.originalFilename === filePath)
-      }, 8000)
+      }, COLD_DIFF_LOAD_BUDGET_MS)
     }
 
     const waitForGitHistoryOpen = async (label: string) => {
@@ -345,13 +373,22 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
       metrics: diffButtonsUniform.metrics
     })
 
-    const diffApi = getGitDiffApi()
     const diffExistingReady = await waitForDiffFile('existing', 'existing.md')
-    const selectedExistingInDiff = diffExistingReady && diffApi?.selectFileByPath('existing.md') === true
-    await waitFor('subpage-navigation-diff-existing-selected', () => {
-      const selected = getGitDiffApi()?.getSelectedFile?.()
-      return Boolean(selected?.filename === 'existing.md')
-    }, 8000)
+    // Re-fetch a FRESH api on every attempt: a captured const can race a
+    // remount of GitDiffViewer (the cold-load effect re-mounts the panel), and
+    // calling selectFileByPath() on a stale api silently no-ops. Retry the
+    // selection itself until a live api reports the file as selected.
+    const selectedExistingInDiff = diffExistingReady && await waitFor(
+      'subpage-navigation-diff-existing-selected',
+      () => {
+        const api = getGitDiffApi()
+        if (!api) return false
+        if (api.getSelectedFile?.()?.filename === 'existing.md') return true
+        return api.selectFileByPath('existing.md') === true
+          && api.getSelectedFile?.()?.filename === 'existing.md'
+      },
+      COLD_DIFF_LOAD_BUDGET_MS
+    )
     // Switching back to Editor via SubpageSwitcher should restore the
     // Editor's own previous state (editor-only.md), NOT open the Diff's
     // selected file.
@@ -373,11 +410,15 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     // GitDiffViewer's own [isOpen=true] restore effect re-applies the
     // previously selected file via memory-store lookup on a follow-up render
     // tick, so reading `getSelectedFile()` synchronously here would race the
-    // restore. Give it up to 3 s to settle before recording the value.
+    // restore. The afterEnter restore poll itself waits up to
+    // COLD_DIFF_RESTORE_BUDGET_MS (~20 s) for the cold diff file-list to land
+    // under EDR, so the test must give the restore the same cold budget rather
+    // than the old 3 s — otherwise it reads the selection before the production
+    // poll has a chance to find the file in the still-loading list.
     if (diffRestored) {
       await waitFor('subpage-navigation-diff-selection-restored',
         () => Boolean(getGitDiffApi()?.getSelectedFile?.()?.filename),
-        3000)
+        COLD_DIFF_LOAD_BUDGET_MS)
     }
     const restoredDiffSelection = getGitDiffApi()?.getSelectedFile?.()?.filename ?? null
     _assert('SN-07-editor-to-diff-restores-diff-selection', editorOnlyRestored && diffRestored && restoredDiffSelection === 'existing.md', {
@@ -421,9 +462,9 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     }, 8000)
     const selectedExistingHistoryFile = await selectHistoryFileByPath('existing', 'existing.md')
     await sleep(500)
-    const clickedDiffFromHistory = clickSubpageButton('diff')
+    const clickedDiffFromHistory = await waitForSubpageButtonAndClick('sn10-diff-from-history', 'diff')
     const diffOpenedFromHistory = clickedDiffFromHistory && await waitForGitDiffOpen('from-history')
-    const clickedHistoryAgain = diffOpenedFromHistory && clickSubpageButton('history')
+    const clickedHistoryAgain = diffOpenedFromHistory && await waitForSubpageButtonAndClick('sn10-history-again', 'history')
     const historyRestored = Boolean(clickedHistoryAgain) && await waitForGitHistoryOpen('restore-from-diff')
     const restoredHistoryFile = getGitHistoryApi()?.getSelectedFile?.()?.filename ?? null
     _assert('SN-10-diff-to-history-restores-history-selection', Boolean(selectedUpdateCommit && historyFilesLoaded && selectedExistingHistoryFile && historyRestored && restoredHistoryFile === 'existing.md'), {
@@ -447,7 +488,7 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
 
     await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
     const editorOnlyBeforeHistory = await waitForProjectEditorFile('editor-only-before-history', 'editor-only.md')
-    const clickedHistoryFromEditor = clickSubpageButton('history')
+    const clickedHistoryFromEditor = await waitForSubpageButtonAndClick('sn12-history-from-editor', 'history')
     const historyOpenedFromEditor = clickedHistoryFromEditor && await waitForGitHistoryOpen('from-editor-restore')
     const restoredHistoryAfterEditor = getGitHistoryApi()?.getSelectedFile?.()?.filename ?? null
     _assert('SN-12-editor-to-history-restores-history-selection', Boolean(editorOnlyBeforeHistory && historyOpenedFromEditor && restoredHistoryAfterEditor === 'existing.md'), {

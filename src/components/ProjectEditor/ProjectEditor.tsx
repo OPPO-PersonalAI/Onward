@@ -19,6 +19,8 @@ import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { shouldRetainProjectEditorViewOnClose } from './utils/projectEditorCloseRetention'
 import { isPreviewWorkPending, shouldRevealSettledPreview } from './utils/previewRestoreSettle'
+import { isMarkdownSessionCacheContentHit } from './utils/markdownSessionCachePeek'
+import { shouldEnableMarkdownForOpen, shouldSelfHealMarkdownPreviewOpen, shouldPreserveRetainedPreviewDuringReopen, shouldTakeZeroFlashReopenPath } from './utils/markdownPreviewSelfHeal'
 import { runAllTests } from '../../autotest/autotest-runner'
 import type { AutotestContext, CpuSummary, ProjectEditorDebugApi, TestResult } from '../../autotest/types'
 import 'katex/dist/katex.min.css'
@@ -558,13 +560,50 @@ function readMarkdownSessionCache(rootPath: string, filePath: string, content: s
     renderedHtmlLength: entry.renderedHtml.length
   }
 
-  if (entry.stale || entry.content !== content || entry.renderedHtml.length === 0) {
-    entry.stale = true
+  if (!isMarkdownSessionCacheContentHit(entry, content)) {
+    // Report a 'stale' (effectively miss) result for THIS read WITHOUT
+    // permanently poisoning the entry. The previous `entry.stale = true` here
+    // turned a transient read-time content mismatch — e.g. `fileContentRef`
+    // briefly stale/empty during an EDR-throttled retained reopen, or a Diff
+    // round-trip reading before the content settled — into a permanent miss:
+    // once `stale`, `isMarkdownSessionCacheContentHit` returns false forever, so
+    // the fast cache-restore path stayed dead for the rest of that reopen and
+    // forced a slow fresh worker render that overran the reopen budget on the
+    // FIRST reopen (PMSR-09/10/11/13/13a/13b) and the Diff "Jump to Editor" /
+    // reopen budgets (CDP-10, PMN-41), while later reopens — whose re-captured
+    // entry matched — passed. Genuine content changes are invalidated through
+    // the dedicated `markMarkdownSessionCacheStale` call sites (editor change,
+    // external-file-change watcher, cachedRender mismatch, image-map change), so
+    // this redundant self-poison is not needed for correctness; dropping it lets
+    // a later read with matching content still hit the cached render.
     return { result: { mode: 'stale', ...base }, entry: null }
   }
 
   entry.hitCount += 1
   return { result: { mode: 'hit', ...base }, entry }
+}
+
+/**
+ * Read-only peek for the worker-owner-switch fast path.
+ *
+ * Returns the cached entry ONLY when it is a content-identical hit per
+ * `isMarkdownSessionCacheContentHit`, WITHOUT mutating the entry or the store —
+ * no openCount/hitCount increment, no lastAccessedAt/activatedAt touch, no LRU
+ * reorder, no dwell record. This is mandatory: the retained-view reopen branch
+ * ALSO calls the side-effecting `readMarkdownSessionCache` for the same reopen,
+ * so peeking here with the mutating reader would double-count the hit and
+ * corrupt eviction scoring. The peek is purely "is there a render I can reuse
+ * synchronously right now?" and leaves all accounting to the authoritative read.
+ */
+function peekMarkdownSessionCacheHit(
+  rootPath: string | null,
+  filePath: string | null,
+  content: string
+): MarkdownSessionCacheEntry | null {
+  const key = getMarkdownSessionCacheKey(rootPath, filePath)
+  if (!key) return null
+  const entry = markdownSessionCacheStore.get(key)
+  return isMarkdownSessionCacheContentHit(entry, content) ? entry ?? null : null
 }
 
 function upsertMarkdownSessionCache(entry: Omit<MarkdownSessionCacheEntry, 'openCount' | 'dwellMs' | 'lastAccessedAt' | 'activatedAt' | 'savedAt' | 'hitCount' | 'stale'>): MarkdownSessionCacheEntry {
@@ -1309,6 +1348,18 @@ export function ProjectEditor({
   const markdownRenderPendingRef = useRef(false)
   const [markdownRenderedHtml, setMarkdownRenderedHtml] = useState('')
   const markdownRenderedHtmlRef = useRef('')
+  // Monotonic nonce bumped whenever a markdown render result is (re)applied,
+  // including a content-identical session-cache reapply. The mermaid-render and
+  // restore-layout effects key off this in addition to `markdownRenderedHtml` so
+  // they re-run even when the HTML string is byte-identical to the previous
+  // value. This is mandatory for the retained-close -> first-reopen path: the
+  // close preserves `markdownRenderedHtml` (preserveClosedPreview), so the
+  // reopen's `applyMarkdownSessionCacheHit(setMarkdownRenderedHtml(sameString))`
+  // is a React no-op and would NOT re-fire those effects — leaving the mermaid
+  // diagram DOM (rebuilt from the cached pre-render HTML, so `.mermaid-rendered`
+  // is stripped) stuck at pending>0 forever, which hangs waitForPreviewReady
+  // (PMSR-09/10/11/13/13a/13b). Bumping the nonce guarantees re-enhancement.
+  const [markdownPreviewRenderNonce, setMarkdownPreviewRenderNonce] = useState(0)
   const [markdownImagePaths, setMarkdownImagePaths] = useState<string[]>([])
   const markdownRenderDurationRef = useRef(0)
   const markdownApplyRequestIdRef = useRef(0)
@@ -2651,6 +2702,11 @@ export function ProjectEditor({
     setMarkdownImagePaths(entry.imagePaths)
     markdownRenderedHtmlRef.current = entry.renderedHtml
     setMarkdownRenderedHtml(entry.renderedHtml)
+    // Force the mermaid-render + restore-layout effects to re-run even when the
+    // HTML string is byte-identical to the prior value (retained-close ->
+    // first-reopen no-op set). Without this bump those effects never fire and
+    // the mermaid diagram stays at pending>0, hanging the reopen restore.
+    setMarkdownPreviewRenderNonce((nonce) => nonce + 1)
     setMarkdownRenderPending(false)
     mdpTrace('cacheHit:setHtml')
     const pKey = getFileScrollKey(lastEditorScopeRef.current, filePath)
@@ -3460,10 +3516,27 @@ export function ProjectEditor({
       // can short-circuit `applyMarkdownSessionCacheHit` -> `beginPreviewRestore`
       // and avoid the waiting-html opacity flicker.
       const softCloseSnapshot = editorSoftCloseSnapshotRef.current
-      const preserveClosedPreview = Boolean(
-        softCloseSnapshot &&
-        (softCloseSnapshot.kind === 'subpage-return' || !isOpen)
-      )
+      // A retained-close shortcut reopen briefly re-enters this deactivate
+      // branch on the reopen's FIRST render: `isOpen` has already flipped true,
+      // but the retained-view restore effect (which calls
+      // setIsMarkdownRenderEnabled(true)) has not yet propagated, so
+      // `isMarkdownWorkerActive` is still false for one render. The original
+      // `!isOpen` guard did not cover this window, so the branch blanked the
+      // retained HTML (markdownRenderedHtmlRef -> ''), destroying the
+      // already-rendered mermaid DOM. The follow-on restore then had to
+      // re-apply the cache + re-render mermaid, which drove the phase through
+      // 'waiting-html'/'restoring-layout' (the user-visible reflash) and, under
+      // EDR throttling, could stall the first reopen at htmlLength 0 entirely
+      // (PMSR-09/10/11/13/13a). Preserve the HTML in this reopen-in-flight
+      // window too — gated to a retained-close snapshot whose path still
+      // matches the active markdown file, so we never leak a stale render for a
+      // different file.
+      const preserveClosedPreview = shouldPreserveRetainedPreviewDuringReopen({
+        snapshotKind: softCloseSnapshot?.kind ?? null,
+        snapshotPath: softCloseSnapshot?.path ?? null,
+        isOpen,
+        activeFilePath: activeFilePathRef.current
+      })
       resetPreviewRestoreState()
       if (markdownWorkerRef.current) {
         markdownWorkerRef.current.terminate()
@@ -3515,10 +3588,66 @@ export function ProjectEditor({
       markdownPendingPayloadRef.current = null
       cancelMarkdownIdle()
       if (!shouldPreserveCachedRender) {
-        setMarkdownRenderedHtml('')
-        markdownRenderedHtmlRef.current = ''
-        setMarkdownImagePaths([])
-        setMarkdownRenderPending(false)
+        // A shortcut reopen of a retained-close markdown file briefly re-enters
+        // this owner-switch branch (owner null -> file) on the reopen's first
+        // render, BEFORE the retained-view restore effect re-applies the cache.
+        // The original `else` arm unconditionally blanked markdownRenderedHtmlRef
+        // here, destroying the already-rendered (mermaid-enhanced) DOM that the
+        // worker-deactivate branch's preserveClosedPreview had kept. On an
+        // EDR-throttled host the follow-on re-render could then land after the
+        // 20s reopen budget, stranding the first reopen at htmlLength 0 and
+        // forcing a 'waiting-html' flash on the reopens where it did recover
+        // (PMSR-09/10/11/13/13a/13b, PMN-41, CDP-10). The robust fix is to NOT
+        // blank the HTML in the reopen-in-flight window: if a retained-close
+        // snapshot for THIS file says the preserved render is still valid, keep
+        // it on screen so the restore effect takes the zero-flash path.
+        const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+        const preserveDuringReopen =
+          Boolean(markdownRenderedHtmlRef.current) &&
+          shouldPreserveRetainedPreviewDuringReopen({
+            snapshotKind: softCloseSnapshot?.kind ?? null,
+            snapshotPath: softCloseSnapshot?.path ?? null,
+            isOpen,
+            activeFilePath: activeFilePathRef.current
+          })
+        if (preserveDuringReopen) {
+          // Keep the preserved HTML; the retained-view restore effect re-arms the
+          // scroll + render nonce without ever leaving 'idle'.
+          perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_REOPEN_PRESERVED_NO_FLASH, {
+            // Basename only — keep the payload tiny and free of full paths.
+            filePath: (nextOwner ?? '').split(/[\\/]/).pop() ?? (nextOwner ?? ''),
+            htmlLength: markdownRenderedHtmlRef.current.length
+          })
+        } else {
+          // Option A: before blanking the HTML and forcing a fresh worker render,
+          // check whether the persistent session cache holds a CONTENT-IDENTICAL
+          // render for the file being reopened. Restoring synchronously from a
+          // content-identical cache keeps getMarkdownRenderedHtml() non-empty
+          // immediately and re-applies scroll, so we never blank-then-re-render.
+          const reopenRoot = rootRef.current
+          const syncRestoreEntry =
+            nextOwner &&
+            reopenRoot &&
+            isMarkdownPreviewOpenRef.current &&
+            !isBinaryRef.current &&
+            !isImageRef.current &&
+            !isSqliteRef.current
+              ? peekMarkdownSessionCacheHit(reopenRoot, nextOwner, fileContentRef.current)
+              : null
+          if (syncRestoreEntry && nextOwner) {
+            applyMarkdownSessionCacheHitRef.current(nextOwner, fileContentRef.current, syncRestoreEntry)
+            perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_REOPEN_CACHE_RESTORED, {
+              // Basename only — keep the payload tiny and free of full paths.
+              filePath: nextOwner.split(/[\\/]/).pop() ?? nextOwner,
+              htmlLength: syncRestoreEntry.renderedHtml.length
+            })
+          } else {
+            setMarkdownRenderedHtml('')
+            markdownRenderedHtmlRef.current = ''
+            setMarkdownImagePaths([])
+            setMarkdownRenderPending(false)
+          }
+        }
       }
     }
 
@@ -4455,6 +4584,84 @@ export function ProjectEditor({
       if (source === 'user' && options?.trackRecent) {
         touchRecentFile(path)
       }
+      // Self-heal the markdown render gate on a re-open of the already-active
+      // file. Two distinct paths land here with the preview render OFF for the
+      // file that is already active:
+      //   (a) Git Diff "Jump to Editor" deep-link — on the way INTO Diff
+      //       `resetActiveFileState` cleared `isMarkdownRenderEnabled` while
+      //       preserving the rendered HTML; the preview pane stayed OPEN
+      //       (`isMarkdownPreviewOpenRef.current === true`).
+      //   (b) Project-editor reopen via the RETAINED-VIEW path
+      //       (`legacy-event:open:editor->editor`, PMN-41) — under an
+      //       EDR-throttled host the retained restore can leave the preview pane
+      //       flagged CLOSED (`isMarkdownPreviewOpenRef.current === false`) AND
+      //       the rendered HTML blank, then an explicit re-open of the same file
+      //       hits this early-return and never re-enables anything.
+      // In both cases `isMarkdownRenderAllowed = isMarkdownPreviewVisible &&
+      // isMarkdownRenderEnabled` is false, so `previewVisibleRef.current` (which
+      // mirrors it) reports `isMarkdownPreviewVisible() === false`. The decision
+      // is the pure `shouldReEnableMarkdownRenderOnReopenSameFile` predicate
+      // (locked by a unit test). Only act when the gate is actually OFF
+      // (`!markdownRenderAllowedRef.current`) so a normal re-click on an
+      // already-rendered file stays a no-op. For path (b) we additionally force
+      // the preview pane open first, mirroring the enable arm of
+      // `setMarkdownPreviewVisibility` (~L1960), because re-enabling the render
+      // gate is meaningless while the pane is flagged closed.
+      if (
+        !markdownRenderAllowedRef.current &&
+        !isBinaryRef.current &&
+        !isImageRef.current &&
+        !isSqliteRef.current &&
+        // Eligible when this is an explicit markdown open. The pane may currently
+        // be flagged closed (path b) — we self-heal it open below — so gate on
+        // "the open WANTS the preview" via `shouldEnableMarkdownForOpen`, not on
+        // the (possibly stale-closed) current pane flag. The narrower
+        // `shouldReEnableMarkdownRenderOnReopenSameFile` (which also requires the
+        // pane already open) remains exported for callers that need that stricter
+        // contract.
+        shouldEnableMarkdownForOpen(source, isMarkdownPath(path))
+      ) {
+        if (!isMarkdownPreviewOpenRef.current) {
+          // Path (b): the retained-view restore left the pane closed. Force it
+          // open so the downstream render-allowed chain can light up.
+          isMarkdownPreviewOpenRef.current = true
+          setIsMarkdownPreviewOpen(true)
+        }
+        const root = rootRef.current
+        const cacheRead = root
+          ? readMarkdownSessionCache(root, path, fileContentRef.current)
+          : null
+        if (cacheRead) {
+          markdownSessionLastRestoreRef.current = cacheRead.result
+        }
+        if (cacheRead?.entry) {
+          applyMarkdownSessionCacheHitRef.current(path, fileContentRef.current, cacheRead.entry)
+        } else if (markdownRenderedHtmlRef.current) {
+          // HTML preserved across the Diff round-trip but no content-identical
+          // cache entry — just reset the restore phase to idle (does not blank
+          // the preserved HTML) so the re-enabled gate shows it immediately.
+          resetPreviewRestoreState()
+        } else {
+          // Path (b) with a cold cache AND no preserved HTML: nothing is on
+          // screen and there is no cache to restore from, so we must kick a
+          // fresh worker render ourselves. The non-early-return open path drives
+          // the render by (re)assigning `markdownRenderSource`; mirror that here
+          // — seeding the source from the already-loaded `fileContentRef` is what
+          // makes the worker effect schedule a render. `beginPreviewRestore()`
+          // then parks the phase at `waiting-html` until that render lands.
+          markdownSessionCacheRenderRef.current = null
+          pendingMarkdownSessionCacheRestoreRef.current = null
+          markdownRenderSourceRef.current = fileContentRef.current
+          setMarkdownRenderSource(fileContentRef.current)
+          beginPreviewRestore()
+        }
+        setIsMarkdownRenderEnabled(true)
+        perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_RENDER_GATE_REENABLED, {
+          // Basename only — keep the payload tiny and free of full paths.
+          filePath: path.split(/[\\/]/).pop() ?? path,
+          source
+        })
+      }
       if (options?.cursorPosition) {
         pendingViewStateRef.current = null
         pendingViewStatePathRef.current = path
@@ -4789,7 +4996,29 @@ export function ProjectEditor({
     setIsDirty(false)
     syncOriginalVersion()
 
-    const shouldEnableMarkdown = (source === 'user' || source === 'debug' || source === 'restore') && isMarkdownPath(path)
+    const isMarkdownFile = isMarkdownPath(path)
+    const shouldEnableMarkdown = shouldEnableMarkdownForOpen(source, isMarkdownFile)
+    // Self-heal the preview-open state for an explicit markdown open. After a
+    // project-editor reopen (e.g. PMN-40 -> PMN-41) the openFile call can latch a
+    // racing snapshot in which `isMarkdownPreviewOpenRef.current` is still false,
+    // even though the user/debug/restore open of a markdown file should show the
+    // preview. Every branch below — cache apply, render-enable, beginPreviewRestore
+    // — is gated on `isMarkdownPreviewOpenRef.current`, so a stale `false` here
+    // leaves the reopened markdown file with the preview never enabled and the
+    // render never started, timing out the next assertion. Force the preview open
+    // here (mirroring the enable path in setMarkdownPreviewVisibility ~L2017) so
+    // the file always self-heals rather than inheriting the stale snapshot. The
+    // boolean is the pure `shouldSelfHealMarkdownPreviewOpen` predicate so the
+    // decision is locked by a unit test.
+    if (shouldSelfHealMarkdownPreviewOpen(source, isMarkdownFile, isMarkdownPreviewOpenRef.current)) {
+      isMarkdownPreviewOpenRef.current = true
+      setIsMarkdownPreviewOpen(true)
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_PREVIEW_OPEN_SELF_HEALED, {
+        // Basename only — keep the payload tiny and free of full paths.
+        filePath: path.split(/[\\/]/).pop() ?? path,
+        source
+      })
+    }
     if (shouldEnableMarkdown && isMarkdownPreviewOpenRef.current && markdownCacheEntry) {
       applyMarkdownSessionCacheHit(path, textContent, markdownCacheEntry)
     } else {
@@ -5374,9 +5603,103 @@ export function ProjectEditor({
             if (cacheRead) {
               markdownSessionLastRestoreRef.current = cacheRead.result
             }
-            if (!markdownRenderedHtmlRef.current && cacheRead?.entry) {
+            // The decision below is made purely from the ACTUAL current state (is
+            // the rendered HTML still on screen?) plus the cache, so it
+            // self-corrects no matter what the owner-switch / deactivate branch
+            // did. The previous "Option A already restored, so do nothing" no-op
+            // arm trusted a one-shot flag that a follow-on worker-deactivate
+            // render could invalidate by blanking markdownRenderedHtmlRef AFTER
+            // the flag was set — leaving the first retained reopen on an
+            // EDR-throttled host with the flag still true but the HTML at length
+            // 0, so this effect did nothing and getMarkdownRenderedHtml() never
+            // recovered (PMSR-09/10/11/13/13a/13b, PMN-41, CDP-10).
+            // applyMarkdownSessionCacheHit is idempotent for an identical entry,
+            // so re-applying when the HTML was lost is safe.
+            //
+            // hasRenderedHtmlOnScreen MUST reflect the ACTUAL on-screen DOM, not
+            // just `markdownRenderedHtmlRef.current`. On the VERY FIRST retained
+            // reopen the ref can read stale-truthy: the state->ref sync effect
+            // (L3375) had not yet propagated the deactivate-branch blank, while
+            // the `.project-editor-preview-content` node was already emptied. The
+            // old ref-only signal then took the zero-flash path (which never
+            // repopulates the ref) and stranded the first reopen at htmlLength 0
+            // even though subsequent reopens — where the ref had already settled
+            // to '' so the re-apply path ran — restored fine (the 8x=23322 /
+            // 3x=0 first-reopen-only residual in the round-5 PMSR log). Require
+            // the live DOM content node to actually carry HTML before trusting
+            // the zero-flash path; when the DOM is empty, fall through to the
+            // idempotent applyMarkdownSessionCacheHit re-apply path that makes
+            // every later reopen green.
+            const previewContentNode = previewRef.current?.querySelector(
+              '.project-editor-preview-content'
+            ) as HTMLElement | null
+            const domHasRenderedHtml = Boolean(previewContentNode?.innerHTML)
+            if (cacheRead?.entry && shouldTakeZeroFlashReopenPath({
+              hasContentIdenticalCacheEntry: true,
+              hasRenderedHtmlOnScreen: Boolean(markdownRenderedHtmlRef.current) && domHasRenderedHtml
+            })) {
+              // ZERO-FLASH retained reopen: the rendered HTML is STILL on screen
+              // (the worker-deactivate branch's preserveClosedPreview now also
+              // covers the reopen-in-flight window, so markdownRenderedHtmlRef
+              // was never blanked and the already-rendered mermaid DOM survives,
+              // pending === 0). React reuses the identical dangerouslySetInnerHTML
+              // node, so we MUST NOT call applyMarkdownSessionCacheHit here:
+              // beginPreviewRestore() would flip the phase to 'waiting-html' and
+              // fade the content to opacity 0 — the exact user-visible reflash
+              // PMSR-13a/13b guard against. Instead mirror the subpage-return
+              // variant below: re-seed markdownSessionCacheRenderRef so the
+              // worker effect's shouldPreserveCachedRender holds, arm the pending
+              // scroll restore (consumed by the layout effect via the render
+              // nonce), and leave the phase at 'idle'.
+              markdownSessionCacheRenderRef.current = {
+                key: cacheRead.entry.key,
+                filePath: activePath,
+                content: fileContentRef.current
+              }
+              pendingMarkdownSessionCacheRestoreRef.current = {
+                key: cacheRead.entry.key,
+                filePath: activePath
+              }
+              // Bump the render nonce so the scroll-restore + mermaid-rebuild
+              // layout effects re-run even though markdownRenderedHtml is the
+              // same string (React would otherwise skip them). This re-applies
+              // the saved preview scroll and rebuilds mermaid panzoom without
+              // ever leaving the 'idle' phase. See nonce declaration.
+              setMarkdownPreviewRenderNonce((nonce) => nonce + 1)
+              resetPreviewRestoreState()
+              perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_REOPEN_PRESERVED_NO_FLASH, {
+                // Basename only — keep the payload tiny and free of full paths.
+                filePath: activePath.split(/[\\/]/).pop() ?? activePath,
+                htmlLength: markdownRenderedHtmlRef.current.length
+              })
+            } else if (cacheRead?.entry) {
+              // Content-identical cache hit but nothing currently on screen (the
+              // retained HTML was lost, e.g. a non-retained close or an EDR race
+              // beat preserveClosedPreview). Apply the cache hit to repopulate
+              // the preview: this re-seeds markdownSessionCacheRenderRef +
+              // markdownRenderedHtmlRef so the worker effect's
+              // shouldPreserveCachedRender holds and never blanks, and it runs
+              // beginPreviewRestore() + queuePreviewReveal() so the saved scroll
+              // is re-applied. applyMarkdownSessionCacheHit is idempotent for an
+              // identical entry (it overwrites the same HTML/refs).
+              if (Boolean(markdownRenderedHtmlRef.current) && !domHasRenderedHtml) {
+                // Stale-ref first-reopen case: the ref read truthy but the live
+                // DOM was empty, so we fell through from the zero-flash branch
+                // to this idempotent re-apply. Breadcrumb so a future "blank
+                // preview on the first reopen is back" report shows the
+                // fall-through fired.
+                perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_REOPEN_DOM_EMPTY_REAPPLY, {
+                  // Basename only — keep the payload tiny and free of full paths.
+                  filePath: activePath.split(/[\\/]/).pop() ?? activePath
+                })
+              }
               applyMarkdownSessionCacheHitRef.current(activePath, fileContentRef.current, cacheRead.entry)
             } else {
+              // No content-identical cache entry. Either nothing is on screen (a
+              // fresh worker render will drive the restore) or the retained close
+              // preserved the rendered HTML; in both cases reset the phase to
+              // 'idle' (this does not blank HTML, it only clears any stale
+              // in-flight reveal phase).
               resetPreviewRestoreState()
             }
             finalizeProjectEditorReopenRestore(
@@ -6301,6 +6624,12 @@ export function ProjectEditor({
     activeFilePath,
     isMarkdownRenderAllowed,
     markdownRenderedHtml,
+    // Re-apply the pending session-cache scroll restore on a content-identical
+    // cache reapply (retained-close -> reopen). applyMarkdownSessionCacheHit
+    // re-arms pendingMarkdownSessionCacheRestoreRef on every call, but without
+    // this nonce the layout effect would not re-fire when the HTML string is
+    // unchanged, leaving the preview scrolled to top (PMSR-10). See nonce decl.
+    markdownPreviewRenderNonce,
     restorePreviewFromMemory,
     scanPreviewNearestSlug,
     scheduleEditorSyncFromPreview,
@@ -6406,6 +6735,10 @@ export function ProjectEditor({
   }, [
     isMarkdownRenderAllowed,
     markdownRenderedHtml,
+    // Re-run on a content-identical cache reapply (retained-close -> reopen) so
+    // the restore phase advances out of 'waiting-html' even when the HTML string
+    // did not change. See markdownPreviewRenderNonce declaration.
+    markdownPreviewRenderNonce,
     markdownRenderPending,
     getMermaidPreviewState,
     queuePreviewReveal,
@@ -6433,6 +6766,8 @@ export function ProjectEditor({
     getMermaidPreviewState,
     isMarkdownRenderAllowed,
     markdownRenderedHtml,
+    // Re-evaluate reveal on an identical-HTML cache reapply (see nonce decl).
+    markdownPreviewRenderNonce,
     markdownRenderPending,
     previewRestorePhase,
     queuePreviewReveal
@@ -6514,6 +6849,12 @@ export function ProjectEditor({
     getMermaidPreviewState,
     isMarkdownRenderAllowed,
     markdownRenderedHtml,
+    // Re-render mermaid on a content-identical cache reapply. The cached HTML is
+    // the pre-mermaid render (diagrams carry only `.mermaid-diagram`), so on a
+    // retained-close -> reopen the DOM is rebuilt without `.mermaid-rendered`
+    // and pending stays > 0; this nonce forces the runtime mermaid render to
+    // re-run even though `markdownRenderedHtml` did not change. See nonce decl.
+    markdownPreviewRenderNonce,
     queuePreviewReveal,
     scanPreviewNearestSlug,
     t,

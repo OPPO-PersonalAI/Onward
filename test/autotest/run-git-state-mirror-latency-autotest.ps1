@@ -11,8 +11,15 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = if ($env:REPO_ROOT) { $env:REPO_ROOT } else { (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 . (Join-Path $RepoRoot 'test\autotest\Resolve-DevAppBin.ps1')
 
+# LATENCY_SUITE lets the split wrappers (static / gsm17 / gsm18 / injection) write
+# distinct log files reusing this body; LATENCY_MODE selects which passes run.
+# Defaults keep this runnable whole (baseline all-groups + the 3 injection passes).
+# Mirror of run-git-state-mirror-latency-autotest.sh's LATENCY_SUITE / LATENCY_MODE.
+$LatencySuite = if ($env:LATENCY_SUITE) { $env:LATENCY_SUITE } else { 'git-state-mirror-latency' }
+$LatencyMode  = if ($env:LATENCY_MODE)  { $env:LATENCY_MODE }  else { '' }
+
 $AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin -RootDir $RepoRoot }
-$LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $RepoRoot 'traces\test-logs\git-state-mirror-latency-autotest.log' }
+$LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $RepoRoot ('traces\test-logs\' + $LatencySuite + '-autotest.log') }
 
 $LogDir = Split-Path -Parent $LogFile
 if (-not (Test-Path $LogDir)) {
@@ -78,7 +85,8 @@ try {
   function Invoke-GsmPass {
     param(
       [string]$Label,
-      [string]$FailureEnvName = ''
+      [string]$FailureEnvName = '',
+      [string]$Group = ''
     )
     $UserDataDir = Join-Path $UserDataRoot $Label
     New-Item -ItemType Directory -Path $UserDataDir -Force | Out-Null
@@ -97,6 +105,11 @@ try {
     $env:ONWARD_AUTOTEST_EXIT = '1'
     Remove-Item Env:\ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE -ErrorAction SilentlyContinue
     Remove-Item Env:\ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE -ErrorAction SilentlyContinue
+    Remove-Item Env:\ONWARD_AUTOTEST_GSM_WATCHER_SILENT -ErrorAction SilentlyContinue
+    Remove-Item Env:\ONWARD_AUTOTEST_GSM_LATENCY_GROUP -ErrorAction SilentlyContinue
+    if ($Group) {
+      $env:ONWARD_AUTOTEST_GSM_LATENCY_GROUP = $Group
+    }
     if ($FailureEnvName) {
       Set-Item -Path "Env:\$FailureEnvName" -Value '1'
     }
@@ -117,9 +130,27 @@ try {
     Get-Content $passErr -ErrorAction SilentlyContinue | Add-Content -Path $LogFile
   }
 
-  Invoke-GsmPass -Label 'baseline'
-  Invoke-GsmPass -Label 'subscribe-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE'
-  Invoke-GsmPass -Label 'callback-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE'
+  # LATENCY_MODE selects which passes run (mirror of the .sh case): a baseline
+  # group ('static'/'gsm17'/'gsm18') runs one baseline pass with the group env;
+  # 'injection' runs the 3 watcher-failure passes; '' (default) runs everything.
+  switch ($LatencyMode) {
+    { $_ -in 'static', 'gsm17', 'gsm18' } {
+      Invoke-GsmPass -Label "baseline-$LatencyMode" -Group $LatencyMode
+    }
+    'injection' {
+      Invoke-GsmPass -Label 'subscribe-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE'
+      Invoke-GsmPass -Label 'callback-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE'
+      Invoke-GsmPass -Label 'silent-watcher' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_SILENT'
+    }
+    default {
+      Invoke-GsmPass -Label 'baseline'
+      Invoke-GsmPass -Label 'subscribe-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE'
+      Invoke-GsmPass -Label 'callback-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE'
+      # Silent watcher (subscribed, no error, drops every event) -- the production
+      # failure mode. Proves the always-on reconcile heartbeat still refreshes (GSM-19).
+      Invoke-GsmPass -Label 'silent-watcher' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_SILENT'
+    }
+  }
 
   Write-Host ''
   Write-Host '=== Test log (last 60 lines) ==='
@@ -133,61 +164,56 @@ try {
     exit 1
   }
 
-  if (-not (Select-String -Path $LogFile -Pattern 'GSM-00-fixture-loaded' -Quiet)) {
-    Write-Host 'Missing GSM-00 marker; the test may not have executed correctly'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
+  function Require-Marker {
+    param([string]$Pattern, [string]$Message)
+    # -SimpleMatch: the markers contain '-'/':' which are harmless in regex, but a
+    # literal match is clearer and avoids any future regex-special surprise.
+    if (-not (Select-String -Path $LogFile -Pattern $Pattern -SimpleMatch -Quiet)) {
+      Write-Host $Message
+      Get-Content $LogFile -Tail 40 | Out-Host
+      exit 1
+    }
   }
 
-  if (-not (Select-String -Path $LogFile -Pattern 'GSM-13-trace-marker-mirror-events-expected' -Quiet)) {
-    Write-Host 'Missing GSM-13 marker; the mirror trace coverage test did not run to completion'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
+  # Completion markers, gated by mode so each split runner only requires the
+  # markers its own group emits (mirror of the .sh case). GSM-00 + :done bracket
+  # every mode; the watcher-injection markers only exist when the injection passes run.
+  Require-Marker 'GSM-00-fixture-loaded' 'Missing GSM-00 marker; the test may not have executed correctly'
+  Require-Marker 'git-state-mirror-latency:done' 'Missing git-state-mirror-latency:done marker; the suite did not finish cleanly'
+  switch ($LatencyMode) {
+    'static' {
+      Require-Marker 'GSM-13-trace-marker-mirror-events-expected' 'Missing GSM-13 marker; the mirror trace coverage test did not run to completion'
+      Require-Marker 'GSM-14-force-refresh-bumps-generation' 'Missing GSM-14 marker; the generation refresh test did not run to completion'
+    }
+    'gsm17' {
+      Require-Marker 'GSM-13-trace-marker-mirror-events-expected' 'Missing GSM-13 marker; the mirror trace coverage test did not run to completion'
+      Require-Marker 'GSM-17-two-tasks-same-repo-consistent-status-cycles' 'Missing GSM-17 marker; the two-Task same-repo status consistency test did not run to completion'
+      Require-Marker 'GSM-17-0-clean-after-real-commit' 'Missing GSM-17 commit-clean marker; the real commit transition coverage did not run to completion'
+    }
+    'gsm18' {
+      Require-Marker 'GSM-13-trace-marker-mirror-events-expected' 'Missing GSM-13 marker; the mirror trace coverage test did not run to completion'
+      Require-Marker 'GSM-18-cross-tab-two-tabs-commit-to-clean' 'Missing GSM-18 marker; the cross-tab two-tabs commit-to-clean coverage did not run to completion'
+    }
+    'injection' {
+      Require-Marker 'GSM-15-watcher-subscribe-failure-recovers' 'Missing GSM-15 marker; the subscribe failure recovery test did not run to completion'
+      Require-Marker 'GSM-16-watcher-callback-failure-recovers' 'Missing GSM-16 marker; the callback failure recovery test did not run to completion'
+      Require-Marker 'GSM-19-silent-watcher-reconcile-refresh' 'Missing GSM-19 marker; the silent-watcher reconcile-heartbeat test did not run to completion'
+      Require-Marker 'autotest watcher failure injection active' 'Missing watcher failure injection log marker'
+    }
+    default {
+      Require-Marker 'GSM-13-trace-marker-mirror-events-expected' 'Missing GSM-13 marker; the mirror trace coverage test did not run to completion'
+      Require-Marker 'GSM-14-force-refresh-bumps-generation' 'Missing GSM-14 marker; the generation refresh test did not run to completion'
+      Require-Marker 'GSM-17-two-tasks-same-repo-consistent-status-cycles' 'Missing GSM-17 marker; the two-Task same-repo status consistency test did not run to completion'
+      Require-Marker 'GSM-17-0-clean-after-real-commit' 'Missing GSM-17 commit-clean marker; the real commit transition coverage did not run to completion'
+      Require-Marker 'GSM-18-cross-tab-two-tabs-commit-to-clean' 'Missing GSM-18 marker; the cross-tab two-tabs commit-to-clean coverage did not run to completion'
+      Require-Marker 'GSM-15-watcher-subscribe-failure-recovers' 'Missing GSM-15 marker; the subscribe failure recovery test did not run to completion'
+      Require-Marker 'GSM-16-watcher-callback-failure-recovers' 'Missing GSM-16 marker; the callback failure recovery test did not run to completion'
+      Require-Marker 'GSM-19-silent-watcher-reconcile-refresh' 'Missing GSM-19 marker; the silent-watcher reconcile-heartbeat test did not run to completion'
+      Require-Marker 'autotest watcher failure injection active' 'Missing watcher failure injection log marker'
+    }
   }
 
-  if (-not (Select-String -Path $LogFile -Pattern 'GSM-14-force-refresh-bumps-generation' -Quiet)) {
-    Write-Host 'Missing GSM-14 marker; the generation refresh test did not run to completion'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
-  }
-
-  if (-not (Select-String -Path $LogFile -Pattern 'GSM-17-two-tasks-same-repo-consistent-status-cycles' -Quiet)) {
-    Write-Host 'Missing GSM-17 marker; the two-Task same-repo status consistency test did not run to completion'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
-  }
-
-  if (-not (Select-String -Path $LogFile -Pattern 'GSM-17-0-clean-after-real-commit' -Quiet)) {
-    Write-Host 'Missing GSM-17 commit-clean marker; the real commit transition coverage did not run to completion'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
-  }
-
-  if (-not (Select-String -Path $LogFile -Pattern 'GSM-15-watcher-subscribe-failure-recovers' -Quiet)) {
-    Write-Host 'Missing GSM-15 marker; the subscribe failure recovery test did not run to completion'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
-  }
-
-  if (-not (Select-String -Path $LogFile -Pattern 'GSM-16-watcher-callback-failure-recovers' -Quiet)) {
-    Write-Host 'Missing GSM-16 marker; the callback failure recovery test did not run to completion'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
-  }
-
-  if (-not (Select-String -Path $LogFile -Pattern 'autotest watcher failure injection active' -Quiet)) {
-    Write-Host 'Missing watcher failure injection log marker'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
-  }
-
-  if (-not (Select-String -Path $LogFile -Pattern 'git-state-mirror-latency:done' -Quiet)) {
-    Write-Host 'Missing git-state-mirror-latency:done marker; the suite did not finish cleanly'
-    Get-Content $LogFile -Tail 40 | Out-Host
-    exit 1
-  }
-
-  Write-Host 'Git State Mirror latency autotest passed'
+  Write-Host "Git State Mirror latency autotest passed ($LatencySuite)"
   Write-Host "  Log: $LogFile"
 
 } finally {

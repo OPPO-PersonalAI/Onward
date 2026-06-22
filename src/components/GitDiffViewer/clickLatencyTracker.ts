@@ -189,6 +189,13 @@ export class GitDiffClickLatencyTracker {
   ): void {
     if (this.active && this.active.fileKey === fileKey && this.active.ipcEndAt === null) {
       this.active.ipcEndAt = this.now()
+      // Back-fill ipcStartAt when it is still null at end time. Under EDR a
+      // re-click of the same fileKey between markIpcStart and markIpcEnd
+      // allocates a fresh active with ipcStartAt=null; without this the sealed
+      // measurement would carry ipcEndAt but no ipcStartAt and the emitter
+      // would drop the IPC span. Collapsing the span to zero width keeps the
+      // phase chain complete and is honest (the true start was lost).
+      if (this.active.ipcStartAt === null) this.active.ipcStartAt = this.active.ipcEndAt
       this.active.cacheState = cacheState
       this.active.cacheSource = cacheInfo.source ?? null
       this.active.cacheMissReason = cacheInfo.missReason ?? null

@@ -19,6 +19,7 @@
  */
 import type { AutotestContext, TestResult } from './types'
 import type { PerfSnapshot } from '../utils/perf-monitor'
+import type { TerminalShellKind } from '../utils/terminal-command'
 
 // Helper: wait for N perf snapshots and return them
 function collectSnapshots(count: number, timeoutMs = 15000): Promise<PerfSnapshot[]> {
@@ -52,10 +53,30 @@ function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(idx, sorted.length - 1)]
 }
 
-// Helper: get high-output command for the current platform
-function getHighOutputCmd(platform: string): string {
+// Helper: resolve the live shell kind for a terminal session. Returns undefined
+// when the capability probe is unavailable so callers can fall back to a
+// platform default.
+async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
+  try {
+    return (await window.electronAPI.terminal.getInputCapabilities(terminalId)).shellKind
+  } catch {
+    return undefined
+  }
+}
+
+// Helper: get high-output command for the current platform / shell.
+//
+// On win32 the default shell is PowerShell (pty-manager prefers pwsh/powershell),
+// which cannot parse cmd.exe batch syntax (`for /L %i in (...) do @echo ...`) and
+// would emit zero PTY output. Prefer the PowerShell loop form and only fall back
+// to cmd.exe batch syntax when the session is explicitly a cmd shell. When the
+// shell kind cannot be detected, default win32 to the PowerShell form.
+function getHighOutputCmd(platform: string, shellKind?: TerminalShellKind): string {
   if (platform === 'win32') {
-    return 'for /L %i in (1,1,999999) do @echo stress-output-line-%i\r\n'
+    if (shellKind === 'cmd') {
+      return 'for /L %i in (1,1,999999) do @echo stress-output-line-%i\r\n'
+    }
+    return 'for ($i=1; $i -lt 999999; $i++) { Write-Output "stress-output-line-$i" }\r\n'
   }
   return 'yes "stress-output-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n'
 }
@@ -85,6 +106,13 @@ function getTerminalDebugApi(): {
     open: boolean
     visible: boolean
     outputVisible?: boolean
+    // Renderer lifecycle fields exposed by getSessionDebugState. These are the
+    // observable proof of the per-session hidden optimization: when a terminal
+    // is hidden, its WebGL surface is released (webglActive=false, mode falls
+    // back) and the lifecycle records the 'hidden' transition.
+    webglActive?: boolean
+    rendererMode?: 'webgl' | 'fallback'
+    rendererLastLifecycleReason?: string | null
     pendingDataChunks: number
     pendingDataBytes: number
   } | null
@@ -148,8 +176,10 @@ export async function testTerminalStress(ctx: AutotestContext): Promise<TestResu
       if (termIds.length >= 2 && hiddenIds.length > 0 && sessionMgr) {
         await sleep(2000)
 
+        const shellKind = await resolveTerminalShellKind(termIds[0])
+
         // Phase A: all mounted visible terminals output continuously.
-        const cmd = getHighOutputCmd(platform)
+        const cmd = getHighOutputCmd(platform, shellKind)
         for (const id of termIds) {
           await window.electronAPI.terminal.write(id, cmd)
         }
@@ -162,7 +192,7 @@ export async function testTerminalStress(ctx: AutotestContext): Promise<TestResu
         }
         await sleep(300)
 
-        const hiddenPhaseCmd = getHighOutputCmd(platform)
+        const hiddenPhaseCmd = getHighOutputCmd(platform, shellKind)
         for (const id of termIds) {
           await window.electronAPI.terminal.write(id, hiddenPhaseCmd)
         }
@@ -195,18 +225,59 @@ export async function testTerminalStress(ctx: AutotestContext): Promise<TestResu
           : 0
         const hiddenBuffered = statsB.totalHidden
         const baselineWrites = statsA.totalWrites
-        const hiddenSessionsBuffered = hiddenStates.length > 0 && hiddenStates.every((state) =>
+        // What production ACTUALLY does when a mounted (open) terminal is
+        // hidden via setVisibility(false), verified against the live debug
+        // snapshot the runner captured (see traces/test-logs):
+        //   1. Renderer side: applyRendererLifecycle(session, 'hidden') ->
+        //      renderer.deactivate('hidden') releases the WebGL surface, so the
+        //      session reports webglActive=false, rendererMode='fallback',
+        //      rendererLastLifecycleReason='hidden'. isOutputActive() (visible
+        //      && outputVisible) is false, so it is dropped from the active
+        //      xterm write scheduler.
+        //   2. Main side: syncMainOutputVisibility -> setOutputVisibility(false)
+        //      -> TerminalDataBuffer.setVisible(false), so bulk PTY output is
+        //      BUFFERED IN THE MAIN PROCESS and never crosses IPC to the
+        //      renderer while hidden (the strongest form of the optimization).
+        //
+        // Consequence for assertions: because main-process suppression stops
+        // the data before it reaches the renderer, the renderer-side
+        // hidden-buffer counter (perfMonitor.recordHiddenTermWrite ->
+        // hiddenTermWriteCount) is NEVER incremented for these sessions -- the
+        // live snapshot shows hiddenWrites=0 in BOTH phases. The round-2
+        // invariant `hiddenBuffered > 0` therefore asserted a renderer-buffering
+        // behaviour that production deliberately does not exhibit, contradicting
+        // its own comment. The TRUE, observable invariant is the per-session
+        // renderer-surface release plus the aggregate active-write reduction.
+        const hiddenSessionsSuppressed = hiddenStates.length > 0 && hiddenStates.every((state) =>
+          // Hidden => isOutputActive() is necessarily false (visible is one of
+          // its two AND-ed inputs), so the active renderer xterm write path is
+          // skipped, AND the renderer lifecycle recorded the 'hidden'
+          // transition which releases the WebGL surface. Both signals are set
+          // deterministically by setVisibility(false) for an open session and
+          // are GPU-independent (deactivate() always disposes WebGL).
           state.visible === false &&
-          state.pendingDataBytes > 0 &&
-          state.pendingDataChunks > 0
+          state.open === true &&
+          state.rendererLastLifecycleReason === 'hidden' &&
+          state.webglActive === false
         )
-        const visibleSessionsStayedVisible = visibleStates.length > 0 && visibleStates.every((state) =>
+        // Aggregate optimization signal: hiding sessions removed them from the
+        // active xterm write scheduler, so the renderer performed strictly
+        // fewer xterm writes in phase B than in phase A under the same offered
+        // load. Only meaningful when perfMon snapshots were collected.
+        const activeWritesReduced = !perfMon || statsB.totalWrites < statsA.totalWrites
+        const visibleSessionsStayedActive = visibleStates.length > 0 && visibleStates.every((state) =>
           state.visible === true &&
           state.open
         )
-        const testValid = hiddenSessionsBuffered && visibleSessionsStayedVisible && (!perfMon || baselineWrites > 0)
+        const testValid = hiddenSessionsSuppressed && activeWritesReduced && visibleSessionsStayedActive && (!perfMon || baselineWrites > 0)
 
         _assert('TP-06-hidden-optimization-ab', testValid, {
+          subConditions: {
+            hiddenSessionsSuppressed,
+            activeWritesReduced,
+            visibleSessionsStayedActive,
+            baselineWritesPositive: !perfMon || baselineWrites > 0
+          },
           mountedVisibleTerminals: termIds,
           hiddenTerminalIds: hiddenIds,
           hiddenSessionStates: hiddenStates,
@@ -323,7 +394,8 @@ export async function testTerminalStress(ctx: AutotestContext): Promise<TestResu
       if (termIds.length >= 4 && inputResult?.success) {
         await sleep(2500)
 
-        const cmd = getHighOutputCmd(platform)
+        const shellKind = await resolveTerminalShellKind(termIds[0])
+        const cmd = getHighOutputCmd(platform, shellKind)
         for (const id of termIds) {
           await window.electronAPI.terminal.write(id, cmd)
         }
@@ -421,7 +493,8 @@ export async function testTerminalStress(ctx: AutotestContext): Promise<TestResu
 
         await sleep(2500)
 
-        const cmd = getHighOutputCmd(platform)
+        const shellKind = await resolveTerminalShellKind(fgIds[0])
+        const cmd = getHighOutputCmd(platform, shellKind)
         for (const id of [...fgIds, ...bgIds]) {
           await window.electronAPI.terminal.write(id, cmd)
         }
@@ -503,7 +576,8 @@ export async function testTerminalStress(ctx: AutotestContext): Promise<TestResu
 
         const inputId = allIds[0]
         const bgIds = allIds.slice(1)
-        const cmd = getHighOutputCmd(platform)
+        const shellKind = await resolveTerminalShellKind(allIds[0])
+        const cmd = getHighOutputCmd(platform, shellKind)
 
         const measureLatency = async (label: string, samples: number): Promise<number[]> => {
           const latencies: number[] = []

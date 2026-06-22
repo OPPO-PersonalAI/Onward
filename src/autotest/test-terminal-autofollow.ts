@@ -315,9 +315,22 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
         output: normalizedColorOutput
       }
     )
+    // On POSIX the PTY forwards bytes verbatim, so the contiguous SGR sequence
+    // survives intact. On Windows, ConPTY redraws its screen buffer and may
+    // split/relocate the SGR codes, so the contiguous substring never appears
+    // even though the colour is applied (TA-14 proves the env vars reached the
+    // child). Assert on the structural signals instead: a red-FG SGR code, a
+    // reset code, and the stripped marker text.
+    const colorPreserved =
+      platform === 'win32'
+        ? colorProbeCompleted &&
+          /\x1b\[[0-9;]*31[;0-9]*m/.test(colorOutput) &&
+          /\x1b\[0?m/.test(colorOutput) &&
+          normalizedColorOutput.includes('__AUTOTEST_COLOR_RED__')
+        : colorProbeCompleted && colorOutput.includes('\x1b[31m__AUTOTEST_COLOR_RED__\x1b[0m')
     record(
       'TA-15-ansi-color-output-preserved',
-      colorProbeCompleted && colorOutput.includes('\x1b[31m__AUTOTEST_COLOR_RED__\x1b[0m'),
+      colorPreserved,
       {
         colorFixturePath,
         output: normalizedColorOutput

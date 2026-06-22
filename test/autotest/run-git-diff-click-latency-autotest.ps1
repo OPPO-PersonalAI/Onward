@@ -84,26 +84,35 @@ try {
 
   $TraceDir = Join-Path $RootDir "traces\perf"
   $LatestPointer = Join-Path $TraceDir "latest.txt"
-  $LatestTracePath = $null
+  # Resolve the directory that actually holds this run's perf chunks (mirrors the
+  # .sh). The pointer (latest.txt) normally holds the trace DIRECTORY path; older
+  # runs may have left a single chunk-file path, or the pointer may be
+  # missing/stale. In every case we resolve a directory and then scan ALL chunks
+  # inside it — a single ONWARD_PERF_TRACE run rotates output across many
+  # perf-*.jsonl chunks, so any one chunk is an unreliable sample of the events.
+  $PerfScanDir = $TraceDir
   if (Test-Path $LatestPointer) {
-    $LatestTracePath = (Get-Content $LatestPointer -Raw).Trim()
-  }
-  # Robustness (mirrors the .sh): the pointer may be missing, stale, or — when a
-  # prior run was killed mid-flush — hold the trace DIRECTORY path instead of a
-  # chunk file. In any of those cases fall back to the newest perf chunk by mtime.
-  # Perf chunks are ndjson-chunked perf-*.jsonl (older runs may have *.json).
-  if (-not $LatestTracePath -or -not (Test-Path $LatestTracePath -PathType Leaf)) {
-    $LatestTracePath = Get-ChildItem -Path $TraceDir -File -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -like "perf-*.jsonl" -or $_.Extension -eq ".json" } |
-      Sort-Object LastWriteTime -Descending |
-      Select-Object -First 1 |
-      ForEach-Object { $_.FullName }
-  }
-  if (-not $LatestTracePath -or -not (Test-Path $LatestTracePath -PathType Leaf)) {
-    Write-Error "Cannot locate perf trace file under $TraceDir"
+    $pointerValue = (Get-Content $LatestPointer -Raw).Trim()
+    if ($pointerValue -and (Test-Path $pointerValue -PathType Container)) {
+      $PerfScanDir = $pointerValue
+    } elseif ($pointerValue -and (Test-Path $pointerValue -PathType Leaf)) {
+      $PerfScanDir = Split-Path -Parent $pointerValue
+    }
   }
 
-  $trace = Get-Content $LatestTracePath -Raw
+  # Collect every perf chunk in the resolved directory. Perf chunks are
+  # ndjson-chunked perf-*.jsonl (older runs may have *.json).
+  $perfChunks = @(
+    Get-ChildItem -Path $PerfScanDir -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like "perf-*.jsonl" -or $_.Extension -eq ".json" }
+  )
+  if ($perfChunks.Count -eq 0) {
+    Write-Error "Cannot locate any perf trace chunk under $PerfScanDir"
+  }
+
+  # Concatenate every chunk so an event landing in a non-newest chunk still
+  # counts as present.
+  $trace = ($perfChunks | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
   $phaseEvents = @(
     "renderer:git-diff.click-phase.ipc",
     "renderer:git-diff.click-phase.state-set",
@@ -118,7 +127,7 @@ try {
   )
   $missing = @($phaseEvents | Where-Object { $trace -notmatch [regex]::Escape($_) })
   if ($missing.Count -gt 0) {
-    Write-Error ("Phase chain regression; missing events: " + ($missing -join ", "))
+    Write-Error ("Phase chain regression; missing events: " + ($missing -join ", ") + " (trace dir: $PerfScanDir, $($perfChunks.Count) chunks scanned)")
   }
 
   Write-Host "Git Diff click latency autotest passed. Log: $LogFile"

@@ -118,6 +118,22 @@ test('payload carries cwd / terminalId / fileKey / filename / cacheState / cache
   }
 })
 
+test('emits IPC span via clickAt fallback when ipcStartAt is null (EDR re-click race)', () => {
+  // Under EDR a re-click of the same fileKey between markIpcStart and markIpcEnd
+  // allocates a fresh active with ipcStartAt=null while the original markIpcEnd
+  // still sets ipcEndAt. The sealed measurement then has ipcEndAt set but
+  // ipcStartAt null. The emitter must still produce a click-phase.ipc record
+  // (using clickAt as the start fallback) so the phase chain stays complete.
+  const records = buildClickPhaseTraceRecords(
+    baseMeasurement({ clickAt: 0, ipcStartAt: null, ipcEndAt: 5, tokenizeSettleAt: 24 }),
+    CTX
+  )
+  const ipc = records.find((r) => r.event === CLICK_PHASE_EVENT_NAMES.IPC)
+  assert.ok(ipc, 'click-phase.ipc must be emitted even when ipcStartAt is null')
+  // Duration falls back to ipcEndAt - clickAt = 5 - 0.
+  assert.equal((ipc.payload as Record<string, unknown>).durationMs, 5)
+})
+
 test('emits cold mount span when present', () => {
   const records = buildClickPhaseTraceRecords(baseMeasurement({ coldMountMs: 123.456 }), CTX)
   const coldMount = records.find((r) => r.event === CLICK_PHASE_EVENT_NAMES.COLD_MOUNT)

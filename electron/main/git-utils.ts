@@ -2555,7 +2555,17 @@ export async function prewarmHistoryCommitDiffs(
   try {
     const { stdout } = await execFileAsync(
       meta.gitExecutable,
-      ['-c', 'core.quotepath=false', 'log', '--raw', '--numstat', '--format=%x1e%H%x1f%P', '-n', String(n), ref],
+      // `--diff-merges=first-parent` is REQUIRED for correctness: without it, git
+      // omits the diff body for merge commits entirely, so the parser would prime
+      // the L9 cache with an EMPTY file list for every merge. A later on-click
+      // `getGitHistoryDiff` is a pure cache HIT (key matches), so the user would
+      // see ZERO files for any merge commit even though `git diff parents[0] head`
+      // (the on-demand path) reports the real changes. first-parent makes the
+      // prewarmed body match `base = parents[0]` exactly — see the cache-key note
+      // above. On git < 2.31 this flag is unknown and the whole spawn throws, which
+      // the catch below turns into `{ warmed: 0 }`, falling back to the correct
+      // per-commit `getGitHistoryDiff` (no regression on old git).
+      ['-c', 'core.quotepath=false', 'log', '--raw', '--numstat', '--diff-merges=first-parent', '--format=%x1e%H%x1f%P', '-n', String(n), ref],
       { cwd: meta.repoRoot, timeout: EXEC_TIMEOUT, env: getExecEnv(), maxBuffer: MAX_DIFF_OUTPUT },
       {
         // Low-priority background lane so this never blocks a foreground enter.
@@ -2606,6 +2616,18 @@ export async function prewarmHistoryCommitDiffs(
     }
     controller.prime(buildHistoryCommitDiffCacheKey(cwd, options), result)
     warmed += 1
+    // Diagnostic breadcrumb: a merge commit (2+ parents) was primed with its
+    // first-parent diff. Lets a future "merge file list empty again" trace confirm
+    // the first-parent body was actually captured (fileCount > 0 for a real merge).
+    if (commit.parents.length > 1) {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_HISTORY_MERGE_PRIMED, {
+        repoRoot: meta.repoRoot,
+        head: head.slice(0, 12),
+        base: base.slice(0, 12),
+        parentCount: commit.parents.length,
+        fileCount: files.length
+      })
+    }
   }
   return { warmed }
 }
@@ -2718,6 +2740,32 @@ async function readWorkingFile(
   return { content: buffer.toString('utf-8'), isBinary: false, sizeBytes: buffer.length }
 }
 
+/**
+ * Index-generation token for the long-running `cat-file --batch` freshness gate.
+ *
+ * Returns a cheap `mtime:size` stat token of the repo's `.git/index`. `git`
+ * rewrites `index` atomically on every stage / unstage / partial-stage, so the
+ * token changes exactly when the batch's in-memory index snapshot would go
+ * stale. The batch compares this token against the one it spawned with and
+ * respawns on mismatch (see `git-cat-file-batch.ts`), guaranteeing an index-ref
+ * read after a mutation returns the FRESH index (GDS-22 / GDS-33).
+ *
+ * The gitDir is resolved through the permanently-cached `getGitRepoMeta` (no
+ * spawn after first resolution); the stat itself is one libuv-threadpool call.
+ * On any failure we return null — a null token makes the batch conservatively
+ * respawn for index reads (`shouldRespawnForIndexGeneration(token, null)` for the
+ * spawned side), so a missing token degrades to "always fresh", never "stale".
+ */
+async function resolveIndexGenerationToken(cwd: string): Promise<string | null> {
+  try {
+    const meta = await getGitRepoMeta(cwd)
+    const gitDir = meta.gitDir || join(meta.repoRoot || cwd, '.git')
+    return await getStatToken(join(gitDir, 'index'))
+  } catch {
+    return null
+  }
+}
+
 async function readGitFileByRef(
   cwd: string,
   gitExecutable: string,
@@ -2757,23 +2805,30 @@ async function readGitFileByRef(
   let size: number | null = null
   let buffer: Buffer = Buffer.alloc(0)
   let resolvedByBatch = false
-  // The MUTABLE index (`:<path>` / `:0:<path>` …) must NOT be served by the
-  // long-running batch: a `git cat-file --batch` process caches the index in
-  // memory at first access, so after a `git add` / stage / partial-stage
-  // changes the index, the batch keeps returning the STALE startup index blob
-  // (confirmed by repro). That surfaced as staged diffs showing HEAD/base
-  // content on both sides (GDS-22/33). Only IMMUTABLE objects (HEAD:path,
-  // <commit>:path, blob oids) are safe for the batch; index refs fall through
-  // to the per-call path below, which re-reads the current index each time.
+  // INDEX refs (`:<path>` / `:0:<path>` …) read the MUTABLE index, which a
+  // long-running `git cat-file --batch` snapshots at PROCESS START. They used to
+  // be barred from the batch entirely (a batch spawned before a `git add` /
+  // stage / partial-stage served the STALE startup index blob — staged diffs
+  // showing HEAD/base content on both sides, GDS-22/33). They are now ALLOWED on
+  // the batch, made fresh by an INDEX-GENERATION token: we stat `.git/index`
+  // (mtime:size) and pass it to the batch, which disposes + respawns when the
+  // token changed since spawn so the new process snapshots the CURRENT index.
+  // Immutable objects (HEAD:path, <commit>:path, blob oids) pass a null token —
+  // index churn cannot affect them, so they never force a respawn.
   const mutableIndexRef = isMutableIndexRef(ref)
+  const indexGeneration = mutableIndexRef
+    ? await resolveIndexGenerationToken(cwd)
+    : null
   // Phase A: long-running `git cat-file --batch` (one process per repo) — no
   // per-read process spawn, so the EDR per-spawn tax on file-content reads
   // (~1.3s/file) collapses to a pipe round-trip. Enabled only on win32 + darwin
   // (gitCatFileBatch.isSupportedPlatform()); other platforms (Linux) skip
-  // straight to the per-call path below, where native spawns are cheap.
-  if (gitCatFileBatch.isSupportedPlatform() && !mutableIndexRef) {
+  // straight to the per-call path below, where native spawns are cheap. Both
+  // immutable AND index refs route through the batch now; index refs carry the
+  // freshness token resolved above.
+  if (gitCatFileBatch.isSupportedPlatform()) {
     try {
-      const batch = await gitCatFileBatch.readObject(cwd, gitExecutable, ref, options)
+      const batch = await gitCatFileBatch.readObject(cwd, gitExecutable, ref, options, indexGeneration)
       if (batch.largeFile) {
         return buildGitLargeFileReaderResult(batch.sizeBytes)
       }

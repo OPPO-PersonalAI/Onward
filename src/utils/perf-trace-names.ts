@@ -261,6 +261,52 @@ export const PERF_TRACE_EVENT = {
   // during this restore cycle), durationMs.
   RENDERER_MARKDOWN_PREVIEW_REVEAL: 'renderer:markdown.preview-reveal',
   RENDERER_MARKDOWN_SESSION_CACHE_CAPTURE: 'renderer:markdown.session-cache-capture',
+  // ph='i'. Emitted by the worker-owner-switch effect when, on a
+  // shortcut-reopen via the retained-view fast path, the markdown HTML would
+  // otherwise be blanked + re-rendered, but the persistent session cache holds
+  // a CONTENT-IDENTICAL render for the reopened file. Instead of clearing the
+  // HTML and waiting on the EDR-throttled markdown worker (which can land after
+  // the 20s reopen-restore budget), the rendered HTML + scroll are restored
+  // SYNCHRONOUSLY from the cache. The breadcrumb lets a future "reopened preview
+  // is blank" bug report show whether this synchronous restore fired. Payload =
+  // { filePath (basename), htmlLength }.
+  RENDERER_PROJECT_EDITOR_MD_REOPEN_CACHE_RESTORED: 'renderer:project-editor.md-reopen-cache-restored',
+  // Retained-view shortcut reopen took the ZERO-FLASH path: the rendered HTML
+  // (and the already-rendered mermaid DOM) was still on screen, so the restore
+  // re-armed the pending scroll restore + bumped the render nonce WITHOUT calling
+  // applyMarkdownSessionCacheHit / beginPreviewRestore, keeping previewRestorePhase
+  // at 'idle' for the whole reopen (no waiting-html opacity fade). This breadcrumb
+  // lets a future "reopen still flashes" bug report show whether the zero-flash
+  // branch was reached or whether the heavier re-apply path ran instead. Payload =
+  // { filePath (basename), htmlLength }.
+  RENDERER_PROJECT_EDITOR_MD_REOPEN_PRESERVED_NO_FLASH: 'renderer:project-editor.md-reopen-preserved-no-flash',
+  // Retained-view shortcut reopen FELL THROUGH the zero-flash path because the
+  // live `.project-editor-preview-content` DOM node was actually empty even
+  // though `markdownRenderedHtmlRef.current` read truthy (a stale ref on the
+  // very first reopen: the state->ref sync effect had not yet propagated the
+  // deactivate-branch blank). The restore re-applied the content-identical
+  // session cache instead, repopulating the ref + DOM. This breadcrumb lets a
+  // future "blank preview on the FIRST reopen is back" bug report show whether
+  // the DOM-empty fall-through fired (the re-apply ran) versus the zero-flash
+  // branch trusting a stale ref. Payload = { filePath (basename) }.
+  RENDERER_PROJECT_EDITOR_MD_REOPEN_DOM_EMPTY_REAPPLY: 'renderer:project-editor.md-reopen-dom-empty-reapply',
+  // openFile self-healed a stale `isMarkdownPreviewOpen` snapshot for an explicit
+  // markdown open (user/debug/restore). After a project-editor reopen the openFile
+  // call could latch a racing snapshot where the preview-open flag was still
+  // false, leaving the reopened markdown file with the preview never enabled and
+  // the render never started. This breadcrumb lets a future "reopened markdown
+  // file shows no preview" bug report show whether the self-heal fired. Payload =
+  // { filePath (basename), source }.
+  RENDERER_PROJECT_EDITOR_MD_PREVIEW_OPEN_SELF_HEALED: 'renderer:project-editor.md-preview-open-self-healed',
+  // openFile re-enabled the markdown render gate on its already-active-file
+  // early-return. A deep-link "Jump to Editor" from Git Diff re-opens the file
+  // that is already the active editor file; on the way into Diff
+  // `resetActiveFileState` cleared `isMarkdownRenderEnabled` while preserving the
+  // rendered HTML, and the early-return never re-enabled it, leaving the preview
+  // pane reporting `isMarkdownPreviewVisible() === false`. This breadcrumb lets a
+  // future "preview dead after Diff jump-to-editor" bug report show whether the
+  // render gate was re-enabled. Payload = { filePath (basename), source }.
+  RENDERER_PROJECT_EDITOR_MD_RENDER_GATE_REENABLED: 'renderer:project-editor.md-render-gate-reenabled',
   RENDERER_MONACO_VIEWSTATE_RESTORE: 'renderer:monaco.viewstate-restore',
   RENDERER_XTERM_WEBGL_INIT: 'renderer:xterm.webgl-context-init',
 
@@ -313,6 +359,13 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_PREWARM_REPO_TRIGGERED: 'main:git.prewarm.repo-triggered',
   MAIN_GIT_PREWARM_REPO_SKIPPED_DEDUP: 'main:git.prewarm.repo-skipped-dedup',
   MAIN_GIT_PREWARM_HISTORY_DONE: 'main:git.prewarm.history-done',
+  // A merge commit was primed into the L9 commit-diff cache with its FIRST-PARENT
+  // diff (`git log --diff-merges=first-parent`). Without that flag git omits merge
+  // diffs entirely, so the prewarm primed an EMPTY file list and the on-click cache
+  // HIT showed zero files for every merge commit (a real Git History bug). This
+  // breadcrumb lets a future "merge file list empty again" report show whether the
+  // prewarm actually primed a non-empty merge result. Off-hot-path → diagnostic.
+  MAIN_GIT_PREWARM_HISTORY_MERGE_PRIMED: 'main:git.prewarm.history-merge-primed',
   // A cwd was abandoned (no live terminal) past the grace window, so its wasted
   // background content-precompute burst was cancelled to free the EDR git-spawn
   // budget for the cwd the user actually landed on. Off-hot-path → diagnostic.
@@ -342,6 +395,19 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_CATFILE_BATCH_SPAWNED: 'main:git.cat-file-batch.spawned',
   MAIN_GIT_CATFILE_BATCH_PROCESS_EXITED: 'main:git.cat-file-batch.process-exited',
   MAIN_GIT_CATFILE_BATCH_FALLBACK: 'main:git.cat-file-batch.fallback',
+  // INDEX ref (`:<path>`, the staged/index side of a changed file) served from
+  // the long-running batch instead of the old per-call `cat-file -s` +
+  // `cat-file blob` spawn pair (the single biggest reducible EDR cost — 2
+  // spawns/file eliminated). Tagged `action`:
+  //   - 'served'              — an index ref answered over the batch pipe (hot
+  //                             per-file read; the spawn-pair this removed).
+  //   - 'respawn-stale-index' — `.git/index` mutated since the batch spawned, so
+  //                             the process was disposed + respawned to snapshot
+  //                             the CURRENT index (the GDS-22/33 freshness gate
+  //                             firing). A burst means heavy stage/unstage churn.
+  // ph='i' (instantaneous). The freshness decision is unit-locked by
+  // git-cat-file-index-freshness.test.mts.
+  MAIN_GIT_CATFILE_INDEX_REF_BATCHED: 'main:git.cat-file.index-ref-batched',
 
   // ───────── Main process — Git Repository Snapshot Service ─────────
   // Lesson #13 follow-up: the read-side surface (Diff / History / Editor
@@ -515,7 +581,26 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',
   RENDERER_GIT_DIFF_AUX_MIRROR_SUBSCRIPTION: 'renderer:git-diff.aux-mirror-subscription',
   RENDERER_GIT_DIFF_SUBPAGE_RESTORE: 'renderer:git-diff.subpage-restore',
+  // Emitted when a renderer-side `getDiff` invoke is force-released by the
+  // loadDiff IPC watchdog because the main-process worker reply never settled
+  // (EDR-throttled host / wedged git worker). Without this the in-flight lock
+  // would leak and freeze Keep/Deny + every later load forever; the watchdog
+  // releases the lock and this breadcrumb shows the release in a user trace.
+  RENDERER_GIT_DIFF_LOAD_IPC_TIMEOUT: 'renderer:git-diff.load-ipc-timeout',
+  // Emitted when the renderer IPC watchdog fires on a getDiff invoke but the
+  // viewer already holds a non-empty file list. Rather than blanking the diff to
+  // an empty error result (which silently destroyed the user's file list and
+  // broke Keep/Deny + sibling lookups on an EDR-throttled host), the catch
+  // PRESERVES the prior list. This breadcrumb shows in a user trace that a slow
+  // reload was abandoned but the visible list was kept intact.
+  RENDERER_GIT_DIFF_LOAD_WATCHDOG_PRESERVED: 'renderer:git-diff.load-watchdog-preserved',
   RENDERER_GIT_DIFF_SUBMODULE_OUTLINE_OBSERVED: 'renderer:git-diff.submodule-outline-observed',
+  // Emitted when Git Diff opens against an explicit cwd supplied in the
+  // `git-diff:open` event detail, bypassing terminalInfo / persisted / OSC cwd
+  // resolution. Autotest-only path today; the trace makes "diff opened against
+  // an overridden cwd" visible in a user-attached trace if the detail ever
+  // carries a cwd in production.
+  RENDERER_GIT_DIFF_CWD_OVERRIDE: 'renderer:git-diff.cwd-override',
   RENDERER_CLIPBOARD_PATH_COPY: 'renderer:clipboard.path-copy',
   RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff',
 

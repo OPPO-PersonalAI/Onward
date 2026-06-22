@@ -7,10 +7,62 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$REPO_ROOT"
 source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
+# ---------------------------------------------------------------------------
+# Class-2 split (oversized case). The whole GDS-* suite forks ~69 git processes
+# per Git Diff round-trip and is EDR-taxed to ~6-11 s/diff; the dominant cost is
+# the diff LOAD itself (~7-35 s/scenario — measured sincePreviousRecordMs ran
+# 6.8/7.6/9.2/13/16/17/18/34.6 s). The full suite TIMED OUT, and so did the 4-way
+# split (round-4: all four sub-runners hit ~283-284 s, their 280 s watchdog),
+# because diff-ux summed ~235 s and model-sync ~154 s of irreducible diff work
+# alone. The suite is now cut SIX ways, balanced BY MEASURED PER-CASE COST so every
+# sub-runner is confidently < 220 s (each group ~96-122 s of case-work + ~45 s
+# fixed overhead = ~141-167 s; ≥53 s margin to 220 s, ≥73 s to the 290 s watchdog).
+# This body is parameterised by GDS_GROUP so the six thin wrappers select a
+# balanced slice each, mirroring the GitStateMirror-latency LATENCY_MODE split.
+# GDS_SUITE gives each wrapper a distinct log/suite name; defaults keep this
+# runnable WHOLE (GDS_GROUP='' = all). The heaviest singles are spread one-per-group
+# so no group clusters them (GDS-17→reentry, GDS-31→presentation, GDS-19/43→model-
+# sync, GDS-20→reentry), and the two atomic UI blocks (BlockA=GDS-21..29,
+# BlockE=GDS-35..39) each own their own ux group.
+#   GDS_GROUP='submodule'           — parent/sub c/m/u filter + nested/uninitialized
+#                                     + staged-pointer + closed-parent submodule
+#                                     freshness (GDS-01..05,13,14,46). ~113s work.
+#   GDS_GROUP='staleness'           — request-cache invalidation / watcher-driven
+#                                     freshness / concurrent converge + Project-
+#                                     Editor-save freshness (GDS-06..10,45). ~122s.
+#   GDS_GROUP='reentry'             — subdir-scope watch + re-entry-content body
+#                                     refresh + re-entry-latency trend + draft-
+#                                     preserved-on-refresh (GDS-15,17,18,20). ~114s.
+#   GDS_GROUP='diff-ux-presentation'— VS Code resource / split / hunk / refresh
+#                                     atomic UI block + blank-until-file-selected
+#                                     (GDS-21..29 block, 31). ~96s work.
+#   GDS_GROUP='diff-ux-tree'        — tree icons / flat-tree / groups / editor-jump
+#                                     atomic block + prefetch-body + partial-stage
+#                                     (GDS-35..39 block, 32, 33). ~113s work.
+#   GDS_GROUP='model-sync'          — open-view selected-body refresh + repeated
+#                                     same-file refresh + external stable-status
+#                                     Monaco model sync (GDS-19,43,44). ~119s work.
+#   GDS_GROUP=''                    — default: run every group (whole suite).
+# ---------------------------------------------------------------------------
+GDS_SUITE="${GDS_SUITE:-git-diff-staleness-and-submodule}"
+GDS_GROUP="${GDS_GROUP:-}"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/git-diff-staleness-and-submodule-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/${GDS_SUITE}-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
-WATCHDOG_SEC="${GDS_WATCHDOG_SEC:-360}"
+# Watchdog: each split slice must finish inside the orchestrator's 300 s budget,
+# so the wrappers run with a 280 s in-app watchdog (just under 300 s, leaving the
+# orchestrator's own kill as the outer fence). Each slice is sized to ~141-167 s of
+# real work, so the 280 s watchdog is a backstop, not the design target — a slice
+# that approaches 280 s is a regression to root-cause, not a budget to widen. The
+# WHOLE-suite default stays 570 s
+# (the suite is over-budget when run whole and is meant to be run split in the
+# gate; the 570 s default only keeps the runnable-whole path from self-killing
+# before the historical 600 s orchestrator override). Overridable via GDS_WATCHDOG_SEC.
+if [[ -n "$GDS_GROUP" ]]; then
+  WATCHDOG_SEC="${GDS_WATCHDOG_SEC:-280}"
+else
+  WATCHDOG_SEC="${GDS_WATCHDOG_SEC:-570}"
+fi
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
@@ -25,7 +77,7 @@ fi
 # previous run can't leak in and turn unrelated PRs into "test broke things"
 # investigations.
 # ---------------------------------------------------------------------------
-RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-gds-run.XXXXXX")"
+RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-${GDS_SUITE}-run.XXXXXX")"
 USER_DATA_DIR="$RUN_TMP_DIR/user-data"
 mkdir -p "$USER_DATA_DIR"
 
@@ -60,6 +112,8 @@ rm -f "$LOG_FILE"
 
 echo "Starting Git Diff staleness + submodule filter autotest..."
 echo "  Binary:        $APP_BIN"
+echo "  Suite:         $GDS_SUITE"
+echo "  GDS group:     ${GDS_GROUP:-<all>}"
 echo "  Clean repo:    $CLEAN_ROOT"
 echo "  Manifest:      $MANIFEST_PATH"
 echo "  User data dir: $USER_DATA_DIR"
@@ -68,6 +122,10 @@ echo "  Watchdog:      ${WATCHDOG_SEC}s"
 echo "  Log:           $LOG_FILE"
 echo ""
 
+# NOTE: ONWARD_AUTOTEST_SUITE selects which autotest TS function the renderer
+# runs and MUST stay 'git-diff-staleness-and-submodule' for every group — only
+# the on-disk log / GDS_SUITE name changes. ONWARD_AUTOTEST_GDS_GROUP partitions
+# the cases inside that single TS suite ('' = whole suite).
 APP_EXIT=0
 TMPDIR="$RUN_TMP_DIR" \
 ONWARD_DEBUG=1 \
@@ -76,6 +134,7 @@ ONWARD_REPO_ROOT="$REPO_ROOT" \
 ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
 ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=git-diff-staleness-and-submodule \
+ONWARD_AUTOTEST_GDS_GROUP="$GDS_GROUP" \
 ONWARD_AUTOTEST_CWD="$CLEAN_ROOT" \
 ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH" \
 ONWARD_AUTOTEST_EXIT=1 \
@@ -87,7 +146,7 @@ tail -n 80 "$LOG_FILE"
 echo ""
 
 if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
-  echo "Git Diff staleness autotest failed" >&2
+  echo "Git Diff staleness autotest failed (${GDS_SUITE}, group ${GDS_GROUP:-<all>})" >&2
   echo ""
   echo "=== Failure details ==="
   grep "\[AutoTest\] FAIL" "$LOG_FILE" >&2
@@ -95,80 +154,77 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
 fi
 
 if [[ "$APP_EXIT" -ne 0 ]]; then
-  echo "Git Diff staleness autotest exited with code $APP_EXIT" >&2
+  echo "Git Diff staleness autotest exited with code $APP_EXIT (${GDS_SUITE}, group ${GDS_GROUP:-<all>})" >&2
   exit "$APP_EXIT"
 fi
 
-if ! grep -q "GDS-12-trace-marker-watcher-and-freshness-expected" "$LOG_FILE"; then
-  echo "Missing GDS-12 marker; the test may not have executed correctly" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
+# ---------------------------------------------------------------------------
+# Completion markers, gated by group so each split runner only requires the
+# markers ITS OWN group emits (a split runner that demanded another group's
+# marker would always fail). group_has <group> is true when the current
+# GDS_GROUP IS that group or is empty ('' = whole suite = every group). The six
+# groups are: submodule | staleness | reentry | diff-ux-presentation |
+# diff-ux-tree | model-sync.
+# ---------------------------------------------------------------------------
+group_has() {
+  [[ -z "$GDS_GROUP" || "$GDS_GROUP" == "$1" ]]
+}
+
+require_marker() {
+  if ! grep -q "$1" "$LOG_FILE"; then
+    echo "Missing $1 marker; $GDS_SUITE may not have run to completion" >&2
+    tail -n 40 "$LOG_FILE" >&2
+    exit 1
+  fi
+}
+
+if group_has submodule; then
+  require_marker "GDS-05-mixed-parent-and-submodule-internal"
+  require_marker "GDS-14-staged-submodule-pointer-surfaces-in-parent"
+  require_marker "GDS-13-uninitialized-submodule-not-surfaced"
+  require_marker "GDS-46-closed-parent-view-submodule-edits-refresh-diff"
+  require_marker "GDS-16-trace-marker-snapshot-service-expected"
+  require_marker "GDS-46-trace-marker-auxiliary-mirror-subscription-expected"
 fi
 
-if ! grep -q "GDS-16-trace-marker-snapshot-service-expected" "$LOG_FILE"; then
-  echo "Missing GDS-16 marker; the snapshot service migration test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
+if group_has staleness; then
+  require_marker "GDS-10-concurrent-force-and-cached-converge"
+  require_marker "GDS-45-project-save-immediately-reopens-fresh-diff"
+  require_marker "GDS-12-trace-marker-watcher-and-freshness-expected"
 fi
 
-if ! grep -q "GDS-26-trace-marker-diff-file-load-expected" "$LOG_FILE"; then
-  echo "Missing GDS-26 marker; the diff file-load trace test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
+if group_has reentry; then
+  require_marker "GDS-15-subdir-entry-watches-resolved-repo-root"
+  require_marker "GDS-17-reentry-shows-latest-content"
+  require_marker "GDS-18-reentry-latency-trend-recorded"
+  require_marker "GDS-20-draft-preserved-during-external-refresh"
+  require_marker "GDS-17b-trace-marker-reentry-file-load-expected"
+  require_marker "GDS-20b-trace-marker-reentry-model-sync-expected"
 fi
 
-if ! grep -q "GDS-24a-diff-display-mode-default-inline" "$LOG_FILE"; then
-  echo "Missing GDS-24a marker; the Git Diff default display mode test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
+if group_has diff-ux-presentation; then
+  require_marker "GDS-24a-diff-display-mode-default-inline"
+  require_marker "GDS-29-inline-hunk-stage-action-trace-smoke"
+  require_marker "GDS-31-git-diff-opens-blank-until-file-selected"
+  require_marker "GDS-26-trace-marker-diff-file-load-expected"
+  require_marker "GDS-30-trace-marker-diff-ux-actions-expected"
 fi
 
-if ! grep -q "GDS-30-trace-marker-diff-ux-actions-expected" "$LOG_FILE"; then
-  echo "Missing GDS-30 marker; the diff UX action trace test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
+if group_has diff-ux-tree; then
+  require_marker "GDS-32-first-selection-uses-prefetched-body-cache"
+  require_marker "GDS-33-stage-selected-ranges-does-not-stage-whole-file"
+  require_marker "GDS-35-tree-default-icons-and-nesting"
+  require_marker "GDS-39-editor-jump-to-diff-selects-current-file"
+  require_marker "GDS-34-trace-marker-diff-body-prefetch-expected"
+  require_marker "GDS-42-trace-marker-diff-tree-editor-jumps-expected"
 fi
 
-if ! grep -q "GDS-34-trace-marker-diff-body-prefetch-expected" "$LOG_FILE"; then
-  echo "Missing GDS-34 marker; the diff body prefetch trace test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GDS-42-trace-marker-diff-tree-editor-jumps-expected" "$LOG_FILE"; then
-  echo "Missing GDS-42 marker; the diff tree/editor jump trace test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GDS-43-trace-marker-diff-model-sync-expected" "$LOG_FILE"; then
-  echo "Missing GDS-43 marker; the diff model-sync trace test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GDS-44-trace-marker-stable-status-fingerprint-expected" "$LOG_FILE"; then
-  echo "Missing GDS-44 marker; the stable-status fingerprint trace test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GDS-45-project-save-immediately-reopens-fresh-diff" "$LOG_FILE"; then
-  echo "Missing GDS-45 marker; the project-save synchronous invalidation test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GDS-46-closed-parent-view-submodule-edits-refresh-diff" "$LOG_FILE"; then
-  echo "Missing GDS-46 marker; the closed parent-view submodule freshness test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GDS-46-trace-marker-auxiliary-mirror-subscription-expected" "$LOG_FILE"; then
-  echo "Missing GDS-46 trace marker; the auxiliary Mirror subscription trace test did not run" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
+if group_has model-sync; then
+  require_marker "GDS-19-open-view-selected-body-refreshes"
+  require_marker "GDS-43-repeated-same-file-refresh-keeps-model-fresh"
+  require_marker "GDS-44-external-stable-status-edits-refresh-diff"
+  require_marker "GDS-43-trace-marker-diff-model-sync-expected"
+  require_marker "GDS-44-trace-marker-stable-status-fingerprint-expected"
 fi
 
 # ---------------------------------------------------------------------------
@@ -237,32 +293,61 @@ expect_event() {
 }
 
 echo ""
-echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42/43/44) ==="
-expect_event "GDS-11"  "main:git.diff.submodule-filter"
-expect_event "GDS-12a" "main:git-state-mirror.fanout"
-expect_event "GDS-12b" "renderer:subpage.freshness-check"
-# Snapshot service: capture is the meaningful "we routed through the
-# service" signal. We deliberately do NOT assert cache-hit here — the
-# request cache and snapshot cache are invalidated together by the
-# watcher fan-out, so during a test session the cache-hit path requires
-# a precise timing window (request cache TTL expired, watcher silent,
-# snapshot still warm) that is not worth defending against test-runner
-# flake. Cache health can still be inspected post-mortem in the trace.
-expect_event "GDS-16"  "main:git.snapshot.capture"
-expect_event "GDS-26a" "main:ipc.git.get-file-content"
-expect_event "GDS-26b" "renderer:git-diff.file-load"
-expect_event "GDS-30a" "renderer:git-diff.manual-refresh"
-expect_event "GDS-30b" "renderer:git-diff.hunk-navigate"
-expect_event "GDS-30c" "renderer:git-diff.hunk-action"
-expect_event "GDS-34"  "renderer:git-diff.body-prefetch"
-expect_event "GDS-42a" "renderer:git-diff.file-list-mode-change"
-expect_event "GDS-42b" "renderer:git-diff.jump-to-editor"
-expect_event "GDS-42c" "renderer:project-editor.jump-to-diff"
-expect_event "GDS-43"  "renderer:git-diff.model-sync"
-expect_event "GDS-44"  "worker:git-state-mirror.change-fingerprint"
-expect_event "GDS-46"  "renderer:git-diff.aux-mirror-subscription"
+echo "=== Trace event coverage (group: ${GDS_GROUP:-<all>}) ==="
+# expect_event calls are gated by group so each split runner only asserts the
+# events its own group's cases actually produced; an event that could fire in
+# MULTIPLE groups is owned by exactly ONE group whose cases are guaranteed to
+# emit it (same 4-way partition as the TS-side markers).
+if group_has submodule; then
+  expect_event "GDS-11"  "main:git.diff.submodule-filter"
+  # Snapshot service: capture is the meaningful "we routed through the
+  # service" signal. We deliberately do NOT assert cache-hit here — the
+  # request cache and snapshot cache are invalidated together by the
+  # watcher fan-out, so during a test session the cache-hit path requires
+  # a precise timing window (request cache TTL expired, watcher silent,
+  # snapshot still warm) that is not worth defending against test-runner
+  # flake. Cache health can still be inspected post-mortem in the trace.
+  expect_event "GDS-16"  "main:git.snapshot.capture"
+  expect_event "GDS-46"  "renderer:git-diff.aux-mirror-subscription"
+fi
+if group_has staleness; then
+  expect_event "GDS-12a" "main:git-state-mirror.fanout"
+  expect_event "GDS-12b" "renderer:subpage.freshness-check"
+fi
+if group_has reentry; then
+  # GDS-15/17/18 issue diff loads + file-body loads (snapshot.capture +
+  # file-load); GDS-20 drives the renderer model-sync path. These events also
+  # fire in other groups, but each is asserted here under the reentry group's
+  # own marker IDs so the reentry runner only demands events its cases emit.
+  expect_event "GDS-17b1" "main:git.snapshot.capture"
+  expect_event "GDS-17b2" "renderer:git-diff.file-load"
+  expect_event "GDS-20b"  "renderer:git-diff.model-sync"
+fi
+if group_has diff-ux-presentation; then
+  # The VS Code presentation surface (BlockA = GDS-21.., plus GDS-31) drives the
+  # file-body load and manual-refresh / hunk-navigate / hunk-action paths.
+  expect_event "GDS-26a" "main:ipc.git.get-file-content"
+  expect_event "GDS-26b" "renderer:git-diff.file-load"
+  expect_event "GDS-30a" "renderer:git-diff.manual-refresh"
+  expect_event "GDS-30b" "renderer:git-diff.hunk-navigate"
+  expect_event "GDS-30c" "renderer:git-diff.hunk-action"
+fi
+if group_has diff-ux-tree; then
+  # GDS-32 (prefetch) drives the body-prefetch path; BlockE (GDS-35..39) drives
+  # the tree-mode / editor-jump paths.
+  expect_event "GDS-34"  "renderer:git-diff.body-prefetch"
+  expect_event "GDS-42a" "renderer:git-diff.file-list-mode-change"
+  expect_event "GDS-42b" "renderer:git-diff.jump-to-editor"
+  expect_event "GDS-42c" "renderer:project-editor.jump-to-diff"
+fi
+if group_has model-sync; then
+  # GDS-43 (repeated same-file refresh) + GDS-44 (external stable-status edits)
+  # drive the renderer model-sync and worker change-fingerprint paths.
+  expect_event "GDS-43"  "renderer:git-diff.model-sync"
+  expect_event "GDS-44"  "worker:git-state-mirror.change-fingerprint"
+fi
 
 echo ""
-echo "Git Diff staleness + submodule filter autotest passed"
+echo "Git Diff staleness + submodule filter autotest passed (${GDS_SUITE}, group ${GDS_GROUP:-<all>})"
 echo "  Log:    $LOG_FILE"
 echo "  Trace:  $TRACE_TARGET (${#TRACE_FILES[@]} main chunk(s))"

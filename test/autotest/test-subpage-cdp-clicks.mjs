@@ -384,6 +384,35 @@ async function waitEditorPreviewRestored(cdp, baseline, label) {
   return await getEditorSnapshot(cdp)
 }
 
+// Deep-link jumps (e.g. the Git Diff "jump to editor" button) open the editor
+// fresh on the target file, so the preview scroll legitimately resets to the top
+// rather than restoring the pre-diff baseline scroll. The correct invariant here
+// is "editor opened on the file with a fully rendered, visible preview" — assert
+// activeFilePath + previewVisible + htmlLength against the baseline html length,
+// WITHOUT the scroll-equality requirement that back-navigation restoration uses.
+async function waitEditorOpenedRendered(cdp, baseline, expectedPath, label) {
+  await waitEditorFile(cdp, expectedPath)
+  await waitFor(
+    cdp,
+    `editor opened rendered:${label}`,
+    `(() => {
+      const api = window.__onwardProjectEditorDebug
+      if (!api?.isOpen?.()) return false
+      const activeFilePath = api.getActiveFilePath?.() ?? null
+      const previewVisible = api.isMarkdownPreviewVisible?.() ?? false
+      const htmlLength = api.getMarkdownRenderedHtml?.().length ?? 0
+      return Boolean(
+        activeFilePath === ${JSON.stringify(expectedPath)} &&
+        previewVisible &&
+        htmlLength === ${JSON.stringify(baseline.htmlLength)}
+      )
+    })()`,
+    12000,
+    120
+  )
+  return await getEditorSnapshot(cdp)
+}
+
 function assertCase(results, name, ok, detail = {}) {
   results.push({ name, ok, detail })
   console.log(`[CDP] ${ok ? 'PASS' : 'FAIL'} ${name}`, JSON.stringify(detail))
@@ -543,8 +572,7 @@ async function main() {
       8000
     )
     await clickWhenReady(cdp, '[data-testid="git-diff-jump-editor"]', 'diff-jump-to-editor')
-    await waitEditorFile(cdp, 'notes.md')
-    const editorAfterJump = await getEditorSnapshot(cdp)
+    const editorAfterJump = await waitEditorOpenedRendered(cdp, baselineEditor, 'notes.md', 'after-jump')
     assertCase(results, 'CDP-10-deep-link-diff-jump-editor', Boolean(
       editorAfterJump?.activeFilePath === 'notes.md' &&
       editorAfterJump.previewVisible &&

@@ -186,6 +186,28 @@ function findDiffFileIndex(
   return files.findIndex((file) => file.filename === filename && file.changeType === changeType)
 }
 
+// EDR-aware diff-population budget.
+//
+// On a Windows host running an EDR (endpoint detection & response) agent, each
+// `getGitDiff` round-trip forks ~69 git child processes, and the EDR taxes
+// every spawn by 1.3-12.9 s. Measured cold-load cost on the affected host was
+// elapsedMs 6586 / 9943 / 9880 / 9661 / 10048 / 9993 per diff — i.e. a single
+// diff can legitimately take ~10 s. A fixed 5000/6000 ms wait window therefore
+// expires WHILE the (correct) diff is still loading and the assertion sees an
+// empty file list, producing a false failure under EDR.
+//
+// The fix keeps the existing DETERMINISTIC predicates (file list populated /
+// selected-content model ready) so each wait still returns the instant the diff
+// actually finishes — it does NOT burn the full budget on a healthy host. The
+// budget only raises the CEILING so EDR-slow diffs are tolerated. A hard cap
+// still fails a genuine hang.
+//
+// These constants apply ONLY to diff-CONTENT population waits that depend on the
+// EDR-taxed getGitDiff round-trip. They deliberately do NOT widen the generic
+// waitFor default or unrelated short open/close gates.
+const DIFF_LOAD_BUDGET_MS = 30000
+const DIFF_LOAD_CAP_MS = 45000
+
 export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Promise<TestResult[]> {
   const { log, sleep: baseSleep, waitFor: baseWaitFor, assert, cancelled, terminalId } = ctx
   const results: TestResult[] = []
@@ -322,6 +344,56 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     pointerChangedRoot: manifest.pointerChangedRoot
   })
 
+  // Suite split: ONWARD_AUTOTEST_GDS_GROUP partitions the GDS-* cases across
+  // sub-5-min runners. The whole suite overran the regression 5-min budget on an
+  // EDR host (each Git Diff round-trip forks ~69 git processes and is EDR-taxed
+  // to ~6-11 s; the dominant cost is the diff LOAD itself, ~7-35 s per scenario
+  // — measured sincePreviousRecordMs samples ran 6.8/7.6/9.2/13/16/17/18/34.6 s).
+  // The 4-way split STILL timed out (round-4: all four sub-runners hit ~283-284 s,
+  // their 280 s watchdog) because diff-ux summed ~235 s and model-sync ~154 s of
+  // irreducible diff work alone. The suite is now cut SIX ways, balanced BY
+  // MEASURED PER-CASE COST so every sub-runner is confidently < 220 s (each group
+  // ~96-122 s of case-work + ~45 s fixed overhead = ~141-167 s; ≥53 s margin to
+  // 220 s, ≥73 s to the 290 s watchdog). Mirrors the GitStateMirror-latency
+  // LATENCY_MODE / ONWARD_AUTOTEST_GSM_LATENCY_GROUP split (class-2 oversized-case).
+  // The heaviest singles are deliberately spread one-per-group so no group clusters
+  // them: GDS-17(34.6 s)→reentry, GDS-31(35 s)→diff-ux-presentation, GDS-19(35.8 s)
+  // & GDS-43(45 s)→model-sync, GDS-20(34.6 s)→reentry; the two atomic UI blocks
+  // (BlockA = GDS-21..29, BlockE = GDS-35..39) each own their own ux group.
+  // Groups (case → cost in seconds; measured M / conservative estimate E):
+  //   'submodule'           — parent/sub c/m/u filter + nested/uninitialized +
+  //                           staged-pointer + closed-parent submodule freshness
+  //                           (GDS-01..05, 13, 14, 46). ~113 s work.
+  //   'staleness'           — request-cache invalidation / watcher-driven freshness
+  //                           / concurrent force+cached converge / Project-Editor
+  //                           -save freshness (GDS-06..10, 45). ~122 s work.
+  //   'reentry'             — subdir-scope watch + re-entry-content body refresh +
+  //                           re-entry-latency trend + draft-preserved-on-refresh
+  //                           (GDS-15, 17, 18, 20). ~114 s work.
+  //   'diff-ux-presentation'— VS Code resource / split / hunk / refresh atomic UI
+  //                           block + blank-until-file-selected (GDS-21..29 block,
+  //                           31). ~96 s work.
+  //   'diff-ux-tree'        — tree icons / flat-tree / groups / editor-jump atomic
+  //                           block + prefetch-body cache + partial-stage ranges
+  //                           (GDS-35..39 block, 32, 33). ~113 s work.
+  //   'model-sync'          — open-view selected-body refresh + repeated same-file
+  //                           refresh + external stable-status edits Monaco model
+  //                           sync (GDS-19, 43, 44). ~119 s work.
+  //   ''                    — default: run every group so the suite stays runnable
+  //                           whole.
+  // GDS-00 (fixture) brackets every group; trace markers at the tail are gated
+  // per group so each split runner only emits / requires its own group's markers.
+  const gdsGroup = window.electronAPI.debug.autotestGdsGroup || ''
+  const runGroup = (
+    g:
+      | 'submodule'
+      | 'staleness'
+      | 'reentry'
+      | 'diff-ux-presentation'
+      | 'diff-ux-tree'
+      | 'model-sync'
+  ): boolean => gdsGroup === '' || gdsGroup === g
+
   const cleanRoot = manifest.cleanRoot
   const pointerRoot = manifest.pointerChangedRoot
   const subPath = manifest.submoduleRelPath
@@ -332,21 +404,42 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   const subUntracked = manifest.submoduleUntrackedRelPath
   const platform = window.electronAPI.platform
 
+  // First successful warm-diff round-trip cost, used to size the EDR-aware
+  // diff-population budget. On a fast (non-EDR) host this is a few hundred ms,
+  // so the budget stays at DIFF_LOAD_BUDGET_MS; under EDR a single diff can take
+  // ~10 s, so the budget tracks measuredDiffMs * 3 up to DIFF_LOAD_CAP_MS.
+  let measuredDiffMs: number | null = null
+
   // Helper: capture trace-event names emitted since this point. Implemented via
   // the debug bridge on the main side which exposes a counter snapshot.
   const callDiff = async (root: string, force = false): Promise<DiffResult> => {
     const startedAt = performance.now()
     const diff = await window.electronAPI.git.getDiff(root, { scope: 'full', force })
     const result = diff as DiffResult
+    const elapsedMs = elapsed(startedAt)
+    if (result.success && measuredDiffMs === null) {
+      measuredDiffMs = elapsedMs
+    }
     logTiming('callDiff', {
       root: clampPath(root),
       force,
-      elapsedMs: elapsed(startedAt),
+      elapsedMs,
       success: result.success,
       fileCount: result.files?.length ?? null,
       repoCount: result.repos?.length ?? null
     })
     return result
+  }
+
+  // Adaptive ceiling for diff-CONTENT population waits that depend on the
+  // EDR-taxed getGitDiff round-trip. Returns the instant the deterministic
+  // predicate is satisfied; this only governs how long we are willing to wait
+  // before declaring a genuine hang. When a warm-diff cost has been measured we
+  // size to 3x that (clamped to [DIFF_LOAD_BUDGET_MS, DIFF_LOAD_CAP_MS]);
+  // otherwise we fall back to the flat DIFF_LOAD_BUDGET_MS.
+  const adaptiveDiffBudget = (): number => {
+    if (measuredDiffMs === null) return DIFF_LOAD_BUDGET_MS
+    return Math.min(DIFF_LOAD_CAP_MS, Math.max(DIFF_LOAD_BUDGET_MS, measuredDiffMs * 3))
   }
 
   const getSelectedFileContentSnapshot = () =>
@@ -456,16 +549,50 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     }, timeoutMs, 50)
   }
 
+  // Lightweight parent-repo-only dirty-file discovery for between-case cleanup.
+  //
+  // restoreBaseline only needs to learn which PARENT-repo entries (staged /
+  // unstaged / untracked) a previous case left behind so it can unstage /
+  // discard them. It does NOT need the submodule's recursed internal diff
+  // (the `scope: 'full'` round-trip's ~69-git-spawn dominator under EDR): the
+  // submodule's own working-tree mutations are the fixed {subFile, subUntracked}
+  // set, which restoreBaseline resets DETERMINISTICALLY below via
+  // saveFileContent / deletePath — independent of this discovery. So a
+  // `scope: 'root-only'` diff (parent repo only) is sufficient AND far cheaper
+  // (it skips submodule recursion entirely; see loadGitDiff's
+  // reposToLoad filter for root-only). Forced so it re-stats the work tree.
+  //
+  // Kept OUT of callDiff() on purpose: callDiff hardcodes scope:'full' and
+  // feeds measuredDiffMs (which sizes the EDR-aware DIFF_LOAD budget for the
+  // assertion-bearing full diffs). A cheap root-only discovery must not skew
+  // that budget, so it goes through getDiff directly without touching
+  // measuredDiffMs.
+  const discoverDirty = async (): Promise<DiffFile[]> => {
+    const startedAt = performance.now()
+    const diff = await window.electronAPI.git.getDiff(cleanRoot, { scope: 'root-only', force: true }) as DiffResult
+    logTiming('discoverDirty', {
+      elapsedMs: elapsed(startedAt),
+      success: diff.success,
+      fileCount: diff.files?.length ?? null
+    })
+    return diff.success ? diff.files : []
+  }
+
   const clearDiffState = async () => {
-    const stagedDiff = await callDiff(cleanRoot, true)
-    for (const file of stagedDiff.files) {
+    const stagedDiff = await discoverDirty()
+    for (const file of stagedDiff) {
       if (file.changeType === 'staged') {
         await window.electronAPI.git.unstageFile(cleanRoot, file.filename, file.repoRoot)
       }
     }
 
-    const workingDiff = await callDiff(cleanRoot, true)
-    for (const file of workingDiff.files) {
+    // A staged-only entry becomes unstaged/untracked after the unstage above, so
+    // a second discovery pass is still required to catch what the unstage
+    // surfaced. This pass remains root-only — same parent-repo-only scope as the
+    // first — so the two-pass safety net costs two cheap diffs, not two full
+    // submodule-recursing round-trips.
+    const workingDiff = await discoverDirty()
+    for (const file of workingDiff) {
       if (file.changeType === 'staged') {
         await window.electronAPI.git.unstageFile(cleanRoot, file.filename, file.repoRoot)
         continue
@@ -484,21 +611,29 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // earlier test cannot leak state into the next one. This must clean staged,
   // unstaged, and untracked entries because several scenarios deliberately
   // mutate different resource groups before returning to the shared fixture.
+  //
+  // Cost note (EDR hosts): the dominant historical cost here was THREE
+  // `scope: 'full'` getGitDiff round-trips per call (~6 s each under EDR =
+  // ~18 s/call), called ~5-8x per split group. The optimization keeps every
+  // cleanup operation but (a) routes the two discovery diffs through the
+  // root-only `discoverDirty` (skips submodule recursion) and (b) drops the
+  // trailing confirm diff entirely: every GDS case that follows restoreBaseline
+  // issues its OWN first read with force=true (or opens the view, which
+  // force-loads on entry), so the post-restore request cache is re-stat'd by
+  // the next case regardless — the confirm diff only re-measured a tree the
+  // next operation immediately re-reads. No assertion reads anything between
+  // restoreBaseline returning and the next case's first force read.
   const restoreBaseline = async () => {
     await clearDiffState()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\n')
     await window.electronAPI.git.saveFileContent(cleanRoot, stableStatusFile, '# Repeated edit target\n\nbaseline body\n')
     await window.electronAPI.git.saveFileContent(cleanRoot, subFile, '# Submodule\n\nbaseline content\n')
     await window.electronAPI.project.deletePath(cleanRoot, subUntracked)
-    // Drop the request-level cache for the clean root so the next call is
-    // guaranteed to re-stat the work tree. The watcher should also invalidate
-    // soon, but force=true is the deterministic path inside the test.
-    await callDiff(cleanRoot, true)
   }
 
   // ─────────────── GDS-01..GDS-05: submodule c/m/u filter ───────────────
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('submodule')) {
     await restoreBaseline()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-01\n')
     await sleep(200)
@@ -517,7 +652,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('submodule')) {
     await restoreBaseline()
     await window.electronAPI.git.saveFileContent(cleanRoot, subFile, '# Submodule\n\nGDS-02 mutation\n')
     await sleep(200)
@@ -536,7 +671,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('submodule')) {
     await restoreBaseline()
     await window.electronAPI.project.createFile(cleanRoot, subUntracked, 'gds-03 untracked\n')
     await sleep(200)
@@ -549,7 +684,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('submodule')) {
     const diff = await callDiff(pointerRoot, true)
     const subEntries = parentSubmoduleEntries(diff, pointerRoot, subPath)
     const flags = subEntries[0]?.submoduleFlags
@@ -563,7 +698,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('submodule')) {
     await restoreBaseline()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-05 parent\n')
     await window.electronAPI.git.saveFileContent(cleanRoot, subFile, '# Submodule\n\nGDS-05 sub\n')
@@ -592,7 +727,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // changed). The filter must keep this row by `changeType === 'staged'` —
   // otherwise the user can no longer see / unstage the gitlink change from
   // Git Diff.
-  if (!cancelled() && manifest.stagedPointerRoot) {
+  if (!cancelled() && runGroup('submodule') && manifest.stagedPointerRoot) {
     const stagedPointerRoot = manifest.stagedPointerRoot
     const diff = await callDiff(stagedPointerRoot, true)
     const subEntries = parentSubmoduleEntries(diff, stagedPointerRoot, subPath)
@@ -623,7 +758,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // `collectSubmodulesFromGitmodules` calls `getGitRepoMeta(subRepoRoot)` and
   // requires the resolved toplevel to BE the submodule path itself; an empty
   // subdir resolves to its parent's toplevel, so it gets filtered out.
-  if (!cancelled() && manifest.uninitializedRoot) {
+  if (!cancelled() && runGroup('submodule') && manifest.uninitializedRoot) {
     const uninitializedRoot = manifest.uninitializedRoot
     // Modify a parent-only file; nothing else should appear.
     await window.electronAPI.git.saveFileContent(uninitializedRoot, parentFile, 'parent source line\nGDS-13\n')
@@ -651,7 +786,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
   // ─────────────── GDS-06..GDS-10: staleness + cache ───────────────
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('staleness')) {
     await restoreBaseline()
     await callDiff(cleanRoot, true)
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-06\n')
@@ -668,7 +803,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('staleness')) {
     await restoreBaseline()
     await callDiff(cleanRoot, true)
     await sleep(50)
@@ -681,7 +816,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     ), { sawNewParentChange: Boolean(seen) })
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('staleness')) {
     await restoreBaseline()
     // Pre-populate cache via UI open, then close, then mutate, then re-open.
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
@@ -692,11 +827,13 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-08\n')
     await sleep(50)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    // Diff-CONTENT population wait (file list must reflect the closed-window
+    // mutation) — EDR-aware ceiling.
     const reopenedFresh = await waitFor('GDS-08-second-open', () => {
       const api = window.__onwardGitDiffDebug
       if (!api?.isOpen()) return false
       return api.getFileList().some((f) => f.filename === parentFile)
-    }, 6000)
+    }, adaptiveDiffBudget())
     record('GDS-08-subpage-entry-shows-fresh-data', reopenedFresh, {
       visibleFiles: window.__onwardGitDiffDebug?.getFileList()?.map((f) => f.filename) ?? null
     })
@@ -704,15 +841,18 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-08-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('staleness')) {
     await restoreBaseline()
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-09-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
     await sleep(400)
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-09 external\n')
+    // Diff-CONTENT population wait — gated on the deterministic file-list
+    // predicate but with the EDR-aware ceiling so a legitimately slow (~10 s)
+    // diff load under EDR is not mistaken for a missing external change.
     const sawExternal = await waitFor('GDS-09-external-change-reflected', () => {
       return Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile))
-    }, 5000, 100)
+    }, adaptiveDiffBudget(), 100)
     record('GDS-09-open-view-reflects-external-change', sawExternal, {
       visibleFiles: window.__onwardGitDiffDebug?.getFileList()?.map((f) => f.filename) ?? null
     })
@@ -720,7 +860,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-09-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('staleness')) {
     await restoreBaseline()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-10 concurrent\n')
     await sleep(50)
@@ -752,7 +892,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // and verify the Mirror-driven cache invalidation eventually surfaces
   // that file. If the scope were `cleanRoot/src/`, the
   // assertion would time out.
-  if (!cancelled()) {
+  // NB GROUP: GDS-15 (subdir-scope watch, ~19.5 s) moves to the 'reentry' group —
+  // its repo-root-resolution / re-entry-scope domain fits there, and the move
+  // relieves the staleness group (6 real-diff-load cases) of one more case so
+  // every split group stays well under budget.
+  if (!cancelled() && runGroup('reentry')) {
     await restoreBaseline()
     const subdirCwd = `${cleanRoot}/src`
     // First call: register the resolved repo with the invalidation bus.
@@ -784,7 +928,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // Existing GDS-08 only checks file-list freshness; the gap is the diff
   // BODY shown to the user. The assertion below probes the actual cached
   // originalContent / modifiedContent via the new debug API.
-  if (!cancelled()) {
+  // NB GROUP: GDS-17 (~34.6 s re-entry-content) anchors the 'reentry' group with
+  // GDS-15/18/20 — its native domain (open/close re-entry freshness) matches that
+  // group, and at ~34.6 s it is one of the heaviest singles, deliberately spread
+  // one-per-group so no group clusters the expensive cases.
+  if (!cancelled() && runGroup('reentry')) {
     await restoreBaseline()
     const v1Modified = 'parent source line\nGDS-17 v1 first edit\n'
     const v2Modified = 'parent source line\nGDS-17 v2 SECOND edit (must surface)\n'
@@ -794,15 +942,19 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-17-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling so the FIRST open's slow
+    // (~10 s under EDR) diff load is not declared stale before it finishes.
     await waitFor('GDS-17-first-list', () => {
       const api = window.__onwardGitDiffDebug
       return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
-    }, 6000)
+    }, adaptiveDiffBudget())
     const api1 = window.__onwardGitDiffDebug
     if (api1 && api1.getSelectedFile()?.filename !== parentFile) {
       api1.selectFileByPath(parentFile)
     }
-    const firstModelFresh = await waitForSelectedContentAndModel('GDS-17-first-content-model-ready', v1Modified)
+    const firstModelFresh = await waitForSelectedContentAndModel('GDS-17-first-content-model-ready', v1Modified, {
+      timeoutMs: adaptiveDiffBudget()
+    })
     const firstSnapshot = getSelectedFileContentSnapshot()
     const firstModelSnapshot = getSelectedEditorModelSnapshot()
     log('GDS-17-first-snapshot', firstSnapshot)
@@ -820,16 +972,18 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-17-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling (same EDR-taxed
+    // getGitDiff round-trip as the first open above).
     await waitFor('GDS-17-second-list', () => {
       const api = window.__onwardGitDiffDebug
       return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
-    }, 6000)
+    }, adaptiveDiffBudget())
     const api2 = window.__onwardGitDiffDebug
     if (api2 && api2.getSelectedFile()?.filename !== parentFile) {
       api2.selectFileByPath(parentFile)
     }
     const secondModelFresh = await waitForSelectedContentAndModel('GDS-17-second-content-model-ready', v2Modified, {
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
     const secondSnapshot = getSelectedFileContentSnapshot()
     const secondModelSnapshot = getSelectedEditorModelSnapshot()
@@ -869,7 +1023,10 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // should normally hit warm caches. This row records the timing as trend
   // data but does not hard-fail on a wall-clock threshold; the functional
   // gate is that the second entry loads a file list and reports timing.
-  if (!cancelled()) {
+  // NB GROUP: GDS-18 (re-entry-latency trend, ~25.3 s) is the flip-side of GDS-17
+  // (same open/close re-entry freshness domain), so it anchors the 'reentry' group
+  // alongside GDS-15/17/20.
+  if (!cancelled() && runGroup('reentry')) {
     await restoreBaseline()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-18 baseline\n')
     await sleep(280)
@@ -877,10 +1034,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     // First open warms the cache.
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-18-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population wait — EDR-aware ceiling.
     await waitFor('GDS-18-first-list', () => {
       const api = window.__onwardGitDiffDebug
       return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
-    }, 6000)
+    }, adaptiveDiffBudget())
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
     await waitFor('GDS-18-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
 
@@ -890,14 +1048,15 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(50)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-18-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
     await waitFor('GDS-18-second-list', () => {
       const api = window.__onwardGitDiffDebug
       return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
-    }, 6000)
+    }, adaptiveDiffBudget())
     const secondTimingReady = await waitFor('GDS-18-second-timing', () => {
       const snapshot = window.__onwardGitDiffDebug?.getTiming?.() ?? null
       return typeof snapshot?.cwdReadyToDiffLoadedMs === 'number'
-    }, 6000, 50)
+    }, adaptiveDiffBudget(), 50)
     const timing = window.__onwardGitDiffDebug?.getTiming?.() ?? null
     const cwdReadyToDiffLoadedMs = timing?.cwdReadyToDiffLoadedMs ?? null
     const timingRecorded = typeof cwdReadyToDiffLoadedMs === 'number'
@@ -917,7 +1076,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   }
 
   // ─────────────── GDS-19: open view selected body refreshes ───────────────
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('model-sync')) {
     await restoreBaseline()
     const v1Modified = 'parent source line\nGDS-19 v1 while open\n'
     const v2Modified = 'parent source line\nGDS-19 v2 while open (must surface)\n'
@@ -926,15 +1085,19 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(280)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-19-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-19-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-19-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
     }
-    await waitForSelectedContentAndModel('GDS-19-v1-model-ready', v1Modified)
+    await waitForSelectedContentAndModel('GDS-19-v1-model-ready', v1Modified, {
+      timeoutMs: adaptiveDiffBudget()
+    })
 
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, v2Modified)
     const refreshed = await waitForSelectedContentAndModel('GDS-19-v2-refresh-model-ready', v2Modified, {
-      expectedDraftContent: null
+      expectedDraftContent: null,
+      timeoutMs: adaptiveDiffBudget()
     })
     const refreshedState = getSelectedFileContentSnapshot()
     const refreshedModel = getSelectedEditorModelSnapshot()
@@ -952,7 +1115,13 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   }
 
   // ─────────────── GDS-20: draft survives external refresh ───────────────
-  if (!cancelled()) {
+  // NB GROUP: GDS-20 (~34.6 s draft-preserved-during-external-refresh) moves to
+  // the 'reentry' group for cost balance — it is one of the heaviest singles, kept
+  // away from model-sync's already-heavy GDS-19/43/44 so no group clusters them.
+  // It still drives the renderer model-sync trace path, so reentry asserts that
+  // event (an event asserted by >1 group is fine when each asserting group's cases
+  // reliably emit it).
+  if (!cancelled() && runGroup('reentry')) {
     await restoreBaseline()
     const v1Modified = 'parent source line\nGDS-20 v1 base\n'
     const v2Modified = 'parent source line\nGDS-20 v2 external\n'
@@ -962,11 +1131,14 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(280)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-20-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-20-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-20-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
     }
-    await waitForSelectedContentAndModel('GDS-20-v1-model-ready', v1Modified)
+    await waitForSelectedContentAndModel('GDS-20-v1-model-ready', v1Modified, {
+      timeoutMs: adaptiveDiffBudget()
+    })
     const draftSet = window.__onwardGitDiffDebug?.setSelectedDraftContent?.(localDraft) === true
     await waitFor('GDS-20-draft-visible', () => {
       const state = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
@@ -978,6 +1150,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     }, 3000, 50)
 
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, v2Modified)
+    // Diff-CONTENT population wait (external refresh must surface v2 while the
+    // local draft survives) — EDR-aware ceiling.
     const refreshed = await waitFor('GDS-20-draft-preserved-after-refresh', () => {
       const state = getSelectedFileContentSnapshot()
       const model = getSelectedEditorModelSnapshot()
@@ -985,7 +1159,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
         state.draftContent === localDraft &&
         model?.modifiedContent === localDraft &&
         model.modifiedMatchesState === true
-    }, 6000, 50)
+    }, adaptiveDiffBudget(), 50)
     record('GDS-20-draft-preserved-during-external-refresh', draftSet && refreshed, {
       snapshot: getSelectedFileContentSnapshot(),
       modelSnapshot: getSelectedEditorModelSnapshot(),
@@ -1006,7 +1180,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // Changes inside the test, then closes/reopens the view. The assertion reads
   // the React file-content cache and the live Monaco models, because only the
   // latter proves what the user actually sees.
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('model-sync')) {
     await restoreBaseline()
     const seedContent = 'parent source line\nGDS-43 seed\n'
 
@@ -1014,12 +1188,14 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(280)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-43-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-43-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-43-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
     }
     const seedReady = await waitForSelectedContentAndModel('GDS-43-seed-model-ready', seedContent, {
-      expectedDraftContent: null
+      expectedDraftContent: null,
+      timeoutMs: adaptiveDiffBudget()
     })
 
     const automaticIterations: Array<{
@@ -1033,9 +1209,10 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     for (let iteration = 1; iteration <= 5; iteration += 1) {
       const content = `parent source line\nGDS-43 automatic same-file edit ${iteration}\n`
       await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, content)
+      // Diff-CONTENT population wait — EDR-aware ceiling.
       const ok = await waitForSelectedContentAndModel(`GDS-43-automatic-${iteration}-model-ready`, content, {
         expectedDraftContent: null,
-        timeoutMs: 7000
+        timeoutMs: adaptiveDiffBudget()
       })
       const state = getSelectedFileContentSnapshot()
       const model = getSelectedEditorModelSnapshot()
@@ -1066,9 +1243,10 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       latestContent = content
       await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, content)
       const refreshResult = await window.__onwardGitDiffDebug?.refreshChanges?.() === true
+      // Diff-CONTENT population wait — EDR-aware ceiling.
       const ok = await waitForSelectedContentAndModel(`GDS-43-manual-${iteration}-model-ready`, content, {
         expectedDraftContent: null,
-        timeoutMs: 7000
+        timeoutMs: adaptiveDiffBudget()
       })
       const state = getSelectedFileContentSnapshot()
       const model = getSelectedEditorModelSnapshot()
@@ -1090,13 +1268,14 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-43-close-before-reopen', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-43-reopen', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-43-reopen-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-43-reopen-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
     }
     const reopenReady = await waitForSelectedContentAndModel('GDS-43-reopen-latest-model-ready', latestContent, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
 
     record('GDS-43-repeated-same-file-refresh-keeps-model-fresh', Boolean(
@@ -1124,7 +1303,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // changed-resource fingerprinting. It writes through the terminal shell, not
   // any app save IPC, so the test only passes if the Mirror observes the
   // external file mutation and invalidates Git Diff from that signal.
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('model-sync')) {
     await restoreBaseline()
     const v1Content = '# Repeated edit target\n\nGDS-44 edit v1\n'
     const v2Content = '# Repeated edit target\n\nGDS-44 edit v2 same status\n'
@@ -1134,13 +1313,14 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(320)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-44-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-44-first-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-44-first-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
     }
     const firstReady = await waitForSelectedContentAndModel('GDS-44-v1-model-ready', v1Content, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
 
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
@@ -1150,20 +1330,22 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(500)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-44-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-44-second-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-44-second-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
     }
     const secondReady = await waitForSelectedContentAndModel('GDS-44-v2-model-ready-after-closed-edit', v2Content, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
 
     const writeV3 = await writeProjectFileViaTerminal(cleanRoot, stableStatusFile, v3Content, 'GDS-44-v3')
     const refreshResult = await window.__onwardGitDiffDebug?.refreshChanges?.() === true
+    // Diff-CONTENT population wait — EDR-aware ceiling.
     const thirdReady = await waitForSelectedContentAndModel('GDS-44-v3-model-ready-after-manual-refresh', v3Content, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
 
     record('GDS-44-external-stable-status-edits-refresh-diff', Boolean(
@@ -1196,7 +1378,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // case removes the debounce slack after the second save: Project Editor saves
   // are app-owned mutations, so Git Diff caches should be invalidated before
   // the save IPC resolves, not only after the watcher settles.
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('staleness')) {
     await restoreBaseline()
     const v1Content = '# Repeated edit target\n\nGDS-45 edit v1 warm\n'
     const v2Content = '# Repeated edit target\n\nGDS-45 edit v2 immediate reopen\n'
@@ -1205,13 +1387,14 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(320)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-45-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-45-first-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-45-first-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
     }
     const firstReady = await waitForSelectedContentAndModel('GDS-45-v1-model-ready', v1Content, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
     await waitFor('GDS-45-close-before-immediate-save', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
@@ -1219,13 +1402,14 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const savedV2 = await window.electronAPI.project.saveFile(cleanRoot, stableStatusFile, v2Content)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-45-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-45-second-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
+    await waitFor('GDS-45-second-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
     }
     const secondReady = await waitForSelectedContentAndModel('GDS-45-v2-model-ready-after-immediate-save', v2Content, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
 
     record('GDS-45-project-save-immediately-reopens-fresh-diff', Boolean(
@@ -1253,7 +1437,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // stat token may not change on content-only edits. Once the parent Git Diff
   // has shown a submodule repo section, it must keep that submodule Mirror
   // subscribed while closed so the submodule content cache is invalidated too.
-  if (!cancelled()) {
+  if (!cancelled() && runGroup('submodule')) {
     await restoreBaseline()
     const subRepoRoot = joinAbsolutePath(cleanRoot, subPath, platform)
     const v1Content = '# Submodule\n\nGDS-46 submodule edit v1\n'
@@ -1263,18 +1447,19 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(500)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-46-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits (submodule section) — EDR-aware ceiling.
     await waitFor('GDS-46-first-submodule-list', () => Boolean(
       window.__onwardGitDiffDebug?.getFileList().some((f) =>
         f.filename === subEditableFile &&
         clampPath(f.repoRoot ?? '') === clampPath(subRepoRoot)
       )
-    ), 8000)
+    ), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== subEditableFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(subEditableFile)
     }
     const firstReady = await waitForSelectedContentAndModel('GDS-46-v1-model-ready', v1Content, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
 
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
@@ -1284,18 +1469,19 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(600)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-46-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits (submodule section) — EDR-aware ceiling.
     await waitFor('GDS-46-second-submodule-list', () => Boolean(
       window.__onwardGitDiffDebug?.getFileList().some((f) =>
         f.filename === subEditableFile &&
         clampPath(f.repoRoot ?? '') === clampPath(subRepoRoot)
       )
-    ), 8000)
+    ), adaptiveDiffBudget())
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== subEditableFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(subEditableFile)
     }
     const secondReady = await waitForSelectedContentAndModel('GDS-46-v2-model-ready-after-closed-submodule-edit', v2Content, {
       expectedDraftContent: null,
-      timeoutMs: 7000
+      timeoutMs: adaptiveDiffBudget()
     })
 
     record('GDS-46-closed-parent-view-submodule-edits-refresh-diff', Boolean(
@@ -1322,7 +1508,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // VS Code's SCM resource model distinguishes index, working tree, and
   // untracked resources. Onward keeps its own UI, but the underlying file
   // states must describe the same left/right resource semantics.
-  if (!cancelled()) {
+  // NB GROUP: this ATOMIC block (GDS-21,22,23,24a,24,25,25b,27,28,29×6 — one
+  // restoreBaseline + one open, shared editor state) is ~61.5 s, the largest unit
+  // in the suite, so it owns its own 'diff-ux-presentation' group alongside the
+  // lone GDS-31. Kept whole because the cases share the single open diff session.
+  if (!cancelled() && runGroup('diff-ux-presentation')) {
     await restoreBaseline()
     const indexContent = 'parent source line\nGDS-21 index version\n'
     const worktreeContent = 'parent source line\nGDS-21 working tree version\n'
@@ -1370,10 +1560,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-22-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
     await waitFor('GDS-22-list', () => {
       const files = window.__onwardGitDiffDebug?.getFileList() ?? []
       return findDiffFileIndex(files, parentFile, 'staged') >= 0 && findDiffFileIndex(files, parentFile, 'unstaged') >= 0
-    }, 6000)
+    }, adaptiveDiffBudget())
 
     const files = window.__onwardGitDiffDebug?.getFileList() ?? []
     const stagedIndex = findDiffFileIndex(files, parentFile, 'staged')
@@ -1385,13 +1576,13 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       return selected?.filename === parentFile &&
         selected.changeType === 'staged' &&
         content?.modifiedContent === indexContent
-    }, 6000)
+    }, adaptiveDiffBudget())
     const stagedContent = window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
     const unstagedSelected = unstagedIndex >= 0 && window.__onwardGitDiffDebug?.selectFileByIndex(unstagedIndex) === true
     await waitFor('GDS-22-unstaged-ready', () => {
       const content = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
       return content?.modifiedContent === worktreeContent
-    }, 6000)
+    }, adaptiveDiffBudget())
     const unstagedContent = window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
 
     record('GDS-22-vscode-left-right-content-semantics', Boolean(
@@ -1564,7 +1755,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     const refreshButtonVisible = Boolean(document.querySelector('.git-diff-refresh-changes'))
     const refreshResult = await window.__onwardGitDiffDebug?.refreshChanges?.()
-    await waitFor('GDS-28-refresh-ready', () => Boolean(window.__onwardGitDiffDebug?.isSelectedReady()), 6000)
+    // Diff-CONTENT population wait (forced full-body refresh) — EDR-aware ceiling.
+    await waitFor('GDS-28-refresh-ready', () => Boolean(window.__onwardGitDiffDebug?.isSelectedReady()), adaptiveDiffBudget())
     const refreshLoad = window.__onwardGitDiffDebug?.getLastFileContentLoad?.() ?? null
     const refreshForcedFullBodyMiss = Boolean(
       refreshLoad?.reason === 'refresh' &&
@@ -1675,12 +1867,14 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       const hunkRevertClickResult = hunkRevertButton
         ? await awaitLastHunkAction('GDS-29-hunk-revert-click')
         : null
+      // Diff-CONTENT population wait (post-revert re-diff round-trip) —
+      // EDR-aware ceiling.
       const hunkRevertApplied = hunkRevertClickResult === true && await waitFor('GDS-29-hunk-revert-applied', () => {
         const latestFiles = window.__onwardGitDiffDebug?.getFileList() ?? []
         return latestFiles.length > 0 &&
           findDiffFileIndex(latestFiles, hunkSwitchFile, 'unstaged') < 0 &&
           findDiffFileIndex(latestFiles, parentFile, 'unstaged') >= 0
-      }, 4000, 80)
+      }, adaptiveDiffBudget(), 80)
       record('GDS-29-inline-hunk-revert-action-ui-smoke', Boolean(
         switchedToOtherFileForHunks &&
         otherFileHunkWidgetsVisible &&
@@ -1728,10 +1922,12 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 	    const hunkStageResult = firstHunkReady
 	      ? await window.__onwardGitDiffDebug?.triggerFirstHunkAction?.('stage')
       : false
+    // Diff-CONTENT population wait (post-stage re-diff round-trip) —
+    // EDR-aware ceiling.
     const hunkActionApplied = await waitFor('GDS-29-hunk-stage-applied', () => {
       const latestFiles = window.__onwardGitDiffDebug?.getFileList() ?? []
       return findDiffFileIndex(latestFiles, parentFile, 'unstaged') < 0
-    }, 4000, 80)
+    }, adaptiveDiffBudget(), 80)
     record('GDS-29-inline-hunk-stage-action-trace-smoke', Boolean(
       firstHunkReady &&
       hunkStageResult &&
@@ -1760,17 +1956,22 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   }
 
   // ─────────────── GDS-31..33: blank entry, body prefetch, selected ranges ───────────────
-  if (!cancelled()) {
+  // NB GROUP: GDS-31 (~35 s blank-until-file-selected) is one of the heaviest
+  // singles and joins the 'diff-ux-presentation' group (BlockA) so the expensive
+  // cases stay spread one-per-group. GDS-32/33 (prefetch + partial-stage) join the
+  // 'diff-ux-tree' group with BlockE below.
+  if (!cancelled() && runGroup('diff-ux-presentation')) {
     await restoreBaseline()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-31 visible but not auto-opened\n')
     await sleep(280)
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-31-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population wait — EDR-aware ceiling.
     const listReady = await waitFor('GDS-31-list', () => {
       const files = window.__onwardGitDiffDebug?.getFileList() ?? []
       return files.some((file) => file.filename === parentFile)
-    }, 6000)
+    }, adaptiveDiffBudget())
     await sleep(180)
     const selected = window.__onwardGitDiffDebug?.getSelectedFile?.() ?? null
     const noSelectionText = (document.querySelector('.git-diff-no-selection')?.textContent ?? '').trim()
@@ -1788,7 +1989,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-31-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
-  if (!cancelled()) {
+  // GDS-32 (prefetch-body cache, ~28 s est) → 'diff-ux-tree' group.
+  if (!cancelled() && runGroup('diff-ux-tree')) {
     await restoreBaseline()
     const prefetchedContent = 'parent source line\nGDS-32 prefetch warms first file body\n'
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, prefetchedContent)
@@ -1796,14 +1998,15 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-32-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
     await waitFor('GDS-32-list', () => {
       const files = window.__onwardGitDiffDebug?.getFileList() ?? []
       return files.some((file) => file.filename === parentFile && file.changeType === 'unstaged')
-    }, 6000)
+    }, adaptiveDiffBudget())
     const prefetched = await waitFor('GDS-32-prefetch-body-ready', () => {
       const cached = window.__onwardGitDiffDebug?.getCachedFileContentByPath?.(parentFile, 'unstaged')
       return cached?.modifiedContent === prefetchedContent && cached.loading === false
-    }, 6000, 80)
+    }, adaptiveDiffBudget(), 80)
     const prefetchState = window.__onwardGitDiffDebug?.getPrefetchState?.() ?? null
     const cachedBeforeSelect = window.__onwardGitDiffDebug?.getCachedFileContentByPath?.(parentFile, 'unstaged') ?? null
     const selectStartedAt = performance.now()
@@ -1811,7 +2014,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const selectedReady = await waitFor('GDS-32-selected-ready', () => {
       const state = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
       return state?.modifiedContent === prefetchedContent && state.loading === false
-    }, 6000, 50)
+    }, adaptiveDiffBudget(), 50)
     const selectDurationMs = +(performance.now() - selectStartedAt).toFixed(1)
     record('GDS-32-first-selection-uses-prefetched-body-cache', Boolean(
       prefetched &&
@@ -1828,7 +2031,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-32-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
-  if (!cancelled()) {
+  // GDS-33 (partial-stage selected ranges, ~30 s est) → 'diff-ux-tree' group.
+  if (!cancelled() && runGroup('diff-ux-tree')) {
     await restoreBaseline()
     const baseContent = 'parent source line\n'
     const partiallyStagedContent = 'parent source line\nGDS-33 selected line staged\n'
@@ -1838,27 +2042,29 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await sleep(280)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-33-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population waits — EDR-aware ceiling.
     await waitFor('GDS-33-list', () => {
       const files = window.__onwardGitDiffDebug?.getFileList() ?? []
       return findDiffFileIndex(files, parentFile, 'unstaged') >= 0
-    }, 6000)
+    }, adaptiveDiffBudget())
     const filesBefore = window.__onwardGitDiffDebug?.getFileList() ?? []
     const unstagedBeforeIndex = findDiffFileIndex(filesBefore, parentFile, 'unstaged')
     const selectedBefore = unstagedBeforeIndex >= 0 && window.__onwardGitDiffDebug?.selectFileByIndex(unstagedBeforeIndex) === true
     await waitFor('GDS-33-unstaged-ready-before', () => {
       const content = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
       return content?.originalContent === baseContent && content.modifiedContent === worktreeContent
-    }, 6000)
+    }, adaptiveDiffBudget())
     const rangeSelected = window.__onwardGitDiffDebug?.setSelectedLineRangeForTest?.(2, 2, 'additions') === true
     const rangeVisible = await waitFor('GDS-33-range-visible', () => {
       const label = (document.querySelector('.git-diff-line-count')?.textContent ?? '').trim()
       return label.includes('1') && !label.includes('No lines')
     }, 3000, 50)
     const rangeAction = await window.__onwardGitDiffDebug?.triggerLineAction?.('keep')
+    // Diff-CONTENT population waits (partial-stage re-diff) — EDR-aware ceiling.
     const splitReady = await waitFor('GDS-33-split-ready', () => {
       const files = window.__onwardGitDiffDebug?.getFileList() ?? []
       return findDiffFileIndex(files, parentFile, 'staged') >= 0 && findDiffFileIndex(files, parentFile, 'unstaged') >= 0
-    }, 6000, 80)
+    }, adaptiveDiffBudget(), 80)
     const filesAfter = window.__onwardGitDiffDebug?.getFileList() ?? []
     const stagedIndexAfter = findDiffFileIndex(filesAfter, parentFile, 'staged')
     const unstagedIndexAfter = findDiffFileIndex(filesAfter, parentFile, 'unstaged')
@@ -1866,13 +2072,13 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-33-staged-ready-after', () => {
       const content = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
       return content?.originalContent === baseContent && content.modifiedContent === partiallyStagedContent
-    }, 6000)
+    }, adaptiveDiffBudget())
     const stagedContentAfter = window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
     const unstagedSelectedAfter = unstagedIndexAfter >= 0 && window.__onwardGitDiffDebug?.selectFileByIndex(unstagedIndexAfter) === true
     await waitFor('GDS-33-unstaged-ready-after', () => {
       const content = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
       return content?.originalContent === partiallyStagedContent && content.modifiedContent === worktreeContent
-    }, 6000)
+    }, adaptiveDiffBudget())
     const unstagedContentAfter = window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
     record('GDS-33-stage-selected-ranges-does-not-stage-whole-file', Boolean(
       selectedBefore &&
@@ -1903,7 +2109,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await window.electronAPI.git.discardFile(cleanRoot, { filename: parentFile, status: 'M', changeType: 'staged' })
   }
 
-  if (!cancelled()) {
+  // NB GROUP: this ATOMIC block (GDS-35,36,37,38,39 — one restoreBaseline + shared
+  // tree fixture across tree-icons / flat-mode / groups / editor-jump) is ~55 s and
+  // owns the 'diff-ux-tree' group alongside the lone GDS-32/33. Kept whole because
+  // the cases reuse the same multi-file tree fixture and open diff session.
+  if (!cancelled() && runGroup('diff-ux-tree')) {
     await restoreBaseline()
     const nestedUnstaged = 'src/features/diff-tree/tree-one.ts'
     const nestedStaged = 'src/features/diff-tree/tree-stage.ts'
@@ -1926,12 +2136,13 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-35-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    // Diff-CONTENT population wait — EDR-aware ceiling.
     const listReady = await waitFor('GDS-35-list-ready', () => {
       const files = window.__onwardGitDiffDebug?.getFileList() ?? []
       return findDiffFileIndex(files, nestedUnstaged, 'untracked') >= 0 &&
         findDiffFileIndex(files, nestedStaged, 'staged') >= 0 &&
         findDiffFileIndex(files, parentFile, 'unstaged') >= 0
-    }, 8000, 80)
+    }, adaptiveDiffBudget(), 80)
     const initialMode = window.__onwardGitDiffDebug?.getFileListViewMode?.() ?? null
     const treeRows = window.__onwardGitDiffDebug?.getVisibleTreeRows?.() ?? []
     const hasTreeDirs = treeRows.some((row) => row.type === 'dir' && row.path === 'src') &&
@@ -1963,7 +2174,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-36-close-after-flat', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-36-reopen', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
-    await waitFor('GDS-36-reopen-list', () => (window.__onwardGitDiffDebug?.getFileList() ?? []).length >= 3, 6000)
+    // Diff-CONTENT population wait — EDR-aware ceiling.
+    await waitFor('GDS-36-reopen-list', () => (window.__onwardGitDiffDebug?.getFileList() ?? []).length >= 3, adaptiveDiffBudget())
     const flatRestored = window.__onwardGitDiffDebug?.getFileListViewMode?.() ?? null
     const treeSet = window.__onwardGitDiffDebug?.setFileListViewMode?.('tree') === true
     await sleep(120)
@@ -2051,89 +2263,157 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
   if (!cancelled()) {
     const traceInfo = await window.electronAPI.debug.getPerfTraceInfo()
-    record('GDS-11-trace-marker-submodule-filter-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'main:git.diff.submodule-filter'
-      ]
-    })
-    record('GDS-12-trace-marker-watcher-and-freshness-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'main:git-state-mirror.fanout',
-        'renderer:subpage.freshness-check'
-      ]
-    })
-    // GDS-16: Snapshot service migration (lesson #13 phase 1). Every
-    // `loadGitDiff` call now routes through the snapshot service, so a
-    // healthy session MUST produce at least one `capture` event. We do
-    // not assert `cache-hit` here because the request and snapshot
-    // caches share an invalidation fan-out, so an in-test cache-hit
-    // requires a precise timing window not worth defending in CI. The
-    // runner asserts only the capture event.
-    record('GDS-16-trace-marker-snapshot-service-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'main:git.snapshot.capture'
-      ]
-    })
-    record('GDS-26-trace-marker-diff-file-load-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'main:ipc.git.get-file-content',
-        'renderer:git-diff.file-load'
-      ]
-    })
-    record('GDS-30-trace-marker-diff-ux-actions-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'renderer:git-diff.manual-refresh',
-        'renderer:git-diff.hunk-navigate',
-        'renderer:git-diff.hunk-action'
-      ]
-    })
-    record('GDS-34-trace-marker-diff-body-prefetch-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'renderer:git-diff.body-prefetch'
-      ]
-    })
-    record('GDS-42-trace-marker-diff-tree-editor-jumps-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'renderer:git-diff.file-list-mode-change',
-        'renderer:git-diff.jump-to-editor',
-        'renderer:project-editor.jump-to-diff'
-      ]
-    })
-    record('GDS-43-trace-marker-diff-model-sync-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'renderer:git-diff.model-sync'
-      ]
-    })
-    record('GDS-44-trace-marker-stable-status-fingerprint-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'worker:git-state-mirror.change-fingerprint'
-      ]
-    })
-    record('GDS-46-trace-marker-auxiliary-mirror-subscription-expected', Boolean(traceInfo?.logPath), {
-      tracePath: traceInfo?.logPath ?? null,
-      enabled: traceInfo?.enabled ?? null,
-      eventsToVerifyInRunner: [
-        'renderer:git-diff.aux-mirror-subscription'
-      ]
-    })
+    // Trace markers are gated per group so each split runner only emits — and
+    // its runner only asserts — the events that its own group's cases actually
+    // produce. A marker whose underlying event could fire in MULTIPLE groups is
+    // still assigned to exactly ONE group whose cases are guaranteed to generate
+    // it, so no split runner demands an event its own group cannot emit. (Default
+    // '' runs all groups, emitting every marker.) Each marker is parked in the
+    // SAME group as the case that produces its underlying event after the 6-way
+    // re-balance: filter/snapshot/aux-mirror → submodule; file-load/ux-actions
+    // → diff-ux-presentation (BlockA + GDS-31 drive those); body-prefetch/tree-
+    // editor-jumps → diff-ux-tree (GDS-32 + BlockE drive those); watcher/freshness
+    // → staleness; re-entry snapshot/file-load/model-sync → reentry (GDS-15/17/18/
+    // 20 drive those); model-sync/change-fingerprint → model-sync (GDS-43/44). The
+    // re-entry snapshot/file-load/model-sync events ALSO fire in other groups, but
+    // each is given a distinct reentry-owned marker ID so the assertions stay
+    // independent and the default('') run emits every marker exactly once.
+
+    // ── submodule-group markers ──
+    if (runGroup('submodule')) {
+      record('GDS-11-trace-marker-submodule-filter-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'main:git.diff.submodule-filter'
+        ]
+      })
+      // GDS-16: Snapshot service migration (lesson #13 phase 1). Every
+      // `loadGitDiff` call now routes through the snapshot service, so a
+      // healthy session MUST produce at least one `capture` event. We do
+      // not assert `cache-hit` here because the request and snapshot
+      // caches share an invalidation fan-out, so an in-test cache-hit
+      // requires a precise timing window not worth defending in CI. The
+      // runner asserts only the capture event. (Fires in every group; owned
+      // by submodule, whose filter cases issue many diff loads.)
+      record('GDS-16-trace-marker-snapshot-service-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'main:git.snapshot.capture'
+        ]
+      })
+      record('GDS-46-trace-marker-auxiliary-mirror-subscription-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'renderer:git-diff.aux-mirror-subscription'
+        ]
+      })
+    }
+
+    // ── diff-ux-presentation-group markers ──
+    // The VS Code presentation surface (BlockA = GDS-21.., plus GDS-31) drives the
+    // file-body load and manual-refresh / hunk-navigate / hunk-action paths, so
+    // those markers stay with that block.
+    if (runGroup('diff-ux-presentation')) {
+      record('GDS-26-trace-marker-diff-file-load-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'main:ipc.git.get-file-content',
+          'renderer:git-diff.file-load'
+        ]
+      })
+      record('GDS-30-trace-marker-diff-ux-actions-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'renderer:git-diff.manual-refresh',
+          'renderer:git-diff.hunk-navigate',
+          'renderer:git-diff.hunk-action'
+        ]
+      })
+    }
+
+    // ── diff-ux-tree-group markers ──
+    // GDS-32 (prefetch) drives the body-prefetch path; the BlockE tree block
+    // (GDS-35..39) drives the file-list-mode-change / jump-to-editor / jump-to-diff
+    // paths, so those markers move here with those cases.
+    if (runGroup('diff-ux-tree')) {
+      record('GDS-34-trace-marker-diff-body-prefetch-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'renderer:git-diff.body-prefetch'
+        ]
+      })
+      record('GDS-42-trace-marker-diff-tree-editor-jumps-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'renderer:git-diff.file-list-mode-change',
+          'renderer:git-diff.jump-to-editor',
+          'renderer:project-editor.jump-to-diff'
+        ]
+      })
+    }
+
+    // ── staleness-group markers ──
+    if (runGroup('staleness')) {
+      record('GDS-12-trace-marker-watcher-and-freshness-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'main:git-state-mirror.fanout',
+          'renderer:subpage.freshness-check'
+        ]
+      })
+    }
+
+    // ── reentry-group markers ──
+    // GDS-15/17/18 issue diff loads + file-body loads (snapshot.capture +
+    // file-load) and GDS-20 drives the renderer model-sync path. These events also
+    // fire in other groups, but the reentry group gets its OWN marker IDs so its
+    // runner only asserts events its own cases reliably produce.
+    if (runGroup('reentry')) {
+      record('GDS-17b-trace-marker-reentry-file-load-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'main:git.snapshot.capture',
+          'renderer:git-diff.file-load'
+        ]
+      })
+      record('GDS-20b-trace-marker-reentry-model-sync-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'renderer:git-diff.model-sync'
+        ]
+      })
+    }
+
+    // ── model-sync-group markers ──
+    // GDS-43 (repeated same-file refresh) and GDS-44 (external stable-status
+    // edits via the terminal) drive the renderer model-sync and worker
+    // change-fingerprint paths, so those markers move here with their cases.
+    if (runGroup('model-sync')) {
+      record('GDS-43-trace-marker-diff-model-sync-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'renderer:git-diff.model-sync'
+        ]
+      })
+      record('GDS-44-trace-marker-stable-status-fingerprint-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'worker:git-state-mirror.change-fingerprint'
+        ]
+      })
+    }
   }
 
   // Final cleanup: leave the clean repo in a known state so any subsequent

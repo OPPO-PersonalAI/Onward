@@ -8,11 +8,16 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$REPO_ROOT"
 source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 
+# QUIT_SUITE lets the two split wrappers (-a / -b) write distinct log/result
+# files while reusing this single body; GSM_QUIT_TRIALS partitions the 5 stochastic
+# quit trials across them (a=3, b=2). Defaults keep this runnable whole (5 trials).
+QUIT_SUITE="${QUIT_SUITE:-git-state-mirror-quit}"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/git-state-mirror-quit-autotest.log}"
-RESULT_FILE="${3:-$REPO_ROOT/traces/analysis/git-state-mirror-quit-autotest.json}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/${QUIT_SUITE}-autotest.log}"
+RESULT_FILE="${3:-$REPO_ROOT/traces/analysis/${QUIT_SUITE}-autotest.json}"
 APP_NAME="$(detect_dev_product_name "$ROOT_DIR")"
 CDP_PORT="${CDP_PORT:-9343}"
+GSM_QUIT_TRIALS="${GSM_QUIT_TRIALS:-5}"
 
 USER_DATA_BASE="$(mktemp -d "${TMPDIR:-/tmp}/onward-gsm-quit-userdata.XXXXXX")"
 FIXTURE_BASE="$(mktemp -d "${TMPDIR:-/tmp}/onward-gsm-quit-fixture.XXXXXX")"
@@ -43,6 +48,8 @@ if pgrep -lx "$APP_NAME" >/dev/null 2>&1; then
 fi
 
 echo "Starting GitStateMirror quit autotest..."
+echo "  Suite:          $QUIT_SUITE"
+echo "  Trials:         $GSM_QUIT_TRIALS"
 echo "  Binary:         $APP_BIN"
 echo "  App name:       $APP_NAME"
 echo "  User data base: $USER_DATA_BASE"
@@ -61,6 +68,7 @@ APP_BIN="$APP_BIN" \
   LOG_FILE="$LOG_FILE" \
   RESULT_FILE="$RESULT_FILE" \
   CDP_PORT="$CDP_PORT" \
+  GSM_QUIT_TRIALS="$GSM_QUIT_TRIALS" \
   node "$ROOT_DIR/test/autotest/test-git-state-mirror-quit-cdp.mjs"
 TEST_EXIT=$?
 set -e

@@ -8,9 +8,14 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 
+# MPC_SUITE lets the phase-split wrappers (idle / scroll / editor) write distinct
+# log/result files reusing this single body; MPC_ONLY_PHASE (read by the driver)
+# selects which CPU phase runs. Defaults keep this runnable whole (all phases).
+MPC_SUITE="${MPC_SUITE:-markdown-preview-cpu}"
+MPC_ONLY_PHASE="${MPC_ONLY_PHASE:-}"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/markdown-preview-cpu-autotest.log}"
-RESULT_FILE="${3:-$REPO_ROOT/traces/analysis/markdown-preview-cpu-autotest.json}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/${MPC_SUITE}-autotest.log}"
+RESULT_FILE="${3:-$REPO_ROOT/traces/analysis/${MPC_SUITE}-autotest.json}"
 APP_NAME="$(detect_dev_product_name "$ROOT_DIR")"
 CDP_PORT="${CDP_PORT:-9339}"
 TARGET_RELATIVE_PATH="${TARGET_RELATIVE_PATH:-heavy-preview.md}"
@@ -95,6 +100,7 @@ APP_MAIN_PID="$APP_PID" \
 CDP_PORT="$CDP_PORT" \
 TARGET_RELATIVE_PATH="$TARGET_RELATIVE_PATH" \
 RESULT_PATH="$RESULT_FILE" \
+MPC_ONLY_PHASE="$MPC_ONLY_PHASE" \
 node "$ROOT_DIR/test/autotest/test-markdown-preview-cpu-cdp.mjs"
 TEST_EXIT=$?
 set -e

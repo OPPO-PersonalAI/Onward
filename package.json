@@ -142,7 +142,8 @@
       "https-proxy-agent": ">=7.0.6"
     },
     "patchedDependencies": {
-      "@xterm/addon-webgl@0.18.0": "patches/@xterm__addon-webgl@0.18.0.patch"
+      "@xterm/addon-webgl@0.18.0": "patches/@xterm__addon-webgl@0.18.0.patch",
+      "node-pty@1.1.0": "patches/node-pty@1.1.0.patch"
     }
   },
   "devDependencies": {

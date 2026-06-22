@@ -82,9 +82,42 @@ export async function testTaskLayout(ctx: AutotestContext): Promise<TestResult[]
     await sleep(80)
   }
   eightBtn.click()
-  const flippedToEight = await waitFor('grid-layout-eight', () => activeGridLayoutAttr() === '8', 4000, 80)
+  // Clicking "Eight" grows the active tab to 8 terminals in AppState
+  // (reducer-synchronous, fast), but TerminalGrid intentionally defers the
+  // visible data-layout="8" flip until all 8 PTYs are ready (correct product
+  // behaviour). Spawning ~7 PTYs is process-creation-bound; on an EDR host
+  // each spawn can be taxed by several seconds, so a single fixed budget is
+  // not deterministic. Split the wait into two steps: (1) confirm AppState
+  // reached 8 terminals on the active tab (the deterministic, reducer-driven
+  // signal; AppState is async so it is polled directly rather than through the
+  // synchronous waitFor predicate), then (2) wait for the DOM data-layout flip
+  // with a large EDR-aware budget covering ~7 PTY spawns at up to EDR peak each.
+  const EIGHT_GRID_FLIP_BUDGET_MS = 60000
+  let lastActiveTabTerminalCount = 0
+  const appStateReachedEight = await (async () => {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < EIGHT_GRID_FLIP_BUDGET_MS) {
+      if (cancelled()) return false
+      const appState = await window.electronAPI.appState.load()
+      const activeTab = appState.tabs.find(tab => tab.id === appState.activeTabId) ?? null
+      lastActiveTabTerminalCount = activeTab?.terminals.length ?? 0
+      if (lastActiveTabTerminalCount >= 8) return true
+      await sleep(120)
+    }
+    return false
+  })()
+  record('TLM-03-grid-layout-eight-appstate-grew', appStateReachedEight, {
+    terminals: lastActiveTabTerminalCount
+  })
+  const flippedToEight = await waitFor(
+    'grid-layout-eight',
+    () => activeGridLayoutAttr() === '8',
+    EIGHT_GRID_FLIP_BUDGET_MS,
+    120
+  )
   record('TLM-03-grid-layout-eight-after-click', flippedToEight, {
-    layout: activeGridLayoutAttr()
+    layout: activeGridLayoutAttr(),
+    terminals: lastActiveTabTerminalCount
   })
 
   // ── TLM-04: switching back to single shrinks the grid ──

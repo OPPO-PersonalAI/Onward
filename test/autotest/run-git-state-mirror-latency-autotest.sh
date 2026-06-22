@@ -7,8 +7,13 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$REPO_ROOT"
 source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
+# LATENCY_SUITE lets the split wrappers (static / gsm17 / gsm18 / injection) write
+# distinct log files reusing this body; LATENCY_MODE selects which passes run.
+# Defaults keep this runnable whole (baseline all-groups + the 3 injection passes).
+LATENCY_SUITE="${LATENCY_SUITE:-git-state-mirror-latency}"
+LATENCY_MODE="${LATENCY_MODE:-}"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/git-state-mirror-latency-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/${LATENCY_SUITE}-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
@@ -117,12 +122,26 @@ run_pass() {
     "$APP_BIN" >> "$LOG_FILE" 2>&1 || true
 }
 
-run_pass "baseline"
-run_pass "subscribe-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE=1
-run_pass "callback-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE=1
-# Silent watcher (subscribed, no error, drops every event) — the production
-# failure mode. Proves the always-on reconcile heartbeat still refreshes (GSM-19).
-run_pass "silent-watcher" ONWARD_AUTOTEST_GSM_WATCHER_SILENT=1
+# LATENCY_MODE selects which passes run so the baseline (which overran the 300s
+# budget) can be split: 'static' / 'gsm17' / 'gsm18' run only that baseline group
+# (via ONWARD_AUTOTEST_GSM_LATENCY_GROUP); 'injection' runs the 3 watcher-failure
+# passes; '' (default) runs the whole suite. GSM-00 (fixture) + GSM-13 (trace
+# marker) bracket every baseline group; the injection passes return before GSM-13.
+case "$LATENCY_MODE" in
+  static|gsm17|gsm18)
+    run_pass "baseline-$LATENCY_MODE" ONWARD_AUTOTEST_GSM_LATENCY_GROUP="$LATENCY_MODE" ;;
+  injection)
+    run_pass "subscribe-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE=1
+    run_pass "callback-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE=1
+    run_pass "silent-watcher" ONWARD_AUTOTEST_GSM_WATCHER_SILENT=1 ;;
+  *)
+    run_pass "baseline"
+    run_pass "subscribe-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE=1
+    run_pass "callback-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE=1
+    # Silent watcher (subscribed, no error, drops every event) — the production
+    # failure mode. Proves the always-on reconcile heartbeat still refreshes (GSM-19).
+    run_pass "silent-watcher" ONWARD_AUTOTEST_GSM_WATCHER_SILENT=1 ;;
+esac
 
 echo ""
 echo "=== Test log (last 60 lines) ==="
@@ -130,78 +149,54 @@ tail -n 60 "$LOG_FILE"
 echo ""
 
 if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
-  echo "Git State Mirror latency autotest failed" >&2
+  echo "Git State Mirror latency autotest failed ($LATENCY_SUITE)" >&2
   echo ""
   echo "=== Failure details ==="
   grep "\[AutoTest\] FAIL" "$LOG_FILE" >&2
   exit 1
 fi
 
-if ! grep -q "GSM-00-fixture-loaded" "$LOG_FILE"; then
-  echo "Missing GSM-00 marker; the test may not have executed correctly" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
+require_marker() {
+  if ! grep -q "$1" "$LOG_FILE"; then
+    echo "Missing $1 marker; $LATENCY_SUITE may not have run to completion" >&2
+    tail -n 40 "$LOG_FILE" >&2
+    exit 1
+  fi
+}
 
-if ! grep -q "GSM-13-trace-marker-mirror-events-expected" "$LOG_FILE"; then
-  echo "Missing GSM-13 marker; the mirror trace coverage test did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
+# Completion markers, gated by mode so each split runner only requires the
+# markers its own group emits (a split runner that demanded every group's marker
+# would always fail). GSM-00 + :done bracket every mode; the watcher-injection
+# markers only exist when the injection passes run.
+require_marker "GSM-00-fixture-loaded"
+require_marker "git-state-mirror-latency:done"
+case "$LATENCY_MODE" in
+  static)
+    require_marker "GSM-13-trace-marker-mirror-events-expected"
+    require_marker "GSM-14-force-refresh-bumps-generation" ;;
+  gsm17)
+    require_marker "GSM-13-trace-marker-mirror-events-expected"
+    require_marker "GSM-17-two-tasks-same-repo-consistent-status-cycles"
+    require_marker "GSM-17-0-clean-after-real-commit" ;;
+  gsm18)
+    require_marker "GSM-13-trace-marker-mirror-events-expected"
+    require_marker "GSM-18-cross-tab-two-tabs-commit-to-clean" ;;
+  injection)
+    require_marker "GSM-15-watcher-subscribe-failure-recovers"
+    require_marker "GSM-16-watcher-callback-failure-recovers"
+    require_marker "GSM-19-silent-watcher-reconcile-refresh"
+    require_marker "autotest watcher failure injection active" ;;
+  *)
+    require_marker "GSM-13-trace-marker-mirror-events-expected"
+    require_marker "GSM-14-force-refresh-bumps-generation"
+    require_marker "GSM-17-two-tasks-same-repo-consistent-status-cycles"
+    require_marker "GSM-17-0-clean-after-real-commit"
+    require_marker "GSM-18-cross-tab-two-tabs-commit-to-clean"
+    require_marker "GSM-15-watcher-subscribe-failure-recovers"
+    require_marker "GSM-16-watcher-callback-failure-recovers"
+    require_marker "GSM-19-silent-watcher-reconcile-refresh"
+    require_marker "autotest watcher failure injection active" ;;
+esac
 
-if ! grep -q "GSM-14-force-refresh-bumps-generation" "$LOG_FILE"; then
-  echo "Missing GSM-14 marker; the generation refresh test did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GSM-17-two-tasks-same-repo-consistent-status-cycles" "$LOG_FILE"; then
-  echo "Missing GSM-17 marker; the two-Task same-repo status consistency test did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GSM-17-0-clean-after-real-commit" "$LOG_FILE"; then
-  echo "Missing GSM-17 commit-clean marker; the real commit transition coverage did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GSM-18-cross-tab-two-tabs-commit-to-clean" "$LOG_FILE"; then
-  echo "Missing GSM-18 marker; the cross-tab two-tabs commit-to-clean coverage did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GSM-15-watcher-subscribe-failure-recovers" "$LOG_FILE"; then
-  echo "Missing GSM-15 marker; the subscribe failure recovery test did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GSM-16-watcher-callback-failure-recovers" "$LOG_FILE"; then
-  echo "Missing GSM-16 marker; the callback failure recovery test did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "GSM-19-silent-watcher-reconcile-refresh" "$LOG_FILE"; then
-  echo "Missing GSM-19 marker; the silent-watcher reconcile-heartbeat test did not run to completion" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "autotest watcher failure injection active" "$LOG_FILE"; then
-  echo "Missing watcher failure injection log marker" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-if ! grep -q "git-state-mirror-latency:done" "$LOG_FILE"; then
-  echo "Missing git-state-mirror-latency:done marker; the suite did not finish cleanly" >&2
-  tail -n 40 "$LOG_FILE" >&2
-  exit 1
-fi
-
-echo "Git State Mirror latency autotest passed"
+echo "Git State Mirror latency autotest passed ($LATENCY_SUITE)"
 echo "  Log: $LOG_FILE"

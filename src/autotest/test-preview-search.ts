@@ -6,6 +6,10 @@
 import type { AutotestContext, TestResult } from './types'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from '../utils/terminal-command'
 
+function normalizePath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
 const FIXTURE_FILE = 'test/autotest/fixtures/preview-search-complex.md'
 const SEARCH_KEYWORD = 'system'
 const SCROLL_SETTLE_MS = 600
@@ -85,7 +89,7 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
   if (cancelled()) return results
 
   const fixtureRootPath = window.electronAPI.debug.autotestCwd || rootPath
-  if (api.getRootPath?.() !== fixtureRootPath) {
+  if (normalizePath(api.getRootPath?.() ?? '') !== normalizePath(fixtureRootPath)) {
     const shellKind = await resolveTerminalShellKind(terminalId)
     const cdCommand = buildChangeDirectoryCommand(window.electronAPI.platform, fixtureRootPath, shellKind)
     await window.electronAPI.terminal.write(terminalId, cdCommand)
@@ -94,7 +98,7 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
     await sleep(500)
     await reopenProjectEditor('preview-search-root')
     const rootReady = await waitFor('PS-01-root-ready', () => {
-      return window.__onwardProjectEditorDebug?.getRootPath?.() === fixtureRootPath
+      return normalizePath(window.__onwardProjectEditorDebug?.getRootPath?.() ?? '') === normalizePath(fixtureRootPath)
     }, 8000, 120)
     record('PS-01-root-ready', rootReady, {
       expectedRoot: fixtureRootPath,

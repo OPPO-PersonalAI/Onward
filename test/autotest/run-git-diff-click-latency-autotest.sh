@@ -113,20 +113,30 @@ fi
 # silently and the panel's stats / Perfetto SQL queries would lie.
 TRACE_DIR="$REPO_ROOT/traces/perf"
 LATEST_POINTER="$TRACE_DIR/latest.txt"
-LATEST_TRACE_PATH=""
+# Resolve the directory that actually holds this run's perf chunks. The pointer
+# (`latest.txt`) normally holds the trace DIRECTORY path; older runs may have
+# left a single chunk-file path, or the pointer may be missing/stale. In every
+# case we resolve a directory and then scan ALL chunks inside it — a single run
+# with ONWARD_PERF_TRACE=1 rotates output across many `perf-*.jsonl` chunks, so
+# any one chunk is an unreliable sample of the phase-chain events.
+PERF_SCAN_DIR="$TRACE_DIR"
 if [[ -f "$LATEST_POINTER" ]]; then
-  LATEST_TRACE_PATH="$(cat "$LATEST_POINTER")"
-fi
-# Robustness: the pointer may be missing, stale, or — when a prior run was
-# killed mid-flush — hold the trace DIRECTORY path instead of a chunk file.
-# In any of those cases fall back to the newest perf chunk by mtime. Perf
-# chunks are ndjson-chunked `perf-*.jsonl` (older runs may have `*.json`).
-if [[ -z "$LATEST_TRACE_PATH" || ! -f "$LATEST_TRACE_PATH" ]]; then
-  LATEST_TRACE_PATH="$(ls -t "$TRACE_DIR"/perf-*.jsonl "$TRACE_DIR"/*.json 2>/dev/null | head -n 1 || true)"
+  POINTER_VALUE="$(cat "$LATEST_POINTER")"
+  if [[ -n "$POINTER_VALUE" && -d "$POINTER_VALUE" ]]; then
+    PERF_SCAN_DIR="$POINTER_VALUE"
+  elif [[ -n "$POINTER_VALUE" && -f "$POINTER_VALUE" ]]; then
+    PERF_SCAN_DIR="$(dirname "$POINTER_VALUE")"
+  fi
 fi
 
-if [[ -z "$LATEST_TRACE_PATH" || ! -f "$LATEST_TRACE_PATH" ]]; then
-  echo "ERROR: cannot locate perf trace file under $TRACE_DIR" >&2
+# Collect every perf chunk in the resolved directory. Perf chunks are
+# ndjson-chunked `perf-*.jsonl` (older runs may have `*.json`).
+shopt -s nullglob
+PERF_CHUNKS=("$PERF_SCAN_DIR"/perf-*.jsonl "$PERF_SCAN_DIR"/*.json)
+shopt -u nullglob
+
+if [[ "${#PERF_CHUNKS[@]}" -eq 0 ]]; then
+  echo "ERROR: cannot locate any perf trace chunk under $PERF_SCAN_DIR" >&2
   exit 1
 fi
 
@@ -144,17 +154,21 @@ PHASE_EVENTS=(
 )
 MISSING_EVENTS=()
 for evt in "${PHASE_EVENTS[@]}"; do
-  if ! grep -q "$evt" "$LATEST_TRACE_PATH"; then
+  # Grep the CONCATENATION of every perf chunk, not just the newest one.
+  # A single ONWARD_PERF_TRACE run fans events out across rotating chunks, so
+  # an event (e.g. renderer:git-diff.click-phase.ipc) routinely lands in a
+  # different chunk than the one the pointer/newest-by-mtime would pick.
+  if ! grep -hq "$evt" "${PERF_CHUNKS[@]}"; then
     MISSING_EVENTS+=("$evt")
   fi
 done
 
 if [[ "${#MISSING_EVENTS[@]}" -gt 0 ]]; then
-  echo "ERROR: phase chain regression — these events never reached the trace file:" >&2
+  echo "ERROR: phase chain regression — these events never reached the trace chunks:" >&2
   for evt in "${MISSING_EVENTS[@]}"; do
     echo "  - $evt" >&2
   done
-  echo "  trace file: $LATEST_TRACE_PATH" >&2
+  echo "  trace dir: $PERF_SCAN_DIR (${#PERF_CHUNKS[@]} chunks scanned)" >&2
   exit 1
 fi
 

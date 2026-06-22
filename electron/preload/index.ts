@@ -1224,6 +1224,8 @@ export interface DebugAPI {
   autotestGsmWatcherFailSubscribeOnce: boolean
   autotestGsmWatcherFailCallbackOnce: boolean
   autotestGsmWatcherSilent: boolean
+  autotestGsmLatencyGroup: string
+  autotestGdsGroup: string
   getMirrorWatcherStatusHistory: () => unknown[]
   perfTraceCaptureContent: boolean
   // ONWARD_DISABLE_VIRTUAL_CURSOR=1 disables the Prompt textarea's
@@ -2145,6 +2147,14 @@ const debugAutotestGsmWatcherFailCallbackOnce =
   debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE === '1'
 const debugAutotestGsmWatcherSilent =
   debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_WATCHER_SILENT === '1'
+// '' = run the whole GSM-latency baseline; 'static' | 'gsm17' | 'gsm18' run only
+// that group so the baseline can be split across sub-5-min runners (class-2).
+const debugAutotestGsmLatencyGroup =
+  (debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_LATENCY_GROUP) || ''
+// '' = run every Git-Diff staleness+submodule GDS-* case; 'submodule' | 'staleness'
+// run only that group so the suite can be split across sub-5-min runners (class-2).
+const debugAutotestGdsGroup =
+  (debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GDS_GROUP) || ''
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 const virtualCursorDisabled = process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1'
 const gitDiffPerformanceDiagnosticsEnabled =
@@ -2175,6 +2185,8 @@ const debugAPI: DebugAPI = {
   autotestGsmWatcherFailSubscribeOnce: debugAutotestGsmWatcherFailSubscribeOnce,
   autotestGsmWatcherFailCallbackOnce: debugAutotestGsmWatcherFailCallbackOnce,
   autotestGsmWatcherSilent: debugAutotestGsmWatcherSilent,
+  autotestGsmLatencyGroup: debugAutotestGsmLatencyGroup,
+  autotestGdsGroup: debugAutotestGdsGroup,
   getMirrorWatcherStatusHistory: () => {
     return mirrorWatcherStatusHistory.slice()
   },

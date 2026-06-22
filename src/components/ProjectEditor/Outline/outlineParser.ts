@@ -4,6 +4,9 @@
  */
 
 import { OutlineItem, OutlineSymbolKind } from './types'
+// Markdown heading parsing lives in a pure, monaco-free module so it can be
+// unit-tested in plain Node (CRLF-safety regression coverage).
+import { parseMarkdownOutline } from './outlineMarkdownHeadings'
 
 // Monaco internal imports for document symbol access (Monaco 0.32+)
 // These are undocumented but stable across 0.32–0.52+.
@@ -13,80 +16,6 @@ import { StandaloneServices } from 'monaco-editor/esm/vs/editor/standalone/brows
 import { ILanguageFeaturesService } from 'monaco-editor/esm/vs/editor/common/services/languageFeatures.js'
 // @ts-expect-error — internal Monaco module
 import { OutlineModel } from 'monaco-editor/esm/vs/editor/contrib/documentSymbols/browser/outlineModel.js'
-
-// ---------------------------------------------------------------------------
-// Strategy 1: Markdown TOC (Monaco has no built-in outline for Markdown)
-// ---------------------------------------------------------------------------
-
-const HEADING_RE = /^(#{1,6})\s+(.+)$/
-const CODE_FENCE_RE = /^```/
-
-function parseMarkdown(lines: string[]): OutlineItem[] {
-  const root: OutlineItem[] = []
-  const stack: { level: number; item: OutlineItem }[] = []
-  let inCodeBlock = false
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-
-    if (CODE_FENCE_RE.test(line)) {
-      inCodeBlock = !inCodeBlock
-      continue
-    }
-    if (inCodeBlock) continue
-
-    const match = HEADING_RE.exec(line)
-    if (!match) continue
-
-    const level = match[1].length
-    const name = match[2].trim()
-    const kindMap: Record<number, OutlineSymbolKind> = {
-      1: OutlineSymbolKind.Heading1,
-      2: OutlineSymbolKind.Heading2,
-      3: OutlineSymbolKind.Heading3,
-      4: OutlineSymbolKind.Heading4,
-      5: OutlineSymbolKind.Heading5,
-      6: OutlineSymbolKind.Heading6,
-    }
-
-    const item: OutlineItem = {
-      name,
-      kind: kindMap[level] ?? OutlineSymbolKind.Heading1,
-      startLine: i + 1,
-      startColumn: 1,
-      endLine: i + 1,
-      endColumn: line.length + 1,
-      children: [],
-      depth: level - 1,
-    }
-
-    // Pop stack until we find a parent with a lower level
-    while (stack.length > 0 && stack[stack.length - 1].level >= level) {
-      stack.pop()
-    }
-
-    if (stack.length > 0) {
-      stack[stack.length - 1].item.children.push(item)
-    } else {
-      root.push(item)
-    }
-    stack.push({ level, item })
-  }
-
-  // Update endLine: each heading extends until the next sibling or parent-level heading
-  updateEndLines(root, lines.length)
-  return root
-}
-
-function updateEndLines(items: OutlineItem[], totalLines: number) {
-  for (let i = 0; i < items.length; i++) {
-    const nextSibling = items[i + 1]
-    items[i].endLine = nextSibling ? nextSibling.startLine - 1 : totalLines
-    if (items[i].children.length > 0) {
-      updateEndLines(items[i].children, items[i].endLine)
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Strategy 2: Monaco OutlineModel (language-agnostic, provider-based)
@@ -348,14 +277,18 @@ export async function parseOutlineSymbols(
   filePath: string,
   model: import('monaco-editor').editor.ITextModel | null,
 ): Promise<OutlineItem[]> {
-  const lines = content.split('\n')
+  // Split on all line-ending styles (\r\n, \r, \n) so a CRLF-checked-out file
+  // (the Windows default with core.autocrlf=true) does not leave a trailing '\r'
+  // on every line, which would break the line-anchored regex fallbacks below.
+  // The markdown strategy does its own CRLF-safe split inside parseMarkdownOutline.
+  const lines = content.split(/\r\n|\r|\n/)
   if (lines.length > MAX_LINES) return []
 
   const ext = getExtension(filePath)
 
   // Strategy 1: Markdown
   if (MARKDOWN_EXTENSIONS.has(ext)) {
-    return parseMarkdown(lines)
+    return parseMarkdownOutline(content)
   }
 
   // Strategy 2: Monaco OutlineModel — works for any language with a registered provider

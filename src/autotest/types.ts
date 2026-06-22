@@ -68,7 +68,7 @@ export interface ClickLatencyMeasurementForAutotest {
 
 export interface GitDiffDebugApi {
   isOpen: () => boolean
-  getFileList: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; resourceGroup?: string; originalRef?: string | null; modifiedRef?: string | null; repoRoot?: string; repoLabel?: string }>
+  getFileList: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; resourceGroup?: string; originalRef?: string | null; modifiedRef?: string | null; repoRoot?: string; repoLabel?: string; isImage?: boolean; isPdf?: boolean; isEpub?: boolean; isSubmoduleEntry?: boolean }>
   getVisibleFileList?: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; resourceGroup?: string; originalRef?: string | null; modifiedRef?: string | null; repoRoot?: string; repoLabel?: string }>
   getFileListViewMode?: () => 'tree' | 'flat'
   setFileListViewMode?: (mode: 'tree' | 'flat') => boolean

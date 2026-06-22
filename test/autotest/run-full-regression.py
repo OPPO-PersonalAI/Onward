@@ -12,8 +12,16 @@ silently skipping anything.
 
 Behaviour highlights:
   - Same SCRIPTS list as the bash version, in the same order.
-  - 3-minute maximum timeout per runner, enforced via test/autotest/run-with-timeout.mjs.
-    Any runner exceeding this wall-clock budget is a failure.
+  - 3-minute default timeout per runner (per-script overrides allowed), enforced
+    in two independent layers so the configured budget ALWAYS takes effect:
+      1. test/autotest/run-with-timeout.mjs — inner wall-clock timer that kills
+         the child tree at timeout_sec (force-kill 10s later).
+      2. An orchestrator-side watchdog in run_one() — the main thread waits on the
+         PROCESS (not on stdout reaching EOF), so a surviving/detached grandchild
+         holding the stdout pipe can no longer stall the runner; and if the inner
+         layer fails to make the wrapper exit, the watchdog force-kills the tree by
+         PID + reaps the dev app by EXACT name at timeout_sec + grace and marks the
+         runner TIMEOUT. Any runner exceeding its wall-clock budget is a failure.
   - 2-second inter-script gap; the dev app is killed by EXACT process name
     before and after every runner (CLAUDE.md hard rule — no wildcards).
   - Per-runner ONWARD_USER_DATA_DIR under the OS temp root, removed at the end.
@@ -92,11 +100,36 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-diff-click-latency-autotest.sh",
     "test/autotest/run-git-diff-identical-blob-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
-    "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
+    # Split into 6 cost-balanced sub-5-min runners: the whole ~46-case GDS suite
+    # ran ~890s under EDR (each diff forks ~69 git procs, taxed 1.3-12.9s/spawn;
+    # the dominant cost is the diff LOAD itself, not restoreBaseline). A 4-way
+    # still hit ~283s/group, so it was re-split 6 ways balanced by measured
+    # per-case cost, each ~141-167s work + ~45s overhead (< 220). Shared body
+    # run-git-diff-staleness-and-submodule-autotest.sh runs the whole suite via
+    # GDS_GROUP='' / ONWARD_AUTOTEST_GDS_GROUP=''.
+    "test/autotest/run-git-diff-submodule-autotest.sh",
+    "test/autotest/run-git-diff-staleness-autotest.sh",
+    "test/autotest/run-git-diff-reentry-autotest.sh",
+    "test/autotest/run-git-diff-ux-presentation-autotest.sh",
+    "test/autotest/run-git-diff-ux-tree-autotest.sh",
+    "test/autotest/run-git-diff-model-sync-autotest.sh",
     "test/autotest/run-git-diff-nested-gitlink-autotest.sh",
     "test/autotest/run-git-large-file-confirmation-autotest.sh",
-    "test/autotest/run-git-state-mirror-quit-autotest.sh",
-    "test/autotest/run-git-state-mirror-latency-autotest.sh",
+    # Split into -a (3 trials) + -b (2 trials): the whole 5-trial quit suite
+    # overran its 180s budget under full-regression load (class-2). Shared body
+    # stays in run-git-state-mirror-quit-autotest.sh (runnable whole, default 5).
+    "test/autotest/run-git-state-mirror-quit-a-autotest.sh",
+    "test/autotest/run-git-state-mirror-quit-b-autotest.sh",
+    # Split into 4 sub-5-min runners: the whole suite overran 1500s (class-2).
+    # static (fast, EDR-independent) + gsm17 + gsm18 baseline groups + the 3
+    # watcher-failure-injection passes. gsm17/gsm18 can still fail on an EDR host
+    # (slow git-status misses the convergence wait) — that is a pre-existing
+    # EDR-timing issue, not budget; they pass on CI. Shared body stays in
+    # run-git-state-mirror-latency-autotest.sh (runnable whole via LATENCY_MODE='').
+    "test/autotest/run-git-state-mirror-latency-static-autotest.sh",
+    "test/autotest/run-git-state-mirror-latency-gsm17-autotest.sh",
+    "test/autotest/run-git-state-mirror-latency-gsm18-autotest.sh",
+    "test/autotest/run-git-state-mirror-latency-injection-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
     "test/autotest/run-repo-prewarm-autotest.sh",
@@ -104,8 +137,14 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-nested-submodules-autotest.sh",
     "test/autotest/run-global-search-autotest.sh",
     "test/autotest/run-image-diff-autotest.sh",
+    "test/autotest/run-image-history-diff-autotest.sh",
     "test/autotest/run-markdown-latex-preview-autotest.sh",
-    "test/autotest/run-markdown-preview-cpu-autotest.sh",
+    # Split by CPU phase (idle / post-scroll / editor): the whole 4-phase suite's
+    # settle+sampling overran the 300s budget (class-2). Shared body stays in
+    # run-markdown-preview-cpu-autotest.sh (runnable whole via MPC_ONLY_PHASE='').
+    "test/autotest/run-markdown-preview-cpu-idle-autotest.sh",
+    "test/autotest/run-markdown-preview-cpu-scroll-autotest.sh",
+    "test/autotest/run-markdown-preview-cpu-editor-autotest.sh",
     "test/autotest/run-markdown-preview-latency-autotest.sh",
     "test/autotest/run-mermaid-panzoom-autotest.sh",
     "test/autotest/run-pdf-epub-diff-autotest.sh",
@@ -146,6 +185,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-terminal-title-rename-autotest.sh",
     "test/autotest/run-terminal-rename-restart-survival-autotest.sh",
     "test/autotest/run-trace-infra-self-check-autotest.sh",
+    "test/autotest/run-orchestrator-watchdog-autotest.sh",
     "test/autotest/run-perf-trace-rotation-autotest.sh",
     "test/autotest/run-unittest-suite-autotest.sh",
     "test/autotest/run-working-directory-copy-autotest.sh",
@@ -168,6 +208,17 @@ UPDATE_E2E_SCRIPTS: List["tuple[str, str]"] = [
 ]
 
 PER_SCRIPT_TIMEOUT_SEC = 180
+
+# Orchestrator-side independent-watchdog grace. The inner run-with-timeout.mjs
+# fires at timeout_sec and force-kills its child tree 10s later, so for a normal
+# overrun that inner layer reaps the tree first and the watchdog never fires.
+# Only if the inner layer FAILS to make the wrapper exit (a surviving/detached
+# grandchild holding the stdout pipe, run-with-timeout itself wedged, or taskkill
+# unable to reach a reparented process) does the orchestrator step in at
+# timeout_sec + this grace, force-kill the tree by PID, reap the dev app by EXACT
+# name, and mark the runner TIMEOUT. Keep this strictly larger than run-with-
+# timeout's 10s internal force-kill gap so the inner layer always gets first crack.
+ORCHESTRATOR_WATCHDOG_GRACE_SEC = 30
 
 # ---------------------------------------------------------------------------
 # Per-runner time budget (the "no test case over 5 minutes" rule).
@@ -196,10 +247,18 @@ RUNNER_BUDGET_SEC = 300
 # as "over-budget backlog" so they stay visible until split. Do NOT add new
 # >300s entries; split the suite instead.
 PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
-    # GitDiff staleness + submodule walks through 46 distinct GDS-* cases.
-    # Git operations are slow on Windows; individual steps can exceed 15s.
-    # Measured: test was at 317s during a sleep and was killed at 360s.
-    "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 600,
+    # GitDiff staleness+submodule was split 6-way (the whole suite ran ~890s under
+    # EDR — class-2, no longer a >300 backlog). Each group is cost-balanced to
+    # ~141-167s work + ~45s overhead on this EDR host (the dominant cost is the
+    # diff load itself, ~69 git procs/diff). 280 override keeps headroom above the
+    # 180s default for the few estimate-only cases while staying < 300 (NOT backlog);
+    # measured groups land well under, so this can tighten to ~200 once confirmed.
+    "test/autotest/run-git-diff-submodule-autotest.sh": 280,
+    "test/autotest/run-git-diff-staleness-autotest.sh": 280,
+    "test/autotest/run-git-diff-reentry-autotest.sh": 280,
+    "test/autotest/run-git-diff-ux-presentation-autotest.sh": 280,
+    "test/autotest/run-git-diff-ux-tree-autotest.sh": 280,
+    "test/autotest/run-git-diff-model-sync-autotest.sh": 280,
     # Nested-gitlink (no .gitmodules) suite: one app session + 3 IPC calls over a
     # tiny 1-parent + 2-gitlink fixture. Kept deliberately small/fast (NOT amended
     # into the 600s staleness suite); the 150s in-app watchdog caps a hang.
@@ -218,20 +277,59 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # Longtail suite simulates many keystrokes across 5+ latency scenarios;
     # 180s default is not enough on Windows dev boxes.
     "test/autotest/run-prompt-input-longtail-autotest.sh": 360,
-    # CPU gate samples preview idle, post-scroll recovery, split mode, and editor-only idle windows.
-    "test/autotest/run-markdown-preview-cpu-autotest.sh": 300,
-    # GitStateMirror latency suite runs 3 passes (baseline + 2 watcher-
-    # failure injections), with the baseline pass alone doing 5 trials of
-    # GSM-17 (same-tab two-task commit-to-clean) + 5 trials of GSM-18
-    # (cross-tab two-task commit-to-clean). At ~6-12 minutes baseline +
-    # ~10-20s per failure-injection pass, 180s is far below the bottom of
-    # the distribution.
-    "test/autotest/run-git-state-mirror-latency-autotest.sh": 1500,
+    # markdown-preview-cpu was split by phase. -scroll / -editor fit the default
+    # 180s. The -idle phase (15s settle + idle CPU samples, each sample spawns a
+    # process taxed 1-13s by EDR on this host) is the heaviest; its wrapper trims
+    # the sample count to 40 so it lands ~180s here with headroom. 240s < 300s
+    # (NOT over-budget backlog); ~80s on a healthy CI host.
+    "test/autotest/run-markdown-preview-cpu-idle-autotest.sh": 240,
+    # GitStateMirror latency was split by group (static / gsm17 / gsm18 /
+    # injection). injection fits the default 180s. static (badge matrix), gsm17
+    # (same-tab two-task) and gsm18 (cross-tab) are the heavy convergence groups; on
+    # this EDR host each badge-convergence step waits out its budget before the slow
+    # `git status` lands, so they need headroom — still < 300s (NOT over-budget
+    # backlog), and far faster on a healthy CI host. static completes ~130-175s but
+    # swings with EDR load, so 240s protects its 180s default from a spurious TIMEOUT.
+    # gsm17 trims to 2 trials when run as the isolated split (group='gsm17') — on EDR
+    # each trial is ~65s (every step waits the full convergence timeout), so 5 trials
+    # overran 290s and 3 overran 240s; 2 trials (~210s) fit the 270s override. The
+    # whole-suite run keeps 5 trials.
+    "test/autotest/run-git-state-mirror-latency-static-autotest.sh": 240,
+    "test/autotest/run-git-state-mirror-latency-gsm17-autotest.sh": 270,
+    "test/autotest/run-git-state-mirror-latency-gsm18-autotest.sh": 240,
     # Repo prewarm WIRING suite: a single app launch + ~35s dwell to let the
     # default terminal attach and fire the prewarm trigger event, then a trace
     # assertion. EDR-independent (the event fires before any git spawn), but the
     # app start itself can be slow on EDR-throttled hosts — give it headroom.
     "test/autotest/run-repo-prewarm-autotest.sh": 180,
+    # Nested-submodule suite builds a 5-deep recursive-submodule fixture before
+    # the app launches. The build is ~50 git spawns (init/add/commit + one
+    # `submodule update --init` per level + a final root `--recursive`); on this
+    # EDR/anti-malware host each git spawn is taxed 1.3-12.9s, so the COLD build
+    # alone measures ~172s (down from ~294s after dropping the O(depth^2)
+    # intermediate `--recursive` updates — see create-nested-git-submodule-
+    # fixture.mjs). No single git op hangs (build completes exit 0); this is pure
+    # EDR-tax accumulation. Build (~172s) + the app session's history/diff IPC
+    # walks (~60-90s under EDR) sum past the 180s default but stay under 300s, so
+    # this is a budget override (NOT over-budget backlog / NOT a split).
+    "test/autotest/run-git-nested-submodules-autotest.sh": 280,
+    # Image HISTORY diff was split out of run-image-diff (the deadlock-fixed
+    # remainder fits the 180s default). The history half owns the EDR-expensive
+    # throwaway history repo (git init + 4 commits ~8 spawns taxed 1.3-12.9s each)
+    # plus the image-history diff/swipe/onion walks, summing past 180s but under
+    # 300s on this EDR host — budget override, NOT over-budget backlog.
+    "test/autotest/run-image-history-diff-autotest.sh": 280,
+    # Image (working-tree) diff exercises Keep/Deny against the LIVE Onward repo
+    # (101 changed files + submodules). The discardFile git op is deterministic,
+    # but the post-deny `force` full-diff RELOAD is racey under EDR: if a worker
+    # getDiff reply is lost, the worker's concurrency-1 lane stays occupied until
+    # the worker-side request timeout (90s) frees it, so the list cannot refresh
+    # to `untracked` until then. The test absorbs this with an internally
+    # aggregated recovery loop (DENY_RESTORE_RECOVERY_BUDGET_MS = 105s, re-driving
+    # refreshChanges) instead of a single 12s sample. Baseline ~77s + a worst-case
+    # ~105s recovery sums past the 180s default but stays well under 300s — budget
+    # override for the documented worker-lane-recovery cost, NOT a hidden hang.
+    "test/autotest/run-image-diff-autotest.sh": 240,
 }
 INTER_SCRIPT_SLEEP_SEC = 2
 
@@ -372,6 +470,32 @@ def kill_app(app_name: str) -> None:
         )
 
 
+def force_kill_tree(proc: "subprocess.Popen") -> None:
+    """Force-kill a spawned runner process tree by PID (watchdog escalation).
+
+    Used ONLY when the orchestrator's independent deadline fires, i.e. the inner
+    run-with-timeout.mjs failed to reap the tree in time. On Windows, taskkill /T
+    /F walks the live PPID tree (python -> node-wrapper -> bash -> node-launcher
+    -> app), which is intact because the launcher keeps the app non-detached
+    (check-renderer-idle-churn.mjs uses stdio 'ignore', detached:false on win32).
+    On POSIX the orchestrator only owns the node-wrapper pid; bash runs in its own
+    session, so kill the wrapper pid here and rely on the caller's kill_app(EXACT
+    name) to reap a surviving dev app. Exact PID / exact name only — never a
+    wildcard or substring (CLAUDE.md hard rule)."""
+    if proc.poll() is not None:
+        return
+    if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    else:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 — already exited between poll and kill
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Optional pre-build
 # ---------------------------------------------------------------------------
@@ -475,7 +599,10 @@ def run_one(
                 break
 
     start = time.monotonic()
+    hard_deadline_sec = timeout_sec + ORCHESTRATOR_WATCHDOG_GRACE_SEC
     log_fh = log_path.open("w", encoding="utf-8")
+    timed_out = False
+    rc: Optional[int] = None
     try:
         proc = subprocess.Popen(
             cmd,
@@ -488,53 +615,104 @@ def run_one(
             errors="replace",
         )
         assert proc.stdout is not None
-        # Heartbeat: a daemon thread that, during any gap with NO runner output
-        # >= HEARTBEAT_SEC, prints a "still running (Ns, no output for Ms)" pulse
-        # so a silently-stuck runner is visible live. The lock serializes writes
-        # so the pulse never interleaves mid-line with the streamed output.
+        # Serialize console/log writes; the shared mutable last_output[0] lets the
+        # heartbeat observe the reader thread's progress.
         io_lock = threading.Lock()
-        last_output = time.monotonic()
+        last_output = [time.monotonic()]
         stop_hb = threading.Event()
         stem = Path(script).stem
 
+        # Drain the runner's stdout on a DAEMON thread so the main thread can
+        # enforce a hard deadline INDEPENDENTLY of whether proc.stdout ever reaches
+        # EOF. A surviving/detached grandchild can hold the pipe write-end open
+        # forever; blocking the main loop on that read (the old `for line in
+        # proc.stdout`) is exactly the bug that let the configured timeout never
+        # take effect. As a daemon, this thread is abandoned cleanly if a held pipe
+        # keeps it blocked after the process has already exited.
+        def reader() -> None:
+            try:
+                for line in proc.stdout:
+                    with io_lock:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                        log_fh.write(line)
+                        summary_fh.write(line)
+                    last_output[0] = time.monotonic()
+            except Exception:  # noqa: BLE001 — pipe torn down by a kill; benign
+                pass
+
+        # Heartbeat: during any gap with NO runner output >= HEARTBEAT_SEC, print a
+        # "still running" pulse so a silently-stuck runner is visible live. The lock
+        # serializes writes so the pulse never interleaves mid-line with output.
         def heartbeat() -> None:
             while not stop_hb.wait(HEARTBEAT_SEC):
                 now = time.monotonic()
-                silent = now - last_output
+                silent = now - last_output[0]
                 if silent >= HEARTBEAT_SEC:
                     pulse = (f"  … {stem} still running "
-                             f"{now - start:.0f}s (no output for {silent:.0f}s; timeout {timeout_sec}s)\n")
+                             f"{now - start:.0f}s (no output for {silent:.0f}s; "
+                             f"timeout {timeout_sec}s, watchdog {hard_deadline_sec:.0f}s)\n")
                     with io_lock:
                         sys.stdout.write(pulse)
                         sys.stdout.flush()
                         summary_fh.write(pulse)
                         summary_fh.flush()
 
+        reader_thread = threading.Thread(target=reader, daemon=True)
         hb_thread = threading.Thread(target=heartbeat, daemon=True)
+        reader_thread.start()
         hb_thread.start()
+
+        # Main thread waits on the PROCESS, not the pipe. proc.wait() returns the
+        # instant the run-with-timeout.mjs wrapper exits — even if a grandchild
+        # still holds the stdout pipe — so a wedged pipe can no longer stall the
+        # runner. If the inner timeout layer ALSO fails to make the wrapper exit,
+        # the orchestrator's own deadline force-kills the tree by PID and reaps the
+        # dev app by EXACT name, guaranteeing the configured budget takes effect.
         try:
-            for line in proc.stdout:
-                with io_lock:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                    log_fh.write(line)
-                    summary_fh.write(line)
-                last_output = time.monotonic()
-            rc = proc.wait()
+            while True:
+                try:
+                    rc = proc.wait(timeout=1.0)
+                    break
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() - start >= hard_deadline_sec:
+                        timed_out = True
+                        msg = (f"  ⚠ WATCHDOG: {stem} exceeded {hard_deadline_sec:.0f}s "
+                               f"(timeout {timeout_sec}s + {ORCHESTRATOR_WATCHDOG_GRACE_SEC}s "
+                               f"grace) without exiting — force-killing the runner tree.\n")
+                        with io_lock:
+                            sys.stdout.write(msg)
+                            sys.stdout.flush()
+                            log_fh.write(msg)
+                            summary_fh.write(msg)
+                            summary_fh.flush()
+                        force_kill_tree(proc)
+                        kill_app(app_name)
+                        try:
+                            rc = proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            rc = 124
+                        break
         except KeyboardInterrupt:
-            proc.terminate()
+            force_kill_tree(proc)
+            kill_app(app_name)
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                pass
             raise
         finally:
             stop_hb.set()
             hb_thread.join(timeout=2)
+            # Daemon reader: give it a beat to flush the final buffered lines after
+            # the process exited; abandon it if a held pipe keeps it blocked.
+            reader_thread.join(timeout=2)
     finally:
         log_fh.close()
 
-    return rc, time.monotonic() - start
+    if timed_out:
+        return 124, time.monotonic() - start
+    return (rc if rc is not None else 1), time.monotonic() - start
 
 
 # ---------------------------------------------------------------------------

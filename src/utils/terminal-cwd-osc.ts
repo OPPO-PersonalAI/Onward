@@ -36,11 +36,17 @@ export function normalizeTerminalCwdCandidate(value: string | null | undefined):
  * makes `terminal.lastCwd` ping-pong, which re-renders the whole React tree
  * thousands of times a second and pins the renderer JS thread (idle-CPU storm).
  *
- * Three platform-independent steps plus one macOS-only step, in order:
+ * Four platform-independent steps plus one macOS-only step, in order:
  *   1. Separators -> '/'  (Windows git watcher emits '\').
  *   2. Collapse duplicate slashes -> single '/'  (a parent dir ending in '/',
  *      e.g. macOS `$TMPDIR`, makes one source emit `…/T//child` and the other
  *      `…/T/child`). A single leading '//' is preserved on win32 for UNC shares.
+ *   2b. Drop redundant '.' path segments. A '/.' segment means "current
+ *      directory" (a semantic no-op): one writer reporting `path.join(repo, '.')`
+ *      emits `<repo>/.` while the other emits `<repo>`, and the two MUST converge
+ *      or `terminal.lastCwd` ping-pongs (same idle-CPU storm class as the '/' vs
+ *      '\' divergence above — seen via the GSM two-task "equivalent cwd alias").
+ *      A root eaten by this step ('/.' -> '', 'C:/.' -> 'C:') is restored.
  *   3. macOS firmlink reconciliation: `/private/{var,tmp,etc}` and
  *      `/{var,tmp,etc}` are the SAME directory (synthetic firmlinks). The OSC
  *      writer reports the user-facing form (`/var/…`), the git watcher the
@@ -63,6 +69,14 @@ export function canonicalizeTerminalCwdForPersist(
   const uncLead = platform === 'win32' && /^\/\//.test(p)
   p = p.replace(/\/{2,}/g, '/')
   if (uncLead) p = `/${p}`
+  // 2b. Drop redundant '.' path segments ('/.' = current dir, a no-op). Removes
+  //     every '/.' followed by '/' or end-of-string, so interior '/./' and a
+  //     trailing '/.' both collapse and `<repo>/.` converges with `<repo>`.
+  p = p.replace(/\/\.(?=\/|$)/g, '')
+  // 2c. Restore a root the step above ate: '/.' -> '' (root '/'); 'C:/.' -> 'C:'
+  //     (drive root 'C:/').
+  if (p === '') p = '/'
+  else if (/^[A-Za-z]:$/.test(p)) p = `${p}/`
   // 3. macOS firmlink reconciliation (the `(?:\/|$)` guard stops it matching
   //    a real dir like `/private/variant`).
   if (platform === 'darwin') {

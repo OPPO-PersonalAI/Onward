@@ -78,6 +78,37 @@ test('parses multiple commits in one stream', () => {
   assert.equal(commits[1].files[0].status, 'A')
 })
 
+test('merge commit (2+ parents) with --diff-merges=first-parent body → non-empty files', () => {
+  // Regression lock for the Git History merge-empty bug: the prewarm batch must
+  // run `git log --diff-merges=first-parent`, which gives a MERGE commit a real
+  // --raw/--numstat body (its diff against the FIRST parent). Without that flag git
+  // omits the merge body entirely, the parser yields files:[], and the on-click L9
+  // cache HIT shows zero files for every merge. Here the multi-parent header still
+  // carries a populated body — the parser must attribute it to the merge commit.
+  const out = commit(
+    'merge1', 'firstParent secondParent',
+    [':100644 100644 a b M\tsrc/changed.ts', ':000000 100644 0 c A\tsrc/added.ts'],
+    ['5\t2\tsrc/changed.ts', '40\t0\tsrc/added.ts']
+  )
+  const [c] = parseGitLogRawNumstat(out)
+  assert.equal(c.sha, 'merge1')
+  assert.deepEqual(c.parents, ['firstParent', 'secondParent'], 'merge keeps both parents')
+  assert.equal(c.files.length, 2, 'first-parent merge diff is NOT empty')
+  assert.equal(c.files[0].filename, 'src/changed.ts')
+  assert.equal(c.files[1].status, 'A')
+})
+
+test('merge commit WITHOUT a diff body (the bug shape) → empty files', () => {
+  // Documents the pre-fix shape for contrast: a multi-parent commit emitted by a
+  // plain `git log` (no --diff-merges) has no body, so files is empty. This is the
+  // exact output that primed an empty L9 entry — the fix is the CLI flag, which
+  // gives the merge the body asserted in the test above.
+  const out = `${RS}merge0${US}p1 p2\n\n`
+  const [c] = parseGitLogRawNumstat(out)
+  assert.deepEqual(c.parents, ['p1', 'p2'])
+  assert.deepEqual(c.files, [], 'no body → empty files (pre-fix merge behaviour)')
+})
+
 test('empty output → empty array', () => {
   assert.deepEqual(parseGitLogRawNumstat(''), [])
 })

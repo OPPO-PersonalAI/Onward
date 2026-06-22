@@ -4,6 +4,17 @@
 #
 # Run the PDF/EPUB Git Diff + Git History autotest suite.
 #
+# Round-6 fix: the throwaway fixture repo is built DETERMINISTICALLY by
+# create-pdf-epub-diff-fixture.mjs (Node, execFileSync, no PTY,
+# core.autocrlf=false) into a runner-owned temp dir, and its manifest path is
+# handed to the app via ONWARD_AUTOTEST_FIXTURE_EXTRA. The previous version
+# built the repo by writing a multi-step PowerShell/bash mega-command into the
+# live PTY; on an EDR-throttled Windows host the fixture .git was never created
+# inside the renderer's wait window (round-5 log: repo-ready:setup:timeout
+# { attempts: 109, isGitRepo: false, files: [] }), failing git-diff-repo-ready
+# and aborting the suite. Building the repo here removes that failure class —
+# the product's getDiff is fine; the PTY fixture build was not robust under EDR.
+#
 # Usage:
 #   test/autotest/run-pdf-epub-diff-autotest.sh [APP_BIN] [LOG_FILE] [USER_DATA_DIR]
 
@@ -19,6 +30,9 @@ USER_DATA_DIR="${3:-}"
 # Track whether this script created the user-data dir, so cleanup only removes
 # self-created directories and never a caller-supplied path that may hold real data.
 TMP_ROOT_OWNED=0
+# Runner-owned temp dir for the deterministically-built fixture repo + manifest.
+FIXTURE_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-pdf-epub-fixture.XXXXXXXX")"
+FIXTURE_REPO="$FIXTURE_TMP_DIR/pdf-epub-repo"
 
 cleanup() {
   if [[ "$TMP_ROOT_OWNED" -eq 1 && -n "${USER_DATA_DIR:-}" && -d "$USER_DATA_DIR" ]]; then
@@ -28,9 +42,9 @@ cleanup() {
       rm -rf "$USER_DATA_DIR"
     fi
   fi
-  # The TS autotest writes __autotest_pdf_epub_diff_repo/ etc. into
-  # ONWARD_AUTOTEST_CWD (the repo root). Sweep direct repo-root children
-  # matching `__autotest_*` so a mid-run crash never leaks into the tree.
+  rm -rf "$FIXTURE_TMP_DIR" 2>/dev/null || true
+  # Defence-in-depth: sweep any legacy __autotest_* leftover the TS may have
+  # written into ONWARD_AUTOTEST_CWD (the repo root) on a mid-run crash.
   shopt -s nullglob
   local leftovers=("$REPO_ROOT"/__autotest_*)
   shopt -u nullglob
@@ -58,16 +72,24 @@ if [[ ! -x "$APP_BIN" ]]; then
   exit 1
 fi
 
+# Build the one-commit + alt-working-tree fixture repo (execFileSync; no PTY).
+FIXTURE_JSON="$(node "$REPO_ROOT/test/autotest/create-pdf-epub-diff-fixture.mjs" "$FIXTURE_REPO")"
+MANIFEST_PATH="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$FIXTURE_JSON")"
+
 rm -f "$LOG_FILE"
 
 echo "Starting PDF/EPUB diff+history autotest..."
-echo "[autotest] tmp dir: $USER_DATA_DIR"
+echo "[autotest] tmp dir:     $USER_DATA_DIR"
+echo "[autotest] fixture repo: $FIXTURE_REPO"
+echo "[autotest] manifest:     $MANIFEST_PATH"
 echo "App bin: $APP_BIN"
 
 ONWARD_DEBUG=1 \
+ONWARD_REPO_ROOT="$REPO_ROOT" \
 ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=pdf-epub-diff \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
+ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH" \
 ONWARD_AUTOTEST_EXIT=1 \
 ONWARD_TELEMETRY_RESET_CONSENT=1 \
 ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \

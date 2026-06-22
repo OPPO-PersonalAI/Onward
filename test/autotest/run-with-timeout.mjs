@@ -35,28 +35,44 @@ const child = spawn(cmd, args, {
 let timedOut = false
 let forceTimer = null
 
-function terminateChild(signal) {
+function terminateChild(force) {
   if (child.exitCode !== null || child.signalCode !== null) return
   if (isWindows) {
+    // taskkill walks the live PPID tree from child.pid. /F is mandatory for
+    // console processes (bash, node) which ignore the graceful WM_CLOSE that a
+    // /F-less taskkill sends; /T reaches the non-detached dev app while the tree
+    // is still rooted at child.pid.
     const taskkillArgs = ['/PID', String(child.pid), '/T']
-    if (signal === 'SIGKILL') taskkillArgs.push('/F')
+    if (force) taskkillArgs.push('/F')
     spawnSync('taskkill.exe', taskkillArgs, { stdio: 'ignore' })
     return
   }
   try {
-    process.kill(-child.pid, signal)
+    process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM')
   } catch {
-    try { child.kill(signal) } catch { /* already exited */ }
+    try { child.kill(force ? 'SIGKILL' : 'SIGTERM') } catch { /* already exited */ }
   }
 }
 
 const killTimer = setTimeout(() => {
   timedOut = true
   console.error(`run-with-timeout: command exceeded ${timeoutSec}s, terminating process tree`)
-  terminateChild('SIGTERM')
-  forceTimer = setTimeout(() => {
-    terminateChild('SIGKILL')
-  }, 10_000).unref()
+  if (isWindows) {
+    // Windows: a graceful (/F-less) taskkill is a no-op for console processes, and
+    // the old "graceful now, force 10s later" path had a hole — if the graceful
+    // pass let `bash` exit, child.on('exit') cleared the force timer and the
+    // wrapper exited BEFORE force-killing, leaking any surviving grandchild. Force
+    // the whole live tree at once while it is still rooted at child.pid.
+    terminateChild(true)
+  } else {
+    // POSIX: SIGTERM the process group, SIGKILL holdouts 10s later. (A dev app
+    // launched detached lives in its own session and is reaped by the
+    // orchestrator's kill_app(EXACT name) backstop, not by this group signal.)
+    terminateChild(false)
+    forceTimer = setTimeout(() => {
+      terminateChild(true)
+    }, 10_000).unref()
+  }
 }, timeoutSec * 1000)
 
 child.on('exit', (code, signal) => {

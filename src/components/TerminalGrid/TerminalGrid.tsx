@@ -32,6 +32,7 @@ import type { TerminalDebugApi } from '../../autotest/types'
 import { perfMonitor } from '../../utils/perf-monitor'
 import { perfTrace, perfTraceTask } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { resolveGitDiffInitialCwd } from '../../utils/git-diff-cwd-resolution'
 import { useI18n } from '../../i18n/useI18n'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from '../../utils/terminal-command'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
@@ -315,6 +316,14 @@ export const TerminalGrid = memo(function TerminalGrid({
   const panelShellStatesRef = useRef<Partial<Record<SubpageId, SubpagePanelShellState>>>({})
   const subpageStateMemoryRef = useRef(createSubpageStateMemory())
   const executeSubpageRouteRef = useRef<((command: SubpageRouteCommand) => Promise<void>) | null>(null)
+  // Explicit Git Diff cwd override, keyed by terminalId. Populated ONLY when a
+  // `git-diff:open` CustomEvent carries an explicit `cwd` in its detail (an
+  // autotest-only escape hatch — production call sites never set it). When
+  // present, `handleViewGitDiff` opens against this path verbatim and bypasses
+  // the racy terminalInfo / persisted / OSC cwd resolution. This makes Git Diff
+  // deterministic against a nested fixture repo whose `cd` cwd report is absent
+  // or lagged (e.g. under EDR-instrumented Windows shells).
+  const gitDiffCwdOverrideRef = useRef<Record<string, string>>({})
 
   // Coding Agent launch modal state
   const [codingAgentModalOpen, setCodingAgentModalOpen] = useState(false)
@@ -1891,6 +1900,15 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (!termEntry) return false
         if (item === 'rename') {
           setTitleMenuTerminalId(null)
+          // Eagerly stamp the refs that getInlineRenameState() / finishInlineRename()
+          // read, BEFORE React commits the setEditingId state. The effect at
+          // [editingId] only syncs editingIdRef after the commit + effect cycle,
+          // which under EDR-instrumented Windows boot can be starved for seconds
+          // by competing git-resolve / watcher-attach work. Without this, an
+          // autotest gating on getInlineRenameState().editingId would time out
+          // even though the rename intent already fired. (Autotest-only hook.)
+          editingIdRef.current = resolved
+          editingTitleRef.current = termEntry.customName ?? ''
           setEditingId(resolved)
           setEditingTitle(termEntry.customName ?? '')
           return true
@@ -1953,6 +1971,11 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (!resolved) return false
         const termEntry = visibleTerminalsRef.current.find((term) => term.id === resolved)
         setTitleMenuTerminalId(null)
+        // Same eager-ref stamp as clickTitleMenuItem('rename') above: make the
+        // inline-edit state observable synchronously so an autotest gate does not
+        // depend on the (possibly EDR-starved) React commit + effect cycle.
+        editingIdRef.current = resolved
+        editingTitleRef.current = termEntry?.customName ?? ''
         setEditingId(resolved)
         setEditingTitle(termEntry?.customName ?? '')
         return true
@@ -1962,12 +1985,19 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (!id) return false
         const finalValue = ((value ?? editingTitleRef.current) || '').trim()
         onTerminalRename(id, finalValue)
+        // Clear the refs eagerly (symmetric with the eager set in
+        // clickTitleMenuItem('rename')) so getInlineRenameState() reports
+        // "not editing" synchronously, without waiting for the React effect.
+        editingIdRef.current = null
+        editingTitleRef.current = ''
         setEditingId(null)
         setEditingTitle('')
         return true
       },
       cancelInlineRename: () => {
         if (!editingIdRef.current) return false
+        editingIdRef.current = null
+        editingTitleRef.current = ''
         setEditingId(null)
         setEditingTitle('')
         return true
@@ -2147,11 +2177,28 @@ export const TerminalGrid = memo(function TerminalGrid({
     const requestedAt = performance.now()
     const terminalInfo = terminalInfos[terminalId]
     const persistedCwd = getPersistedTerminalCwd(terminalId)
-    const initialCwd = terminalInfo?.repoRoot || terminalInfo?.cwd || persistedCwd
+    // An explicit cwd override (set when `git-diff:open` carried a `cwd` in its
+    // detail) takes precedence over every resolved source. It lets callers open
+    // Git Diff against a specific repo deterministically — used by autotests to
+    // target a nested fixture repo whose terminal cwd report is racy/absent.
+    const cwdOverride = gitDiffCwdOverrideRef.current[terminalId] ?? null
+    const initialCwd = resolveGitDiffInitialCwd({
+      cwdOverride,
+      repoRoot: terminalInfo?.repoRoot ?? null,
+      terminalCwd: terminalInfo?.cwd ?? null,
+      persistedCwd
+    })
     const closeOtherSubpages = options?.closeOtherSubpages ?? true
+    if (cwdOverride) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_CWD_OVERRIDE, {
+        terminalId,
+        cwd: cwdOverride.slice(0, 256)
+      })
+    }
     debugLog('gitdiff:view:start', {
       terminalId,
       initialCwd,
+      cwdOverride,
       repoRoot: terminalInfo?.repoRoot || null,
       terminalCwd: terminalInfo?.cwd || null,
       persistedCwd
@@ -2430,10 +2477,20 @@ export const TerminalGrid = memo(function TerminalGrid({
   useEffect(() => {
     const handleOpenGitDiff = (event: Event) => {
       if (hidden) return
-      const customEvent = event as CustomEvent<{ terminalId?: string }>
+      const customEvent = event as CustomEvent<{ terminalId?: string; cwd?: string }>
       const terminalId = customEvent.detail?.terminalId
       if (!terminalId) return
-      debugLog('gitdiff:event:open', { terminalId })
+      // Optional explicit cwd: when supplied, pin it so `handleViewGitDiff`
+      // opens against this repo verbatim regardless of the terminal's reported
+      // cwd. Clear any stale override when none is supplied so a later normal
+      // open does not inherit a previous explicit target.
+      const explicitCwd = customEvent.detail?.cwd
+      if (explicitCwd) {
+        gitDiffCwdOverrideRef.current[terminalId] = explicitCwd
+      } else {
+        delete gitDiffCwdOverrideRef.current[terminalId]
+      }
+      debugLog('gitdiff:event:open', { terminalId, explicitCwd: explicitCwd ?? null })
       if (!terminals.some(term => term.id === terminalId)) return
       void executeSubpageRoute(buildSubpageRouteCommand({
         intent: activeSubpage && activeSubpage !== 'diff' ? 'switch' : 'open',

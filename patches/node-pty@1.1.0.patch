@@ -1,0 +1,44 @@
+diff --git a/lib/conpty_console_list_agent.js b/lib/conpty_console_list_agent.js
+index 8c4fca9022a6d6f015bca87f61625cde2278f428..46633b2b1df9d1384ca6c9a476dd5cfdae15cf7c 100644
+--- a/lib/conpty_console_list_agent.js
++++ b/lib/conpty_console_list_agent.js
+@@ -10,7 +10,20 @@ Object.defineProperty(exports, "__esModule", { value: true });
+ var utils_1 = require("./utils");
+ var getConsoleProcessList = utils_1.loadNativeModule('conpty_console_list').module.getConsoleProcessList;
+ var shellPid = parseInt(process.argv[2], 10);
+-var consoleProcessList = getConsoleProcessList(shellPid);
++// Onward patch (upstream microsoft/node-pty 2b25c76): AttachConsole can fail if
++// the shell process already exited or is invalid (e.g. during app teardown),
++// which throws "AttachConsole failed" and crashes this forked agent. Fall back
++// to an empty list so the parent's _getConsoleProcessList resolves immediately
++// instead of waiting out its 5s dead-fork timeout, and no crash stack is printed.
++var consoleProcessList = [];
++if (shellPid > 0) {
++    try {
++        consoleProcessList = getConsoleProcessList(shellPid);
++    }
++    catch (e) {
++        consoleProcessList = [];
++    }
++}
+ process.send({ consoleProcessList: consoleProcessList });
+ process.exit(0);
+ //# sourceMappingURL=conpty_console_list_agent.js.map
+\ No newline at end of file
+diff --git a/lib/windowsPtyAgent.js b/lib/windowsPtyAgent.js
+index a358ffb177357e177661033c1b092f9c9d0e5f5a..acf665d227257ca163f6f85ce164ae017fd3c523 100644
+--- a/lib/windowsPtyAgent.js
++++ b/lib/windowsPtyAgent.js
+@@ -180,6 +180,12 @@ var WindowsPtyAgent = /** @class */ (function () {
+     };
+     WindowsPtyAgent.prototype._getConsoleProcessList = function () {
+         var _this = this;
++        // Onward patch (upstream microsoft/node-pty 2b25c76): don't fork the
++        // console-list agent when the pty never connected (innerPid <= 0) — there
++        // is no console to attach to, so the fork would only crash on AttachConsole.
++        if (this._innerPid <= 0) {
++            return Promise.resolve([]);
++        }
+         return new Promise(function (resolve) {
+             var agent = child_process_1.fork(path.join(__dirname, 'conpty_console_list_agent'), [_this._innerPid.toString()]);
+             agent.on('message', function (message) {

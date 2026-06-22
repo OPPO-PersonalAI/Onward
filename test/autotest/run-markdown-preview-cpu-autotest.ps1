@@ -6,9 +6,16 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = if ($env:REPO_ROOT) { $env:REPO_ROOT } else { (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 . (Join-Path $RepoRoot 'test\autotest\Resolve-DevAppBin.ps1')
 
+# MPC_SUITE lets the phase-split wrappers (idle / scroll / editor) write distinct
+# log/result files reusing this single body; MPC_ONLY_PHASE (read by the driver)
+# selects which phase runs. Defaults keep this runnable whole (all phases).
+# Mirror of run-markdown-preview-cpu-autotest.sh's MPC_SUITE / MPC_ONLY_PHASE.
+$McpSuite = if ($env:MPC_SUITE) { $env:MPC_SUITE } else { 'markdown-preview-cpu' }
+$McpOnlyPhase = if ($env:MPC_ONLY_PHASE) { $env:MPC_ONLY_PHASE } else { '' }
+
 $AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin -RootDir $RepoRoot }
-$LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $RepoRoot 'traces\test-logs\markdown-preview-cpu-autotest.log' }
-$ResultFile = if ($args.Count -ge 3 -and $args[2]) { $args[2] } else { Join-Path $RepoRoot 'traces\analysis\markdown-preview-cpu-autotest.json' }
+$LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $RepoRoot ('traces\test-logs\' + $McpSuite + '-autotest.log') }
+$ResultFile = if ($args.Count -ge 3 -and $args[2]) { $args[2] } else { Join-Path $RepoRoot ('traces\analysis\' + $McpSuite + '-autotest.json') }
 $FixtureRootWasCreated = $false
 if ($args.Count -ge 4 -and $args[3]) {
   $FixtureRoot = $args[3]
@@ -79,6 +86,9 @@ try {
   $env:CDP_PORT = $CdpPort
   $env:TARGET_RELATIVE_PATH = $TargetRelativePath
   $env:RESULT_PATH = $ResultFile
+  # Phase selector (idle / scroll / editor / '' = all); the driver reads it. Set
+  # explicitly so the whole-suite run clears any inherited value (parity with .sh).
+  $env:MPC_ONLY_PHASE = $McpOnlyPhase
 
   & node (Join-Path $RepoRoot 'test\autotest\test-markdown-preview-cpu-cdp.mjs')
   $TestExit = $LASTEXITCODE

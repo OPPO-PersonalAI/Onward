@@ -1063,6 +1063,8 @@ export interface DebugAPI {
   autotestGsmWatcherFailSubscribeOnce: boolean
   autotestGsmWatcherFailCallbackOnce: boolean
   autotestGsmWatcherSilent: boolean
+  autotestGsmLatencyGroup: string
+  autotestGdsGroup: string
   getMirrorWatcherStatusHistory: () => GitStateMirrorWatcherStatus[]
   perfTraceCaptureContent: boolean
   virtualCursorDisabled: boolean

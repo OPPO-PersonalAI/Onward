@@ -811,6 +811,14 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     const baselineCwd = adaptiveCwdLabel(terminalId)
     const baselineManualRepoRoot = api.getTerminalManualNameRepoRoot(terminalId)
 
+    // Separator-agnostic cwd comparison: after an OSC-7 phantom rejection the
+    // displayed cwd falls back to the legacy poll cwd, which on Windows is
+    // '\\'-separated vs the baseline '/'-separated (path-equivalent, byte-different).
+    // The security assertion stays intact: a phantom free-text cwd (e.g.
+    // '/Claude is waiting...') still differs from the baseline regardless of separator.
+    const sameCwd = (a?: string | null, b?: string | null) =>
+      (a ?? '').replace(/\\/g, '/') === (b ?? '').replace(/\\/g, '/')
+
     const trialEvidence: Array<{
       trial: number
       titleAfter: string | null
@@ -834,7 +842,7 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
 
       const titleOk = titleAfter === baselineTitle
       const customOk = customAfter === baselineCustomName
-      const cwdOk = !variant.checkCwd || (cwdAfter === baselineCwd)
+      const cwdOk = !variant.checkCwd || sameCwd(cwdAfter, baselineCwd)
       const manualOk = manualRepoRootAfter === baselineManualRepoRoot
       const trialOk = injectOk && titleOk && customOk && cwdOk && manualOk
       if (!trialOk) aggregateOk = false

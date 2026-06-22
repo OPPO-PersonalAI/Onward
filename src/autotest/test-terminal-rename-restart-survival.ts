@@ -112,7 +112,18 @@ export async function testTerminalRenameRestartSurvivalSeed(ctx: AutotestContext
   api.openTitleMenu(terminalId)
   await sleep(20)
   api.clickTitleMenuItem('rename', terminalId)
-  await sleep(20)
+  // Deterministic gate: clickTitleMenuItem('rename') sets React state, and
+  // editingIdRef (which finishInlineRename reads) only updates after the React
+  // commit + effect runs. Under EDR that commit can take far longer than a fixed
+  // sleep(20), so firing finishInlineRename blind hits its null-id guard and the
+  // rename silently no-ops. Wait until inline-edit mode is actually live before
+  // committing (mirrors sibling test-terminal-title-rename.ts).
+  await waitFor(
+    'trs-seed-edit-mode',
+    () => api.getInlineRenameState().editingId === terminalId,
+    4000,
+    50
+  )
   api.finishInlineRename(KEPT_NAME)
 
   // Deterministic gate: poll until the rename has propagated to the ref that

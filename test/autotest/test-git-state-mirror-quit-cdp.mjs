@@ -5,6 +5,7 @@
 
 import { spawn, execFile } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -19,10 +20,31 @@ const USER_DATA_BASE = process.env.USER_DATA_BASE || ''
 const FIXTURE_BASE = process.env.FIXTURE_BASE || ''
 const LOG_FILE = process.env.LOG_FILE || join(REPO_ROOT, 'traces/test-logs/git-state-mirror-quit-autotest.log')
 const RESULT_FILE = process.env.RESULT_FILE || join(REPO_ROOT, 'traces/analysis/git-state-mirror-quit-autotest.json')
+// Kept for backwards-compat with the runner's CDP_PORT env, but IGNORED for the
+// actual per-trial port: fixed ports (9343 + trial) collide when a previous
+// trial's Electron debug socket is slow to release on Windows or a leftover
+// zombie still holds the port (observed as trial-5 `bind() WSAEADDRINUSE 0x2740`
+// -> "No DevTools WebSocket announcement" -> SIGTERM). Each trial now binds a
+// dynamic free port instead — same fix `check-renderer-idle-churn.mjs` adopted.
 const BASE_CDP_PORT = Number(process.env.CDP_PORT || '9343')
+void BASE_CDP_PORT
 const TRIALS = Number(process.env.GSM_QUIT_TRIALS || '5')
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// Pick a free ephemeral port per trial. A previous run/trial can leave a socket
+// in TIME_WAIT or a zombie holding a fixed port; choosing a fresh OS-assigned
+// free port each trial makes the CDP launch immune to that collision class.
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.on('error', reject)
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address()
+      srv.close(() => resolve(port))
+    })
+  })
+}
 
 function fail(message, detail = {}) {
   const error = new Error(message)
@@ -405,7 +427,7 @@ const ABORT_TOKENS = [
 ]
 
 async function runTrial(trial, stream) {
-  const port = BASE_CDP_PORT + trial - 1
+  const port = await getFreePort()
   const userDataDir = join(USER_DATA_BASE, `trial-${trial}-userdata`)
   const repoDir = join(FIXTURE_BASE, `trial-${trial}-repo`)
   mkdirSync(userDataDir, { recursive: true })
@@ -524,6 +546,10 @@ async function runTrial(trial, stream) {
       try { await churnLoop } catch { /* ignore */ }
     }
     try { cdp?.close() } catch { /* ignore */ }
+    // Defence-in-depth: release the child's stdio handles so they cannot keep
+    // Node's event loop referenced after the app has exited (Windows hang class
+    // — a lingering pipe handle blocks process teardown on the success path).
+    try { child.stdout?.destroy(); child.stderr?.destroy(); child.unref() } catch { /* ignore */ }
   }
 }
 
@@ -566,6 +592,11 @@ async function main() {
   if (!result.ok) {
     process.exit(1)
   }
+  // Exit deterministically on the success path too. On Windows a lingering
+  // Electron stdio handle can keep Node's event loop referenced, hanging the
+  // driver until the orchestrator's tree-kill. An explicit exit guarantees the
+  // process tears down the instant the verdict is written.
+  process.exit(result.ok ? 0 : 1)
 }
 
 main().catch((error) => {

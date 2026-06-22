@@ -28,6 +28,13 @@ const IDLE_P95_LIMIT = Number(process.env.MPC_HELPER_CPU_P95_LIMIT || '15')
 const IDLE_MAX_LIMIT = Number(process.env.MPC_HELPER_CPU_MAX_LIMIT || '0')
 const PREVIEW_STABLE_TIMEOUT_MS = Number(process.env.MPC_PREVIEW_STABLE_TIMEOUT_MS || '30000')
 const CONTENT_VISIBLE_TIMEOUT_MS = Number(process.env.MPC_CONTENT_VISIBLE_TIMEOUT_MS || '30000')
+// MPC_ONLY_PHASE partitions the 4 serial CPU phases across split sub-5-min
+// runners (the whole suite's settle+sampling overran the 300s budget — class-2):
+//   '' (default) = all phases (runnable whole); 'idle' = idle-preview only;
+//   'scroll' = post-scroll recovery only; 'editor' = split + editor-only modes.
+// Every phase still does the shared setup (ready -> openPreview -> contentVisible).
+const ONLY_PHASE = process.env.MPC_ONLY_PHASE || ''
+const runPhase = (name) => ONLY_PHASE === '' || ONLY_PHASE === name
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -580,72 +587,78 @@ async function main() {
       fail('Preview content did not become visible before CPU sampling', result.contentVisible)
     }
 
-    await sleep(CPU_SETTLE_MS)
-    result.preIdleSnapshot = await cdp.evaluate(snapshotExpression())
-    result.idleCpuSamples = await collectCpuSamples('idle-preview-only', IDLE_SAMPLE_COUNT)
-    result.postIdleSnapshot = await cdp.evaluate(snapshotExpression())
-    result.idleCpuSummary = summarizeCpu(result.idleCpuSamples)
-    const idle = result.idleCpuSummary.rendererHelperCpu
-    if (idle.avg > IDLE_AVG_LIMIT || idle.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && idle.max > IDLE_MAX_LIMIT)) {
-      fail('Renderer helper CPU exceeded idle budget', {
-        rendererHelperCpu: idle,
-        limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
-        topProcesses: result.idleCpuSummary.topProcesses
-      })
+    if (runPhase('idle')) {
+      await sleep(CPU_SETTLE_MS)
+      result.preIdleSnapshot = await cdp.evaluate(snapshotExpression())
+      result.idleCpuSamples = await collectCpuSamples('idle-preview-only', IDLE_SAMPLE_COUNT)
+      result.postIdleSnapshot = await cdp.evaluate(snapshotExpression())
+      result.idleCpuSummary = summarizeCpu(result.idleCpuSamples)
+      const idle = result.idleCpuSummary.rendererHelperCpu
+      if (idle.avg > IDLE_AVG_LIMIT || idle.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && idle.max > IDLE_MAX_LIMIT)) {
+        fail('Renderer helper CPU exceeded idle budget', {
+          rendererHelperCpu: idle,
+          limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
+          topProcesses: result.idleCpuSummary.topProcesses
+        })
+      }
     }
 
-    result.scroll = await cdp.evaluate(scrollPreviewExpression(6000))
-    await sleep(CPU_SETTLE_MS)
-    result.postScrollAnimationAudit = await cdp.evaluate(animationAuditExpression())
-    if (result.postScrollAnimationAudit.forbidden.length > 0) {
-      fail('Forbidden animations are running after preview scroll', result.postScrollAnimationAudit)
+    if (runPhase('scroll')) {
+      result.scroll = await cdp.evaluate(scrollPreviewExpression(6000))
+      await sleep(CPU_SETTLE_MS)
+      result.postScrollAnimationAudit = await cdp.evaluate(animationAuditExpression())
+      if (result.postScrollAnimationAudit.forbidden.length > 0) {
+        fail('Forbidden animations are running after preview scroll', result.postScrollAnimationAudit)
+      }
+
+      result.prePostScrollSnapshot = await cdp.evaluate(snapshotExpression())
+      result.postScrollCpuSamples = await collectCpuSamples('post-scroll-idle', POST_SCROLL_SAMPLE_COUNT)
+      result.postPostScrollSnapshot = await cdp.evaluate(snapshotExpression())
+      result.postScrollCpuSummary = summarizeCpu(result.postScrollCpuSamples)
+      const postScroll = result.postScrollCpuSummary.rendererHelperCpu
+      if (postScroll.avg > IDLE_AVG_LIMIT || postScroll.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && postScroll.max > IDLE_MAX_LIMIT)) {
+        fail('Renderer helper CPU did not recover after preview scroll', {
+          rendererHelperCpu: postScroll,
+          limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
+          topProcesses: result.postScrollCpuSummary.topProcesses
+        })
+      }
     }
 
-    result.prePostScrollSnapshot = await cdp.evaluate(snapshotExpression())
-    result.postScrollCpuSamples = await collectCpuSamples('post-scroll-idle', POST_SCROLL_SAMPLE_COUNT)
-    result.postPostScrollSnapshot = await cdp.evaluate(snapshotExpression())
-    result.postScrollCpuSummary = summarizeCpu(result.postScrollCpuSamples)
-    const postScroll = result.postScrollCpuSummary.rendererHelperCpu
-    if (postScroll.avg > IDLE_AVG_LIMIT || postScroll.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && postScroll.max > IDLE_MAX_LIMIT)) {
-      fail('Renderer helper CPU did not recover after preview scroll', {
-        rendererHelperCpu: postScroll,
-        limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
-        topProcesses: result.postScrollCpuSummary.topProcesses
-      })
-    }
+    if (runPhase('editor')) {
+      result.splitMode = await cdp.evaluate(setMarkdownViewModeExpression('split'))
+      if (!result.splitMode.ok) {
+        fail('Markdown split editor/preview mode did not stabilize', result.splitMode)
+      }
 
-    result.splitMode = await cdp.evaluate(setMarkdownViewModeExpression('split'))
-    if (!result.splitMode.ok) {
-      fail('Markdown split editor/preview mode did not stabilize', result.splitMode)
-    }
+      await sleep(EDITOR_CPU_SETTLE_MS)
+      result.splitModeCpuSamples = await collectCpuSamples('split-editor-preview-idle', EDITOR_SAMPLE_COUNT)
+      result.splitModeCpuSummary = summarizeCpu(result.splitModeCpuSamples)
+      const splitMode = result.splitModeCpuSummary.rendererHelperCpu
+      if (splitMode.avg > IDLE_AVG_LIMIT || splitMode.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && splitMode.max > IDLE_MAX_LIMIT)) {
+        fail('Renderer helper CPU exceeded split editor/preview budget', {
+          rendererHelperCpu: splitMode,
+          limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
+          topProcesses: result.splitModeCpuSummary.topProcesses
+        })
+      }
 
-    await sleep(EDITOR_CPU_SETTLE_MS)
-    result.splitModeCpuSamples = await collectCpuSamples('split-editor-preview-idle', EDITOR_SAMPLE_COUNT)
-    result.splitModeCpuSummary = summarizeCpu(result.splitModeCpuSamples)
-    const splitMode = result.splitModeCpuSummary.rendererHelperCpu
-    if (splitMode.avg > IDLE_AVG_LIMIT || splitMode.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && splitMode.max > IDLE_MAX_LIMIT)) {
-      fail('Renderer helper CPU exceeded split editor/preview budget', {
-        rendererHelperCpu: splitMode,
-        limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
-        topProcesses: result.splitModeCpuSummary.topProcesses
-      })
-    }
+      result.editorOnlyMode = await cdp.evaluate(setMarkdownViewModeExpression('editor-only'))
+      if (!result.editorOnlyMode.ok) {
+        fail('Markdown editor-only mode did not stabilize', result.editorOnlyMode)
+      }
 
-    result.editorOnlyMode = await cdp.evaluate(setMarkdownViewModeExpression('editor-only'))
-    if (!result.editorOnlyMode.ok) {
-      fail('Markdown editor-only mode did not stabilize', result.editorOnlyMode)
-    }
-
-    await sleep(EDITOR_CPU_SETTLE_MS)
-    result.editorOnlyCpuSamples = await collectCpuSamples('markdown-editor-only-idle', EDITOR_SAMPLE_COUNT)
-    result.editorOnlyCpuSummary = summarizeCpu(result.editorOnlyCpuSamples)
-    const editorOnly = result.editorOnlyCpuSummary.rendererHelperCpu
-    if (editorOnly.avg > IDLE_AVG_LIMIT || editorOnly.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && editorOnly.max > IDLE_MAX_LIMIT)) {
-      fail('Renderer helper CPU exceeded editor-only budget', {
-        rendererHelperCpu: editorOnly,
-        limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
-        topProcesses: result.editorOnlyCpuSummary.topProcesses
-      })
+      await sleep(EDITOR_CPU_SETTLE_MS)
+      result.editorOnlyCpuSamples = await collectCpuSamples('markdown-editor-only-idle', EDITOR_SAMPLE_COUNT)
+      result.editorOnlyCpuSummary = summarizeCpu(result.editorOnlyCpuSamples)
+      const editorOnly = result.editorOnlyCpuSummary.rendererHelperCpu
+      if (editorOnly.avg > IDLE_AVG_LIMIT || editorOnly.p95 > IDLE_P95_LIMIT || (IDLE_MAX_LIMIT > 0 && editorOnly.max > IDLE_MAX_LIMIT)) {
+        fail('Renderer helper CPU exceeded editor-only budget', {
+          rendererHelperCpu: editorOnly,
+          limits: { avg: IDLE_AVG_LIMIT, p95: IDLE_P95_LIMIT, max: IDLE_MAX_LIMIT },
+          topProcesses: result.editorOnlyCpuSummary.topProcesses
+        })
+      }
     }
 
     result.ok = true

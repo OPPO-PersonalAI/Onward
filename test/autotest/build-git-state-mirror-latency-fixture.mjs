@@ -84,11 +84,18 @@ function tarball(repoName) {
   // the entire `repoName/` directory (including .git/) so extraction
   // restores the repo as-is. --sort=name keeps the tarball deterministic
   // when GNU tar is in use; bsd tar (macOS default) silently ignores it.
+  //
+  // COPYFILE_DISABLE=1 stops macOS bsd-tar from baking AppleDouble resource
+  // forks (`._*`) into the archive. Without it, every `._<file>` extracts on
+  // Windows/Linux as an UNTRACKED file, so a "clean" fixture reports `?? ._*`
+  // and the badge classifies it `added` — silently breaking the whole 5-state
+  // matrix off-macOS. (Same cross-platform class as the core.autocrlf pin above.)
   const tarPath = join(fixtureRoot, `${repoName}.tar.gz`)
+  const tarEnv = { ...process.env, COPYFILE_DISABLE: '1' }
   const result = spawnSync(
     'tar',
     ['--sort=name', '-czf', tarPath, '-C', stagingRoot, repoName],
-    { stdio: ['ignore', 'pipe', 'pipe'] }
+    { stdio: ['ignore', 'pipe', 'pipe'], env: tarEnv }
   )
   if (result.status !== 0) {
     // Retry without --sort=name for bsd tar on older macOS where the flag
@@ -96,7 +103,7 @@ function tarball(repoName) {
     const fallback = spawnSync(
       'tar',
       ['-czf', tarPath, '-C', stagingRoot, repoName],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
+      { stdio: ['ignore', 'pipe', 'pipe'], env: tarEnv }
     )
     if (fallback.status !== 0) {
       throw new Error(`tar failed for ${repoName}: ${fallback.stderr?.toString()}`)
