@@ -250,6 +250,7 @@ Common scopes the user might want (each keeps `--build`):
 | Skip a known-broken runner this round        | `python3 test/autotest/run-full-regression.py --build --skip run-<suite>`                   |
 | List planned scripts only (no build, no run) | `python3 test/autotest/run-full-regression.py --list`                                       |
 | Include the update-channel E2E suites        | `python3 test/autotest/run-full-regression.py --build --include-update-e2e`                 |
+| Clean-slate build first (validate env, opt-in) | route the build through `ow_build --clear` — see *Clean-slate build* below                |
 
 The update-channel E2E suites (`UPDATE_E2E_SCRIPTS` in the orchestrator —
 currently the Windows installer + relaunch test, with the macOS counterpart
@@ -262,6 +263,38 @@ the update tests; on the wrong host platform those entries still SKIP with
 reason `<platform>-only`. The design is symmetric — never invoke the
 Windows suite by hand to "simulate" the flag, and never silently include
 the macOS suite either.
+
+**Clean-slate build (`--clear-build`).** By default the build step above reuses
+`node_modules` (fast). When the user passes `--clear-build`, route the build
+through the **ow_build** skill's `--clear` mode instead of the orchestrator's own
+`--build`: it wipes `node_modules` + `out` + `release` + gitignored test scratch
+back to a fresh-clone state, runs a fresh `pnpm install` to PROVE the whole
+postinstall chain (Electron heal, electron-rebuild, node-pty, ripgrep,
+`@parcel/watcher`) completes with zero manual intervention, verifies every native
+module is bundled, builds, and launches to confirm the renderer comes up — then
+run the regression runners against that freshly-validated package WITHOUT a second
+`--build` (ow_build --clear just produced a provably-fresh `dist:dev` seconds
+earlier, so re-building would only waste 5–10 min). This is opt-in because the
+reinstall adds ~6–15 min per run; reach for it before a release or after a
+dependency / build-script change, when the regression should run from a
+fresh-machine posture. It does NOT change which suites run — only how the package
+under test is produced. Invoke `ow_build` via the Skill tool; cross-platform
+parity (macOS + Windows) is handled inside that skill.
+
+**Stop on a clean-slate COMPILE failure — it is a code signal, not an environment
+chore.** If `ow_build --clear`'s build step (`pnpm dist:dev`) fails to COMPILE on
+the freshly-installed tree, STOP and surface it to the user; do NOT apply the
+environment self-heal loop, do NOT retry, and do NOT fall through to running the
+regression. The reasoning: a fresh `pnpm install` has already eliminated the usual
+environment causes (stale `node_modules`, ABI drift, a skipped postinstall step),
+so a compile failure on a clean tree means the SOURCE genuinely does not build — a
+real code defect (a type error, a broken import, a bad build-config change).
+Healing or retrying around it only burns the ~6–15 min reinstall again and hides
+the bug behind a green-looking retry. This is deliberately STRICTER than the normal
+self-heal posture: the self-heal loop is for blockers BEFORE the compiler runs
+(interpreter / pnpm absent, `node_modules` missing, disk full) so test cases can
+*reach* execution; a clean-slate compile failure is the compiler having run and
+rejected the source — a contract failure to report, not an env chore to fix.
 
 A full pass typically takes 25–70 minutes (≈ 5–10 min build + 20–60
 min runners). **Run it in the FOREGROUND with live output** so the user
