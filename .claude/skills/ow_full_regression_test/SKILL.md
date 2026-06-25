@@ -1,6 +1,6 @@
 ---
 name: ow_full_regression_test
-description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts, failing-runner names, and a cheap per-failure triage smell (timing/crash/flake — a signal, not analysis). No edits to fix contract failures. Environment / toolchain blockers that stop test cases from executing (missing interpreter or pnpm, absent node_modules, ABI mismatch, stale build artefacts, leftover processes, full disk) are auto-healed and the run retried — bounded per symptom — so every test case actually runs; this self-heal never edits source, test, or fixture files to flip a red assertion. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain.
+description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts, failing-runner names, and a cheap per-failure triage smell (timing/crash/flake — a signal, not analysis). No edits to fix contract failures. Environment / toolchain blockers that stop test cases from executing (missing interpreter or pnpm, absent node_modules, ABI mismatch, stale build artefacts, leftover processes, full disk) are auto-healed and the run retried — bounded per symptom — so every test case actually runs; this self-heal never edits source, test, or fixture files to flip a red assertion. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain. `--background` is a modifier (combinable with Test mode, used automatically by Repair mode): the Agent runs the regression itself as a background command — wait for the completion notification, read the result once, never poll — instead of the default foreground `!` live run, so the repair fix→verify loop self-drives without the user typing. Repair never edits a test merely to make it pass; tests change only when proven a test-design bug, preserving the assertion's semantics.
 ---
 
 # ow_full_regression_test
@@ -27,6 +27,15 @@ clean first; it operates on the existing case file on disk.
 `--clean` never runs tests. If the user passes more than one mode
 flag at once (e.g. `--build --clean`, `--repair --clean`), ask which
 they meant before doing anything. The user picks each transition.
+
+`--background` is a **modifier, not a fourth mode**. By default a user-invoked
+regression runs in the FOREGROUND via the `!` prefix so the user watches it live
+(see § *Running with live progress*). `--background` instead has the Agent run the
+regression itself as a background command — wait for the completion notification,
+read the result once, never poll — so the user does not have to type anything. It
+combines with Test mode, and Repair mode uses it automatically so the
+fix → verify loop self-drives. (`--background` only changes *who launches the run
+and whether it streams live*; it does not change what runs.)
 
 ---
 
@@ -409,6 +418,47 @@ gives only ~66 % all-green per run, ~44 % for two in a row (`(1-p)^N`). For any 
 whose failures were Bucket 1, the final confirmation (Step 6) must be **`--repeat 2`/`3`
 and require CONSECUTIVE green** before declaring done. Never report premature success.
 
+### The repair loop, the cardinal rule, and `--background`
+
+The shape of a repair pass (each step's mechanics are in the numbered Steps below):
+
+1. **Start from a completed full run** — you repair the failures of an existing
+   `test/full-regression-results/<timestamp>/`, never run a fresh full pass just to
+   *discover* them (the user already did that). See the Hard precondition below.
+2. **Analyse each failure deeply — reach for the Workflow tool for anything
+   non-trivial.** For a single opaque log, the Explore subagent / Grep / Read is
+   enough. But when several suites fail, or a root cause spans subsystems, author a
+   short Workflow that fans out one diagnostic agent per failing suite (each reads
+   the suite source + its log, classifies the triage bucket, and returns a concrete
+   fix with `file:line`). A shifting / multi-suite failure set is usually ONE shared
+   root cause (§ *Triage FIRST*), and a Workflow surfaces that far faster than
+   guessing serially.
+3. **Fix, then verify that ONE fix in ISOLATION** with `--background --build --only
+   run-<suite>` — minutes, no user typing. Do NOT run the full suite to validate a
+   single fix (a 30–70 min round-trip to check one thing).
+4. **Only after every individual fix verifies, run ONE final full pass** (also
+   `--background`) to confirm nothing else regressed and no *other* suite now fails;
+   use `--repeat 2`/`3` if any repaired failure was a timing flake. The task is
+   **done ONLY when that final full pass is all-green** (STABLE across iterations).
+
+**The cardinal rule — never edit a test to make it pass. This is absolute.** You
+may change a test ONLY when you have *proven* the failure is a test-design bug (per
+§ *Triage FIRST*, Bucket 1: it polled a stale/early snapshot, gated on a latency
+comparison, slept a fixed time, or summed too much work into one runner) — and even
+then the change must preserve the test's **functional independence and semantic
+correctness**: it must still assert exactly the behaviour it asserted before, just
+without the false timing assumption. Loosening a threshold, deleting an assertion,
+or gating on a weaker proxy *so the bar goes green* is forbidden — that ships a test
+that lies. If you cannot make the test pass without weakening what it verifies, the
+failure is NOT a test bug: fix the product (Bucket 2/3) or stop and surface it.
+
+**Splitting to fit the timeout is allowed — but only semantics-preserving.** When a
+*healthy* suite simply does too much in one process and overruns its per-runner
+budget (§ *Per-runner 5-minute budget*), you MAY split it into sub-runners or trim
+repeated trials — provided coverage and meaning are unchanged (the same assertions
+still run, regrouped / with a smaller but still-representative sample). Splitting to
+*dodge* a genuine hang is forbidden — that is Bucket 2; fix the code.
+
 ### Hard precondition
 
 Repair mode requires that a previous full regression run already
@@ -498,7 +548,11 @@ suspect ONE shared timing root cause and look for the leverage point (the shared
 
 If a failure log is opaque, use the Explore subagent (or Grep / Read
 directly) to walk the suspect code path before forming a hypothesis;
-guessing wastes the user's time more than research does.
+guessing wastes the user's time more than research does. When **several**
+suites fail at once, prefer a short **Workflow** that fans out one diagnostic
+agent per failing suite (read source + log → classify the triage bucket →
+return a `file:line` fix) — it parallelises the analysis and is the fastest way
+to expose a single shared root cause behind a multi-suite failure set.
 
 ### Step 5 — Per-cluster fix loop
 
@@ -811,6 +865,29 @@ general background-and-notify test-execution loop: that loop optimises for
 the Agent driving one runner unattended; this optimises for the **user
 watching the whole suite live**, which is what they asked for.
 
-If the user explicitly wants it driven unattended (not watching), the Agent
-MAY background it and report counts at the end — but the default for a
-user-invoked regression is the foreground `!` run.
+### `--background` — Agent-driven, unattended (the repair default)
+
+When the user does not need to watch live — they passed `--background`, or you are
+inside `--repair` — do NOT ask them to paste the foreground `!` line. Run the
+regression yourself as a **background command** (`run_in_background: true`):
+
+```bash
+py test/autotest/run-full-regression.py --build [--only run-<suite>] [--repeat N]
+```
+
+Then follow CLAUDE.md's **background-and-notify** test-execution loop exactly:
+
+1. Launch it backgrounded; it writes its log to the persisted result dir.
+2. **Wait for the single completion `task-notification`** — that is the only
+   correct trigger for the next step. Do **not** `tail -f`, do **not** poll a
+   partially-written log, do **not** set up a streamer to "wait until done": the
+   orchestrator commits its closing summary only at the very end, so a poller
+   races the writer and biases toward a false/partial read.
+3. After the notification, read `summary.json` / the per-runner log **once**.
+
+This is the regression-specific application of the general loop (the foreground
+`!` rule above is the *other* refinement, for when the user wants to watch). Use
+`--background` for every run inside a repair pass — the targeted isolation verify
+(`--build --only run-<suite>`) and the final full pass — so the fix → verify loop
+self-drives without the user typing anything. The default for a *bare*
+user-invoked regression stays the foreground `!` run.
