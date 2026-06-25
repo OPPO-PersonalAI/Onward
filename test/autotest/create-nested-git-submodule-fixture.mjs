@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from 'child_process'
-import { rmSync, mkdirSync, writeFileSync, appendFileSync, existsSync } from 'fs'
+import { rmSync, mkdirSync, writeFileSync, appendFileSync, existsSync, realpathSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { tmpdir } from 'os'
 import { fileURLToPath, pathToFileURL } from 'url'
@@ -15,7 +15,31 @@ const fixtureRoot = resolve(__dirname, 'fixtures', 'git-nested-submodules')
 // rooted under the deep repo tree, which makes git fail with "Filename too
 // long" before any product code runs. Relocate the runtime root to a SHORT
 // OS-temp base to cut ~95 chars off the prefix; cleanup-on-exit still applies.
-const runtimeRoot = join(tmpdir(), 'onward-gns')
+//
+// canonicalTempBase() resolves the OS-temp base to its REAL path so the emitted
+// fixture paths match the git backend's realpath-resolved repo roots. The test does
+// strict absolute-path equality between ctx.rootPath-derived expected paths and
+// backend paths, so the two must agree on the canonical form. Per platform:
+//   - macOS:   tmpdir() is the unresolved /var symlink (/var/folders/...) while git
+//              reports /private/var/folders/...; realpath bridges the two. (the bug)
+//   - Windows: tmpdir() may be an 8.3 short name (e.g. C:\Users\RUNNER~1\...); realpath
+//              expands it to the long form git also reports. Still well under MAX_PATH
+//              (260) after the ~95-char relocation above; path separators are reconciled
+//              downstream by the test's normalizePath (\\ -> /). No .ps1 change needed —
+//              both runners invoke THIS shared .mjs and read .repoRoot.
+//   - Linux:   /tmp is normally not a symlink -> realpath is an effective no-op.
+// The try/catch falls back to the raw temp base if realpath ever fails (locked-down /
+// redirected TEMP, exotic FS), guaranteeing this is never WORSE than the pre-
+// canonicalization behavior on any platform.
+function canonicalTempBase() {
+  const base = tmpdir()
+  try {
+    return realpathSync(base)
+  } catch {
+    return base
+  }
+}
+const runtimeRoot = join(canonicalTempBase(), 'onward-gns')
 const sourcesRoot = join(runtimeRoot, 'sources')
 const workspaceRoot = join(runtimeRoot, 'workspace')
 const rootRepo = join(workspaceRoot, 'root')
