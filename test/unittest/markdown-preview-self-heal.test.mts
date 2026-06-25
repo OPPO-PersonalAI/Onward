@@ -30,6 +30,7 @@ import {
   shouldEnableMarkdownForOpen,
   shouldSelfHealMarkdownPreviewOpen,
   shouldReEnableMarkdownRenderOnReopenSameFile,
+  shouldRecoverPreviewOnReopenSameFile,
   shouldPreserveRetainedPreviewDuringReopen,
   shouldTakeZeroFlashReopenPath
 } from '../../src/components/ProjectEditor/utils/markdownPreviewSelfHeal.ts'
@@ -196,5 +197,51 @@ test('MPSH-U-07c no content-identical entry → do NOT zero-flash', () => {
   }), false)
   assert.equal(shouldTakeZeroFlashReopenPath({
     hasContentIdenticalCacheEntry: false, hasRenderedHtmlOnScreen: false
+  }), false)
+})
+
+// ─────────────── MPSH-U-08: recover preview on reopen of the same file (PMN-41) ───────────────
+// Generalises MPSH-U-05: the openFile already-active-file early-return must
+// recover the preview whenever it is unusable after an explicit markdown reopen —
+// the render gate OFF (deep-link / retained-view reopen) OR the gate ON but the
+// rendered HTML buffer EMPTY (a late worker-deactivate blanked it AFTER the gate
+// re-enabled, the "gate ON + blank HTML" gap that PMN-41 hit on EDR Windows). It
+// must stay a no-op for a normal re-click on an already-rendered file.
+
+test('MPSH-U-08 gate OFF (any HTML state) → recover', () => {
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'user', isMarkdownFile: true, isRenderAllowed: false, hasRenderedHtml: false
+  }), true)
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'debug', isMarkdownFile: true, isRenderAllowed: false, hasRenderedHtml: true
+  }), true)
+})
+
+test('MPSH-U-08b gate ON but HTML buffer EMPTY → recover (the PMN-41 gap)', () => {
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'user', isMarkdownFile: true, isRenderAllowed: true, hasRenderedHtml: false
+  }), true)
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'restore', isMarkdownFile: true, isRenderAllowed: true, hasRenderedHtml: false
+  }), true)
+})
+
+test('MPSH-U-08c gate ON + HTML present → NO-OP (normal re-click on a rendered file)', () => {
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'user', isMarkdownFile: true, isRenderAllowed: true, hasRenderedHtml: true
+  }), false)
+})
+
+test('MPSH-U-08d non-explicit source or non-markdown file → never recover', () => {
+  // Even with the preview unusable, a non-explicit open / non-markdown file must
+  // not trigger recovery.
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'auto', isMarkdownFile: true, isRenderAllowed: false, hasRenderedHtml: false
+  }), false)
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'background', isMarkdownFile: true, isRenderAllowed: true, hasRenderedHtml: false
+  }), false)
+  assert.equal(shouldRecoverPreviewOnReopenSameFile({
+    source: 'user', isMarkdownFile: false, isRenderAllowed: false, hasRenderedHtml: false
   }), false)
 })

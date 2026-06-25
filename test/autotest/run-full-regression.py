@@ -108,6 +108,7 @@ SCRIPTS: List[str] = [
     # run-git-diff-staleness-and-submodule-autotest.sh runs the whole suite via
     # GDS_GROUP='' / ONWARD_AUTOTEST_GDS_GROUP=''.
     "test/autotest/run-git-diff-submodule-autotest.sh",
+    "test/autotest/run-git-diff-submodule-refresh-autotest.sh",
     "test/autotest/run-git-diff-staleness-autotest.sh",
     "test/autotest/run-git-diff-reentry-autotest.sh",
     "test/autotest/run-git-diff-ux-presentation-autotest.sh",
@@ -254,6 +255,7 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # 180s default for the few estimate-only cases while staying < 300 (NOT backlog);
     # measured groups land well under, so this can tighten to ~200 once confirmed.
     "test/autotest/run-git-diff-submodule-autotest.sh": 280,
+    "test/autotest/run-git-diff-submodule-refresh-autotest.sh": 280,
     "test/autotest/run-git-diff-staleness-autotest.sh": 280,
     "test/autotest/run-git-diff-reentry-autotest.sh": 280,
     "test/autotest/run-git-diff-ux-presentation-autotest.sh": 280,
@@ -610,6 +612,59 @@ def _check_native_modules(repo_root: Path) -> Optional[str]:
     return None
 
 
+# Minimum plausible size of the ripgrep binary (every platform build is several
+# MB; win32-x64 is ~5.43 MB). The structural form of the same integrity floor in
+# scripts/ensure-ripgrep-binary.js. With @vscode/ripgrep >= 1.18.0 the binary
+# ships pre-extracted + SHA256-verified, so this guards against a missing
+# per-platform package or catastrophic corruption — see docs/lessons.md
+# (Node 24 + yauzl truncated rg.exe under the old 1.17.x unzip path).
+RIPGREP_MIN_BINARY_BYTES = 2 * 1024 * 1024
+
+
+def _check_ripgrep_binary(repo_root: Path) -> Optional[str]:
+    """Failure detail, or None when the bundled ripgrep binary is present + sized.
+
+    @vscode/ripgrep >= 1.18.0 ships rg[.exe] inside a per-platform package
+    (@vscode/ripgrep-<platform>-<arch>/bin/rg[.exe]). global-search spawns this
+    binary; a missing or truncated rg.exe fails every search suite at runtime.
+    Only enforced when @vscode/ripgrep is actually installed (else retired).
+    Cross-platform: the binary name derives from the interpreter's platform, and
+    both the hoisted symlink path and the pnpm-store path are accepted. Only the
+    matching-OS/arch optionalDependency installs, so exactly one platform package
+    is expected on any given host.
+    """
+    if not list(repo_root.glob("node_modules/.pnpm/@vscode+ripgrep@*")):
+        return None  # wrapper not installed — nothing to assert
+    binary_name = "rg.exe" if sys.platform == "win32" else "rg"
+    candidates = list(repo_root.glob(
+        f"node_modules/.pnpm/@vscode+ripgrep-*@*/node_modules/@vscode/ripgrep-*/bin/{binary_name}"
+    )) + list(repo_root.glob(
+        f"node_modules/@vscode/ripgrep-*/bin/{binary_name}"
+    ))
+    if not candidates:
+        return (
+            f"no @vscode/ripgrep platform binary ({binary_name}) found — the "
+            "per-platform optionalDependency for this OS/arch was not installed "
+            "(run `pnpm install` WITHOUT --no-optional)"
+        )
+    sizes: List[int] = []
+    for cand in candidates:
+        try:
+            sizes.append(cand.stat().st_size)
+        except OSError:
+            continue
+    if not sizes:
+        return f"@vscode/ripgrep platform binary ({binary_name}) is unreadable"
+    largest = max(sizes)
+    if largest < RIPGREP_MIN_BINARY_BYTES:
+        return (
+            f"@vscode/ripgrep platform binary ({binary_name}) is {largest} bytes, "
+            f"below the {RIPGREP_MIN_BINARY_BYTES}-byte integrity floor — it is "
+            "truncated/corrupt (remove node_modules and reinstall)"
+        )
+    return None
+
+
 def preflight_env_check(emit) -> bool:
     """Assert the installed node_modules matches the committed dependency spec.
 
@@ -620,6 +675,7 @@ def preflight_env_check(emit) -> bool:
         ("Electron binary installed", _check_electron_binary),
         ("WebGL addon-webgl patch applied", _check_webgl_patch),
         ("App native module built", _check_native_modules),
+        ("ripgrep binary installed", _check_ripgrep_binary),
     ]
     failures: List["tuple[str, str]"] = []
     for name, fn in invariants:

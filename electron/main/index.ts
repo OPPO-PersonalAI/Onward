@@ -195,6 +195,65 @@ function flushPerformanceTrace(reason: string): void {
   }
 }
 
+// Synchronous, crash-survivable quit-phase breadcrumb. Unlike perfTrace (buffered
+// and FLUSHED only at the end of teardown — so it is lost when an earlier teardown
+// step crashes), a console.log is captured line-by-line in the autotest runner log
+// and survives a subsequent segfault, so the last "[QuitPhase] …" line in a
+// crash log pinpoints exactly which teardown step was reached. Gated to autotest /
+// debug so production quit stays quiet.
+function logQuitPhase(phase: string): void {
+  if (process.env.ONWARD_AUTOTEST === '1' || process.env.ONWARD_DEBUG === '1') {
+    console.log(`[QuitPhase] ${phase}`)
+  }
+}
+
+// Destroy all renderer windows during quit. Ordering vs cleanupIpcHandlers() is
+// CRITICAL — it was the source of two OPPOSITE teardown bugs:
+//   1. Calling app.quit() WITHOUT first destroying the window leaves the renderer's
+//      1 s perf/persist setInterval loops invoking IPC after the handlers are gone;
+//      on an EDR-taxed Windows host the live renderer message loop + never-closed
+//      window WEDGE app.quit() (~193 s post-test hang when the Project Editor was
+//      left active at exit). So the window MUST be destroyed before app.quit().
+//   2. But HARD-destroying the window (w.destroy() frees the webContents native
+//      object) BEFORE disposing the native subsystems that hold a webContents
+//      reference (the GitStateMirror worker, parcel-watchers, worker clients — all
+//      torn down in cleanupIpcHandlers) lets a callback fire in that gap and touch
+//      freed native memory → a teardown SEGFAULT (observed ~1-in-3 on
+//      prompt-input-latency: the crash landed after "[AutoTest] done", DURING
+//      cleanup, before the perf-trace flush — i.e. exactly this window).
+// Correct invariant: dispose native subsystems FIRST (await cleanupIpcHandlers),
+// THEN destroy the windows, THEN app.quit(). Each quit path therefore calls
+// cleanupIpcHandlers() BEFORE destroyAllWindowsForQuit(). Must still run AFTER any
+// renderer-dependent flush (flushRendererState / flushAppStateStorage).
+function destroyAllWindowsForQuit(reason: string): void {
+  const windows = BrowserWindow.getAllWindows()
+  if (performanceTrace.enabled) {
+    try {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_QUIT_WINDOWS_DESTROYED, {
+        reason,
+        windowCount: windows.length
+      })
+    } catch {
+      /* best-effort diagnostic breadcrumb */
+    }
+  }
+  for (const w of windows) {
+    if (!w.isDestroyed()) {
+      try {
+        w.destroy()
+      } catch (error) {
+        console.warn('[Quit] window.destroy() failed:', String(error))
+      }
+    }
+  }
+  // Clearing the module-global reference prevents a post-quit stale-reference reuse
+  // (e.g. a macOS `activate` recreating the window mid-teardown). Safe: this now
+  // runs AFTER cleanupIpcHandlers() has disposed every native subsystem that held a
+  // webContents reference, and every quit-reachable access in this module is
+  // null-guarded (`if (mainWindow && !mainWindow.isDestroyed())` / `mainWindow?.`).
+  mainWindow = null
+}
+
 // Exit the request entry in a unified manner to ensure that the confirmation box only pops up once
 export async function requestQuit(): Promise<void> {
   if (isQuitting) return
@@ -212,8 +271,15 @@ export async function requestQuit(): Promise<void> {
         `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
       )
     }
+    // Dispose native subsystems FIRST (window still alive), THEN destroy windows,
+    // THEN quit — see destroyAllWindowsForQuit's header for why this order matters.
+    logQuitPhase('quit:cleanup-start')
     await cleanupIpcHandlers()
+    logQuitPhase('quit:cleanup-done')
+    destroyAllWindowsForQuit('quit')
+    logQuitPhase('quit:windows-destroyed')
     flushPerformanceTrace('quit')
+    logQuitPhase('quit:before-app-quit')
     app.quit()
   }
 }
@@ -243,8 +309,13 @@ export async function requestRestartToApplyUpdate(): Promise<{ success: boolean;
     )
   }
 
+  logQuitPhase('restart-to-update:cleanup-start')
   await cleanupIpcHandlers()
+  logQuitPhase('restart-to-update:cleanup-done')
+  destroyAllWindowsForQuit('restart-to-update')
+  logQuitPhase('restart-to-update:windows-destroyed')
   flushPerformanceTrace('restart-to-update')
+  logQuitPhase('restart-to-update:before-app-quit')
   app.quit()
   return { success: true }
 }
@@ -268,8 +339,13 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
     )
   }
 
+  logQuitPhase('debug-quit:cleanup-start')
   await cleanupIpcHandlers()
+  logQuitPhase('debug-quit:cleanup-done')
+  destroyAllWindowsForQuit('debug-quit')
+  logQuitPhase('debug-quit:windows-destroyed')
   flushPerformanceTrace('debug-quit')
+  logQuitPhase('debug-quit:before-app-quit')
   app.quit()
   return { success: true }
 }

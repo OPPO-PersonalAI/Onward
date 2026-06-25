@@ -14,7 +14,8 @@
 // into the live terminal via terminal.write(). On an EDR-throttled Windows host
 // the terminal could be sitting at a shell "Press any key to continue" pause
 // (observed in the round-4 log: a `watchman` startup command failed with
-// "'watchman' is not recognized" then "请按任意键继续..."), so the autotest's
+// "'watchman' is not recognized" then a localized "press any key to continue"
+// pause prompt), so the autotest's
 // keypress was swallowed by that prompt and the mega-command NEVER executed.
 // getHistory then correctly reported "The current directory is not a Git
 // repository." (ID-13 FAIL), and every downstream ID-15..ID-17 cascaded to

@@ -180,7 +180,14 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
     })
     if (!cwdA || cancelled()) return results
 
-    const cwdB = await waitForTerminalCwd(terminalB, fixtureRoot, sleep)
+    // Terminal B runs a HEAVY fixture command (rm + mkdir + git init + 3 commits)
+    // before it lands in fixtureRoot. Each git commit is EDR-taxed (1.3-12.9 s
+    // spawn tax under anti-malware), so the default 12 s cwd budget is far too
+    // tight under full-suite EDR pressure (terminal A's plain `cd` settles fast and
+    // keeps the default). Give B a generous EDR-tolerant ceiling — it returns the
+    // instant the cwd settles, so a healthy host pays nothing extra. Matches the
+    // SN-00 multi-step-fixture cwd budget.
+    const cwdB = await waitForTerminalCwd(terminalB, fixtureRoot, sleep, 90000)
     _assert('GHMS-04-terminal-b-fixture-ready', Boolean(cwdB), {
       terminalId: terminalB,
       expected: normalizePath(fixtureRoot),

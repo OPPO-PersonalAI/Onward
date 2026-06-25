@@ -25,8 +25,11 @@ source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 # sync, GDS-20→reentry), and the two atomic UI blocks (BlockA=GDS-21..29,
 # BlockE=GDS-35..39) each own their own ux group.
 #   GDS_GROUP='submodule'           — parent/sub c/m/u filter + nested/uninitialized
-#                                     + staged-pointer + closed-parent submodule
-#                                     freshness (GDS-01..05,13,14,46). ~113s work.
+#                                     + staged-pointer (GDS-01..05,13,14). ~20s work.
+#   GDS_GROUP='submodule-refresh'   — closed-parent submodule freshness, GDS-46 only
+#                                     (cold v1 + warm v2 submodule diff). Carved off
+#                                     because cold v1 runs ~94s+ under EDR and overran
+#                                     the watchdog folded into 'submodule'.
 #   GDS_GROUP='staleness'           — request-cache invalidation / watcher-driven
 #                                     freshness / concurrent converge + Project-
 #                                     Editor-save freshness (GDS-06..10,45). ~122s.
@@ -162,9 +165,9 @@ fi
 # Completion markers, gated by group so each split runner only requires the
 # markers ITS OWN group emits (a split runner that demanded another group's
 # marker would always fail). group_has <group> is true when the current
-# GDS_GROUP IS that group or is empty ('' = whole suite = every group). The six
-# groups are: submodule | staleness | reentry | diff-ux-presentation |
-# diff-ux-tree | model-sync.
+# GDS_GROUP IS that group or is empty ('' = whole suite = every group). The seven
+# groups are: submodule | submodule-refresh | staleness | reentry |
+# diff-ux-presentation | diff-ux-tree | model-sync.
 # ---------------------------------------------------------------------------
 group_has() {
   [[ -z "$GDS_GROUP" || "$GDS_GROUP" == "$1" ]]
@@ -182,8 +185,13 @@ if group_has submodule; then
   require_marker "GDS-05-mixed-parent-and-submodule-internal"
   require_marker "GDS-14-staged-submodule-pointer-surfaces-in-parent"
   require_marker "GDS-13-uninitialized-submodule-not-surfaced"
-  require_marker "GDS-46-closed-parent-view-submodule-edits-refresh-diff"
   require_marker "GDS-16-trace-marker-snapshot-service-expected"
+fi
+
+if group_has submodule-refresh; then
+  # GDS-46 carved off to its own slice (its cold submodule diff runs ~94 s+ under
+  # EDR and overran the watchdog folded into the 'submodule' group).
+  require_marker "GDS-46-closed-parent-view-submodule-edits-refresh-diff"
   require_marker "GDS-46-trace-marker-auxiliary-mirror-subscription-expected"
 fi
 
@@ -308,6 +316,8 @@ if group_has submodule; then
   # snapshot still warm) that is not worth defending against test-runner
   # flake. Cache health can still be inspected post-mortem in the trace.
   expect_event "GDS-16"  "main:git.snapshot.capture"
+fi
+if group_has submodule-refresh; then
   expect_event "GDS-46"  "renderer:git-diff.aux-mirror-subscription"
 fi
 if group_has staleness; then

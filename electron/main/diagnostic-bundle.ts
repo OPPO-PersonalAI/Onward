@@ -21,6 +21,7 @@ import { copyFileSync, createWriteStream, existsSync, mkdtempSync, readdirSync, 
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
+import { inflateRawSync } from 'zlib'
 
 export interface DiagnosticBundleAppInfo {
   version: string
@@ -1228,23 +1229,54 @@ export function verifyBundleArchive(
         // We hash every entry's bytes — V7/V8/V9 need the SHA-256 to
         // compare against the source. There is no "presence-only" path
         // anymore because shallow `>0` checks were intentionally removed.
-        zipfile.openReadStream(entry, (streamErr, readStream) => {
+        //
+        // Read each entry as RAW (still-compressed) bytes via decompress:false,
+        // then one-shot inflate, instead of yauzl's STREAMING inflate. yauzl
+        // 3.x's openReadStream inflate path (fd-slicer -> zlib.createInflateRaw
+        // -> AssertByteCountStream) DEADLOCKS on Node >= 24 once an entry's
+        // uncompressed size exceeds ~5 MB: the inflate stream never emits
+        // 'end', so this Promise never resolves (the DB-04 32 MB unit test
+        // hangs; the same stall truncated the bundled rg.exe at install time).
+        // zlib.inflateRawSync on the collected raw bytes avoids yauzl's stream
+        // plumbing entirely — it decompresses an 8 MB entry in ~14 ms on Node
+        // 24 — and is byte-identical, so V4/V7/V8/V9/V10 are unchanged. Stored
+        // entries (compressionMethod 0) carry verbatim bytes (no inflate).
+        const stored = entry.compressionMethod === 0
+        // yauzl's ZipFileOptions requires all four fields. decompress:false
+        // yields the RAW deflate bytes for a compressed entry (which we then
+        // inflateRawSync); a STORED entry must use null (yauzl throws on a
+        // non-null decompress for an uncompressed entry, and its bytes are
+        // already verbatim). decrypt/start/end stay null (no encryption, whole
+        // entry).
+        const streamOpts: yauzl.ZipFileOptions = {
+          decompress: stored ? null : false,
+          decrypt: null,
+          start: null,
+          end: null
+        }
+        zipfile.openReadStream(entry, streamOpts, (streamErr, readStream) => {
           if (streamErr || !readStream) {
             pumpError = `openReadStream(${fileName}) failed: ${String(streamErr)}`
             zipfile.readEntry()
             return
           }
           const collected: Buffer[] = []
-          const hasher = createHash('sha256')
           readStream.on('data', (b: Buffer) => {
             collected.push(b)
-            hasher.update(b)
           })
           readStream.on('end', () => {
-            const data = Buffer.concat(collected)
+            const raw = Buffer.concat(collected)
+            let data: Buffer
+            try {
+              data = stored ? raw : inflateRawSync(raw)
+            } catch (err) {
+              pumpError = `inflate ${fileName} failed: ${String(err)}`
+              zipfile.readEntry()
+              return
+            }
             entriesByName.set(fileName, {
               uncompressedSize: entry.uncompressedSize,
-              sha256: hasher.digest('hex'),
+              sha256: createHash('sha256').update(data).digest('hex'),
               data
             })
             zipfile.readEntry()

@@ -72,6 +72,37 @@ export function shouldReEnableMarkdownRenderOnReopenSameFile(
   return shouldEnableMarkdownForOpen(source, isMarkdownFile) && isPreviewPaneOpen
 }
 
+/**
+ * Pure decision for the `openFile` already-active-file early-return preview
+ * RECOVERY (PMN-41). Generalises `shouldReEnableMarkdownRenderOnReopenSameFile`:
+ * an explicit markdown re-open of the already-active file must recover the
+ * preview whenever it is unusable, which is EITHER of:
+ *   - the render gate is OFF (`!isRenderAllowed`) — the Git-Diff "Jump to Editor"
+ *     deep-link / retained-view reopen left `isMarkdownRenderEnabled` false, OR
+ *   - the render gate is ON but the rendered HTML buffer is EMPTY
+ *     (`!hasRenderedHtml`) — a late worker-deactivate render blanked
+ *     `markdownRenderedHtmlRef` AFTER the gate re-enabled, so the preview pane
+ *     reports visible yet shows nothing. The older gate (`!isRenderAllowed`
+ *     only) skipped this "gate ON + blank HTML" reopen state, stranding the
+ *     preview blank (PMN-41-code-wrap-fixture-opened-after-reopen on Windows).
+ *
+ * It is a no-op (false) for a normal re-click on an already-rendered file
+ * (gate ON + HTML present) and for any non-explicit / non-markdown open.
+ *
+ * Locked down by test/unittest/markdown-preview-self-heal.test.mts.
+ */
+export function shouldRecoverPreviewOnReopenSameFile(args: {
+  source: MarkdownOpenSource
+  isMarkdownFile: boolean
+  isRenderAllowed: boolean
+  hasRenderedHtml: boolean
+}): boolean {
+  return (
+    shouldEnableMarkdownForOpen(args.source, args.isMarkdownFile) &&
+    (!args.isRenderAllowed || !args.hasRenderedHtml)
+  )
+}
+
 export type ProjectEditorSoftCloseKind = 'retained-close' | 'subpage-return'
 
 /**

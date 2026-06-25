@@ -176,7 +176,11 @@ export const PERF_TRACE_EVENT = {
   WORKER_RIPGREP_ERROR: 'main:ripgrep-worker-error',
   WORKER_RIPGREP_EXIT: 'main:ripgrep-worker-exit',
   WORKER_RIPGREP_BINARY_MISSING: 'main:ripgrep-binary-missing',
+  WORKER_RIPGREP_PLATFORM_RESOLVE_FALLBACK: 'main:ripgrep-platform-resolve-fallback',
   WORKER_RIPGREP_START_ERROR: 'main:ripgrep-worker-start-error',
+
+  // ───────── Main — app shutdown ─────────
+  MAIN_APP_QUIT_WINDOWS_DESTROYED: 'main:app.quit.windows-destroyed',
 
   // ───────── Renderer — lifecycle ─────────
   RENDERER_TRACE_START: 'renderer:trace-start',
@@ -290,6 +294,39 @@ export const PERF_TRACE_EVENT = {
   // the DOM-empty fall-through fired (the re-apply ran) versus the zero-flash
   // branch trusting a stale ref. Payload = { filePath (basename) }.
   RENDERER_PROJECT_EDITOR_MD_REOPEN_DOM_EMPTY_REAPPLY: 'renderer:project-editor.md-reopen-dom-empty-reapply',
+  // The preview-reveal WATCHDOG force-finalized a reveal that was stuck in the
+  // 'waiting-html' phase even though the render is fully settled (renderAllowed +
+  // HTML present + no pending work). This happens when a deep-link "Jump to
+  // Editor" triggers a root reload whose unmount cleanup (cancelPreviewRevealFrames)
+  // cleared the queued reveal AFTER it was queued, and no React dep changed to
+  // re-run the settled-reveal effect — leaving the preview permanently faded out
+  // (opacity 0). The watchdog reveals it so the preview is never stranded
+  // (CDP-10 deep-link jump on EDR-throttled Windows). A burst of these means the
+  // reveal-cancellation race is firing often and the root cause should be fixed.
+  // Payload = { filePath (basename), htmlLength, waitedMs }.
+  RENDERER_PROJECT_EDITOR_MD_REVEAL_WATCHDOG_FORCED: 'renderer:project-editor.md-reveal-watchdog-forced',
+  // The render-recovery watchdog re-issued a markdown worker render because the
+  // preview should show content (render gate on, preview pane open, file content
+  // present) but the rendered-HTML buffer was stuck EMPTY with no render in
+  // flight. This happens on a cold reopen whose worker render was issued but its
+  // result was discarded by the reopen churn (a worker-deactivate / owner-switch
+  // bumped markdownApplyRequestIdRef between request and response), after which
+  // no React dep changed to re-send — leaving the preview permanently blank
+  // (PMSR-09/10/11 cold first reopen on EDR-throttled Windows). The watchdog only
+  // fires when no render is in flight, so it never duplicates an in-progress
+  // render. A burst means the discard race is firing often. Payload =
+  // { filePath (basename), contentLen }.
+  RENDERER_PROJECT_EDITOR_MD_RENDER_RECOVERY_FORCED: 'renderer:project-editor.md-render-recovery-forced',
+  // A markdown REOPEN (hadViewState) with a saved preview scroll above the
+  // tolerance started the bounded preview-scroll-reconcile loop. The loop corrects
+  // a LATE root-reload / preview re-mount that strands the preview at the top after
+  // the restore, nudging it back to the saved section (PMSR-10/11). This is the
+  // off-hot-path DECISION breadcrumb (emitted once when the reconcile is triggered,
+  // NOT per reconcile tick — the per-tick detail stays on the debug-only mdpTrace).
+  // A user "reopened preview jumps to / sticks at the top" report whose trace LACKS
+  // this event means the reconcile guard never fired (saved scroll within tolerance
+  // or the reopen path was not taken). Payload = { reconcileTarget (saved scrollTop) }.
+  RENDERER_PROJECT_EDITOR_MD_PREVIEW_SCROLL_RECONCILE: 'renderer:project-editor.md-preview-scroll-reconcile',
   // openFile self-healed a stale `isMarkdownPreviewOpen` snapshot for an explicit
   // markdown open (user/debug/restore). After a project-editor reopen the openFile
   // call could latch a racing snapshot where the preview-open flag was still

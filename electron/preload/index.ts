@@ -1243,6 +1243,7 @@ export interface DebugAPI {
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
   getApiServerPort: () => Promise<number>
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
+  writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
   flushPerfTrace: () => Promise<PerformanceTraceStatus>
@@ -2226,6 +2227,9 @@ const debugAPI: DebugAPI = {
   },
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => {
     return ipcRenderer.invoke('debug:post-api-terminal-write', payload) as Promise<DebugApiTerminalWriteResult>
+  },
+  writeExternalFile: (payload: { root: string; relPath: string; content: string }) => {
+    return ipcRenderer.invoke('debug:autotest-write-external-file', payload) as Promise<{ ok: boolean; error?: string }>
   },
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => {
     if (!perfTraceEnabled) return

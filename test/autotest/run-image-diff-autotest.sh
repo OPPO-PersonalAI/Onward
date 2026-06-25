@@ -53,12 +53,12 @@ echo "=== Test log (last 80 lines) ==="
 tail -n 80 "$LOG_FILE"
 echo ""
 
-if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
-  echo "Image diff autotest failed" >&2
-  grep "\[AutoTest\] FAIL" "$LOG_FILE" >&2
-  exit 1
-fi
-
+# Gate on the framework's AUTHORITATIVE per-suite tally ("=== Test Summary ===
+# totalFailed: N"), NOT on a grep for the volatile per-assertion "[AutoTest] FAIL"
+# lines. The substring gate was a false-positive trap: every TRUE failure already
+# bumps totalFailed, so the substring gate added only false positives (a single
+# transient per-assertion miss hijacking the verdict), never a real-failure signal.
+# This matches run-image-diff-autotest.ps1, which already gates only on totalFailed.
 if grep -Eq "totalFailed: [1-9]" "$LOG_FILE"; then
   echo "Image diff autotest reported failed cases in the summary" >&2
   grep -E "totalFailed: [1-9]" "$LOG_FILE" >&2

@@ -42,6 +42,36 @@ Useful flags: `--build`, `--only <substr>`, `--skip <substr>`,
 `--app-bin <path>`, `--list`. See
 `python3 test/autotest/run-full-regression.py --help`.
 
+### Reading a failed run — triage smell (flake / crash / drift)
+
+Not every red runner is a product regression. On this EDR / anti-malware host
+(every process spawn is taxed 1.3–12.9 s) **most** failures are *timing-design
+races in the test*, not the app. Before fixing anything, classify each failure
+from cheap signals — `summary.json`'s `status` plus one crash-signature `grep`
+of `logs/<suite>.log` — because the three buckets are fixed in opposite ways:
+
+| Smell | Cheap signal | What it usually is | How it's fixed |
+|---|---|---|---|
+| `⏱ timing/hang` | `status: TIMEOUT` | an oversized/timing suite **or** a genuine product hang | trim/split the suite **or** fix the hang — see § 3 *Per-runner timeout budget* (the 3–5-min red line) |
+| `💥 crash` | `status: FAIL` + log has `Segmentation fault` / `Access violation` / `0xC0000005` / `STATUS_` | a product-stability bug (often a teardown-ordering use-after-free) | **fix the product code** — NOT a flake; never split/widen it away |
+| `🔀 flake/drift` | `status: FAIL`, no crash sig; typically **passed in isolation** | an EDR timing flake (single-shot read of stale/empty/`-1` state, a latency/median/p95 gate, a fixed `sleep` before the assert) **or** a real behaviour drift | **harden the test** (poll the ground-truth outcome; gate correctness, measure latency non-gating) **or** fix production if behaviour really changed |
+
+Reflexes worth internalising (full write-up: `docs/lessons.md` § *EDR
+full-regression convergence*; mechanised in the `ow_full_regression_test
+--repair` skill):
+
+- **A shifting failure set — different suites failing each run — is ONE meta-bug,
+  not N.** That drift is the diagnosis: a single shared, probabilistic root cause.
+  Find the **leverage point** (most readiness waits funnel through the shared
+  autotest `waitFor`); don't fix suite-by-suite.
+- **Scaling a timeout can CAUSE a timeout** — it is free for waits that SUCCEED
+  (they short-circuit) but *multiplies* the cost of waits that habitually time out.
+- **Passing once ≠ stable** — with ~80 suites in series even a 0.5 % per-suite
+  flake rate is `(1-p)^N` ≈ 66 % per run / 44 % for two in a row; confirm a flake
+  fix with `--repeat 2`/`3` and require *consecutive* green, not a single pass.
+- **Validate one fix in isolation** (`--only run-<suite>`, minutes); reserve the
+  full run for final acceptance — never burn a full run to *discover* failures.
+
 ---
 
 ## 2. Feature × Test Index
@@ -121,7 +151,8 @@ point at files under `test/unittest/`.
 | Submodule entries surface in parent diff list | `run-git-diff-submodules` (DSM-*) + `test/unittest/git-submodule-disk-discovery.test.mts` |
 | Recursive submodule traversal | `run-git-diff-recursive-submodules` (RSM-*) + `test/unittest/git-submodule-disk-discovery.test.mts` |
 | Pure-fs submodule discovery (zero git spawn): initialized vs deinit, depth/parentRoot, gitfile vs `.git` dir, `.gitmodules` parse | `test/unittest/git-submodule-disk-discovery.test.mts` (executed by `run-unittest-suite`) |
-| Bug fix: parent diff hides "internal-only" dirty submodule entries. **Suite split SIX ways** (the whole 46-case suite TIMED OUT, and so did the 4-way split — round-4: all four sub-runners hit ~283-284s, their 280s watchdog — because the dominant cost is the diff LOAD itself, ~7-35s/scenario by measured `sincePreviousRecordMs`, and diff-ux summed ~235s / model-sync ~154s of irreducible diff work alone; so it was re-cut SIX ways balanced BY MEASURED PER-CASE COST, each slice ~96-122s of case-work + ~45s overhead = ~141-167s, with ≥53s margin to a 220s design ceiling and ≥73s to the 280s watchdog). The heaviest singles are spread one-per-slice (GDS-17→reentry, GDS-31→presentation, GDS-19/43→model-sync, GDS-20→reentry); the two atomic UI blocks (BlockA=GDS-21..29, BlockE=GDS-35..39) each own their own ux slice. `submodule` group = parent/sub c/m/u filter + nested/uninitialized + staged-pointer + closed-parent submodule freshness (GDS-01..05, 13, 14, 46). Selected via `GDS_GROUP` / `ONWARD_AUTOTEST_GDS_GROUP`; shared body `run-git-diff-staleness-and-submodule-autotest.sh` runs the whole suite when both are empty. NB each Git Diff round-trip forks ~69 git processes and is EDR-taxed — the split's success criterion is budget (< 220s per sub-runner), not green-on-an-EDR-host. | `run-git-diff-submodule` (GDS-01..05, GDS-13, GDS-14, GDS-46 + GDS-11/16/46 trace markers) |
+| Bug fix: parent diff hides "internal-only" dirty submodule entries. **Suite split SIX ways** (the whole 46-case suite TIMED OUT, and so did the 4-way split — round-4: all four sub-runners hit ~283-284s, their 280s watchdog — because the dominant cost is the diff LOAD itself, ~7-35s/scenario by measured `sincePreviousRecordMs`, and diff-ux summed ~235s / model-sync ~154s of irreducible diff work alone; so it was re-cut SIX ways balanced BY MEASURED PER-CASE COST, each slice ~96-122s of case-work + ~45s overhead = ~141-167s, with ≥53s margin to a 220s design ceiling and ≥73s to the 280s watchdog). The heaviest singles are spread one-per-slice (GDS-17→reentry, GDS-31→presentation, GDS-19/43→model-sync, GDS-20→reentry); the two atomic UI blocks (BlockA=GDS-21..29, BlockE=GDS-35..39) each own their own ux slice. `submodule` group = parent/sub c/m/u filter + nested/uninitialized + staged-pointer (GDS-01..05, 13, 14); GDS-46 (closed-parent submodule freshness) was carved off to a SEVENTH slice `submodule-refresh` (its cold v1 diff runs ~94s+ under EDR and overran the watchdog folded in here — TIMEOUT 283s). Selected via `GDS_GROUP` / `ONWARD_AUTOTEST_GDS_GROUP`; shared body `run-git-diff-staleness-and-submodule-autotest.sh` runs the whole suite when both are empty. NB each Git Diff round-trip forks ~69 git processes and is EDR-taxed — the split's success criterion is budget (< 220s per sub-runner), not green-on-an-EDR-host. | `run-git-diff-submodule` (GDS-01..05, GDS-13, GDS-14 + GDS-11/16 trace markers) |
+| **Slice 7/7 of the GDS split** — `submodule-refresh` group = GDS-46 ONLY (closed-parent submodule freshness: the parent Git Diff keeps a closed submodule's Mirror subscribed so a closed-state submodule edit refreshes on reopen — cold v1 + warm v2 submodule diff). Isolated because the cold v1 diff forks ~69 git processes to establish the submodule status from scratch (~94s+ under EDR vs ~3s warm); given a dedicated `COLD_SUBMODULE_DIFF_BUDGET_MS` (200s, ~2x margin) it is the runner's only heavy work (~150s total, inside the 280s watchdog). | `run-git-diff-submodule-refresh` (GDS-46 + GDS-46 trace marker) |
 | Bug fix: 3-second request cache invalidated by FS watcher. **Slice 2/6 of the split above** — `staleness` group = request-cache invalidation / watcher-driven external-change freshness / concurrent force+cached converge + Project-Editor-save freshness (GDS-06..10, 45). | `run-git-diff-staleness` (GDS-06..10, GDS-45 + GDS-12 trace marker) |
 | **Slice 3/6 of the GDS split** — `reentry` group = subdir-scope watch + re-entry-content body refresh + re-entry-latency trend + draft-preserved-during-external-refresh (GDS-15, 17, 18, 20). Absorbs two of the heaviest singles (GDS-17/20 ~34.6s each) so no slice clusters the expensive cases; its trace markers re-assert snapshot-capture / file-load / model-sync under reentry-owned IDs. | `run-git-diff-reentry` (GDS-15, GDS-17, GDS-18, GDS-20 + GDS-17b/20b trace markers) |
 | **Slice 4/6 of the GDS split** — `diff-ux-presentation` group = the VS Code resource / split-view / hunk-navigation / refresh atomic UI block (GDS-21..29: 21,22,23,24a,24,25,25b,27,28,29×6, kept whole) + blank-until-file-selected (GDS-31). | `run-git-diff-ux-presentation` (GDS-21..29 block, GDS-31 + GDS-26/30 trace markers) |

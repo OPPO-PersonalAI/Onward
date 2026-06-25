@@ -20,7 +20,7 @@ import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { shouldRetainProjectEditorViewOnClose } from './utils/projectEditorCloseRetention'
 import { isPreviewWorkPending, shouldRevealSettledPreview } from './utils/previewRestoreSettle'
 import { isMarkdownSessionCacheContentHit } from './utils/markdownSessionCachePeek'
-import { shouldEnableMarkdownForOpen, shouldSelfHealMarkdownPreviewOpen, shouldPreserveRetainedPreviewDuringReopen, shouldTakeZeroFlashReopenPath } from './utils/markdownPreviewSelfHeal'
+import { shouldEnableMarkdownForOpen, shouldSelfHealMarkdownPreviewOpen, shouldPreserveRetainedPreviewDuringReopen, shouldTakeZeroFlashReopenPath, shouldRecoverPreviewOnReopenSameFile } from './utils/markdownPreviewSelfHeal'
 import { runAllTests } from '../../autotest/autotest-runner'
 import type { AutotestContext, CpuSummary, ProjectEditorDebugApi, TestResult } from '../../autotest/types'
 import 'katex/dist/katex.min.css'
@@ -224,6 +224,26 @@ type OpenFileOptions = {
 
 const FILE_BROWSER_USER_SCROLL_PAUSE_MS = 3000
 const FILE_BROWSER_PROGRAMMATIC_SCROLL_SETTLE_MS = 1000
+// Grace period before the preview-reveal watchdog force-reveals a stuck
+// 'waiting-html' phase. Must be safely longer than a normal reveal (a few ms,
+// up to a few hundred under EDR) so it never fires on the happy path, yet well
+// under the autotest's 12s observation window so a stranded reveal is recovered
+// promptly (CDP-10 deep-link jump). See the watchdog effect for the failure mode.
+const PREVIEW_REVEAL_WATCHDOG_MS = 1500
+// Bounded post-reopen preview-scroll reconcile. After a markdown reopen restores
+// the preview to the saved section, the editor re-mount / root reload can drive
+// the preview back to the top via the preview<-editor sync. For this window the
+// reconcile re-asserts the saved scroll (+ editor alignment) whenever it drifts,
+// then stops once it holds (PMSR-10/11). The window is short so it never fights a
+// genuine user scroll (which also updates the saved memory the reconcile reads).
+const PREVIEW_SCROLL_RECONCILE_MS = 8000
+const PREVIEW_SCROLL_RECONCILE_INTERVAL_MS = 200
+const PREVIEW_SCROLL_RECONCILE_TOLERANCE = 80
+// Interval for the render-recovery watchdog (re-issues a lost markdown render
+// when the preview is stuck blank). First tick is one interval AFTER the HTML
+// goes blank, so a normal render (which lands in a few ms) flips the gate before
+// it fires. See the render-recovery effect for the cold-reopen failure mode.
+const MARKDOWN_RENDER_RECOVERY_MS = 600
 
 const STORAGE_KEY_FILE_TREE_WIDTH = 'project-editor-file-tree-width'
 const STORAGE_KEY_FILE_BROWSER_COLLAPSED = 'project-editor-file-browser-collapsed'
@@ -1745,6 +1765,76 @@ export function ProjectEditor({
     mdpTrace('phase:waiting-html', { from: 'beginPreviewRestore' })
   }, [cancelPreviewRevealFrames, cancelPreviewSyncFrame])
 
+  // Set by applyPendingViewState when a markdown reopen restores the editor's
+  // viewState while the preview restore is still in flight (phase !== 'idle').
+  // The editor->preview alignment can't run yet (the preview hasn't settled), so
+  // it is DEFERRED until the reveal finalizes — see finalize() below. Without the
+  // defer, the editor stays at its viewState scroll while the preview restores to
+  // the saved anchor, and the editor's settle-scroll then drags the preview back
+  // off the saved section (the PMSR-10/11 cold-reopen desync).
+  const pendingEditorSyncFromPreviewRef = useRef(false)
+  const previewScrollReconcileTimerRef = useRef<number | null>(null)
+
+  // Re-assert the saved preview scroll for a bounded window after a markdown
+  // reopen, defeating the editor-re-mount / root-reload preview<-editor sync that
+  // would otherwise leave the preview at the top (PMSR-10/11). Reads the live
+  // saved memory each tick, so a genuine user scroll (which updates that memory)
+  // is followed, not fought; stops once the preview holds the saved section or the
+  // window elapses.
+  const startPreviewScrollReconcile = useCallback(() => {
+    if (previewScrollReconcileTimerRef.current !== null) {
+      window.clearInterval(previewScrollReconcileTimerRef.current)
+      previewScrollReconcileTimerRef.current = null
+    }
+    const startedAt = performance.now()
+    previewScrollReconcileTimerRef.current = window.setInterval(() => {
+      const preview = previewRef.current
+      const key = getFileScrollKey(lastEditorScopeRef.current, activeFilePathRef.current)
+      const memory = key ? previewScrollMemoryRef.current.get(key) : undefined
+      const target = memory?.scrollTop ?? 0
+      const elapsed = performance.now() - startedAt
+      const stop = () => {
+        if (previewScrollReconcileTimerRef.current !== null) {
+          window.clearInterval(previewScrollReconcileTimerRef.current)
+          previewScrollReconcileTimerRef.current = null
+        }
+      }
+      // End the window when it elapses, the preview/editor is gone, or there is no
+      // meaningful saved scroll left to protect.
+      if (
+        !preview ||
+        !isMarkdownEditorVisibleRef.current ||
+        !previewVisibleRef.current ||
+        elapsed > PREVIEW_SCROLL_RECONCILE_MS ||
+        target <= PREVIEW_SCROLL_RECONCILE_TOLERANCE
+      ) {
+        stop()
+        return
+      }
+      // A reveal/render is mid-flight — let it settle before judging the position.
+      if (previewRestorePhaseRef.current !== 'idle') return
+      if (preview.scrollTop > PREVIEW_SCROLL_RECONCILE_TOLERANCE) {
+        // Not stranded at the top. If it moved FAR from the saved target it is a
+        // genuine user scroll — yield and stop. Otherwise (holding the saved
+        // section) keep monitoring, because a LATE root-reload / preview re-mount
+        // can still reset it to the top within this window (PMSR-10/11).
+        if (Math.abs(preview.scrollTop - target) > PREVIEW_SCROLL_RECONCILE_TOLERANCE) {
+          stop()
+        }
+        return
+      }
+      // preview.scrollTop ~ 0 while a meaningful saved scroll exists: the cold-reopen
+      // re-mount / preview<-editor sync stranded the preview at the top. Re-assert
+      // the saved scroll + editor alignment with the preview<-editor sync suppressed
+      // so it cannot immediately undo this. ONLY this drift-to-top case is corrected,
+      // so a user scrolling to any other position is never fought.
+      suppressProgrammaticEditorPreviewSyncRef.current = true
+      restorePreviewFromMemoryRef.current()
+      scheduleEditorSyncFromPreview()
+      mdpTrace('preview-scroll-reconcile', { target, live: preview.scrollTop })
+    }, PREVIEW_SCROLL_RECONCILE_INTERVAL_MS)
+  }, [scheduleEditorSyncFromPreview])
+
   const queuePreviewReveal = useCallback(() => {
     cancelPreviewRevealFrames()
     cancelPreviewSyncFrame()
@@ -1774,6 +1864,18 @@ export function ProjectEditor({
         durationMs
       })
       mdpTrace('phase:idle', { from: `queuePreviewReveal:${cause}`, durationMs })
+      // Deferred editor->preview alignment: a markdown reopen restored the
+      // editor's viewState while this reveal was still in flight, so the editor
+      // now needs to follow the just-restored preview scroll (the preview anchor
+      // is the source of truth). Running it here — after the preview settled and
+      // phase is 'idle' — keeps the editor and preview consistent and stops the
+      // editor's settle-scroll from dragging the preview off the saved section
+      // (PMSR-10/11). syncEditorToPreviewScroll re-suppresses the editor->preview
+      // direction, so this does not loop.
+      if (pendingEditorSyncFromPreviewRef.current) {
+        pendingEditorSyncFromPreviewRef.current = false
+        scheduleEditorSyncFromPreview()
+      }
     }
 
     const settleReveal = () => {
@@ -2569,6 +2671,13 @@ export function ProjectEditor({
     // Use active file's data for top-level backward-compat fields
     const previewKey = getFileScrollKey(scope, currentActiveFilePath)
     const previewMem = previewKey ? previewScrollMemoryRef.current.get(previewKey) : undefined
+    mdpTrace('persist:preview-scroll', {
+      memScrollTop: previewMem?.scrollTop ?? -1,
+      memSlug: previewMem?.nearestHeadingSlug ?? null,
+      liveScrollTop: previewRef.current?.scrollTop ?? -1,
+      previewVisible: previewVisibleRef.current,
+      phase: previewRestorePhaseRef.current
+    })
     const currentOutlineScrollTop = outlineKey ? outlineScrollTopRef.current.get(outlineKey) : undefined
     const outlineScrollByFile = buildOutlineScrollByFileState(outlineScrollByFileRef.current)
 
@@ -2713,7 +2822,27 @@ export function ProjectEditor({
     const currentFileMemory = fileMemoryRef.current.get(filePath)
     const currentPreviewMemory = pKey ? previewScrollMemoryRef.current.get(pKey) : undefined
     const currentPreviewAnchor = currentFileMemory?.previewScrollAnchor
-    if (pKey && currentPreviewAnchor) {
+    // Prefer an already-seeded LIVE scroll memory that carries a real position
+    // (scrollTop > 0 or a heading slug) over the file-memory anchor: on a
+    // project-editor reopen, applyStoredProjectEditorState seeds the live memory
+    // from the persisted top-level previewScrollAnchor (the freshest saved
+    // position), and this cache-hit re-apply must NOT clobber it with a possibly
+    // stale per-file anchor (which left the preview scrolled to top — PMSR-10/11).
+    const liveMemoryHasPosition = Boolean(
+      currentPreviewMemory &&
+      (currentPreviewMemory.scrollTop > 0 || currentPreviewMemory.nearestHeadingSlug)
+    )
+    mdpTrace('cacheHit:seed-scroll', {
+      liveScrollTop: currentPreviewMemory?.scrollTop ?? -1,
+      liveSlug: currentPreviewMemory?.nearestHeadingSlug ?? null,
+      anchorScrollTop: currentPreviewAnchor?.scrollTop ?? -1,
+      anchorSlug: currentPreviewAnchor?.slug ?? null,
+      entryScrollTop: entry.previewScrollMemory?.scrollTop ?? -1,
+      keptLive: liveMemoryHasPosition
+    })
+    if (liveMemoryHasPosition) {
+      // Keep the live memory — do not overwrite a good restored position.
+    } else if (pKey && currentPreviewAnchor) {
       previewScrollMemoryRef.current.set(pKey, {
         scrollRatio: currentPreviewAnchor.ratio,
         nearestHeadingSlug: currentPreviewAnchor.slug,
@@ -2869,16 +2998,37 @@ export function ProjectEditor({
       pendingPath &&
       isMarkdownPath(pendingPath) &&
       isMarkdownPreviewOpenRef.current &&
-      isMarkdownEditorVisibleRef.current &&
-      previewRestorePhaseRef.current === 'idle'
+      isMarkdownEditorVisibleRef.current
     ) {
       const previewKey = getFileScrollKey(lastEditorScopeRef.current, pendingPath)
       if (previewKey && previewScrollMemoryRef.current.has(previewKey)) {
-        scheduleEditorSyncFromPreview()
+        if (previewRestorePhaseRef.current === 'idle') {
+          scheduleEditorSyncFromPreview()
+        } else {
+          // The preview restore is still in flight (cold reopen): align the editor
+          // to the preview AFTER the reveal finalizes, so the editor follows the
+          // restored preview anchor instead of its own viewState scroll dragging
+          // the preview off the saved section (PMSR-10/11). The reveal's finalize()
+          // consumes this flag.
+          pendingEditorSyncFromPreviewRef.current = true
+        }
+        // This is a markdown REOPEN (hadViewState) with a saved preview scroll.
+        // Start the bounded reconcile so a LATE root-reload / preview re-mount that
+        // strands the preview at the top (after this restore) is corrected back to
+        // the saved section (PMSR-10/11). Scoped to reopens via hadViewState; the
+        // reconcile no-ops unless the preview actually drifts to the top.
+        const reconcileTarget = previewScrollMemoryRef.current.get(previewKey)?.scrollTop ?? 0
+        if (reconcileTarget > PREVIEW_SCROLL_RECONCILE_TOLERANCE) {
+          // Off-hot-path DECISION breadcrumb (once per reconcile-start, NOT per
+          // tick). Lets a "reopened preview sticks at the top" trace show whether
+          // the reconcile guard actually fired; per-tick detail stays on mdpTrace.
+          perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_PREVIEW_SCROLL_RECONCILE, { reconcileTarget })
+          startPreviewScrollReconcile()
+        }
       }
     }
     return true
-  }, [applyPendingCursorPosition, isEditorModelMatchingPath, scheduleEditorSyncFromPreview])
+  }, [applyPendingCursorPosition, isEditorModelMatchingPath, scheduleEditorSyncFromPreview, startPreviewScrollReconcile])
 
   const resetActiveFileState = useCallback((options?: { preserveSoftCloseContent?: boolean }) => {
     const preserveContent = options?.preserveSoftCloseContent === true
@@ -3537,6 +3687,23 @@ export function ProjectEditor({
         isOpen,
         activeFilePath: activeFilePathRef.current
       })
+      // Also preserve when a content-identical cached render is still pinned for
+      // the active file. The snapshot-based guard above expires the moment
+      // finalizeProjectEditorReopenRestore clears the soft-close snapshot, so a
+      // worker-deactivate that fires in the POST-FINALIZE window under EDR
+      // throttling would otherwise blank the HTML the zero-flash retained-reopen
+      // branch just preserved (it set markdownSessionCacheRenderRef + kept
+      // markdownRenderedHtmlRef populated), stranding the cold FIRST reopen at
+      // htmlLength 0 (PMSR-09/10/11). This mirrors the owner-switch branch's
+      // shouldPreserveCachedRender guard so both deactivate paths agree on when
+      // a preserved render is still valid.
+      const deactivateCachedRender = markdownSessionCacheRenderRef.current
+      const preserveCachedRenderOnDeactivate = Boolean(
+        deactivateCachedRender &&
+        deactivateCachedRender.filePath === activeFilePathRef.current &&
+        deactivateCachedRender.content === fileContentRef.current &&
+        markdownRenderedHtmlRef.current
+      )
       resetPreviewRestoreState()
       if (markdownWorkerRef.current) {
         markdownWorkerRef.current.terminate()
@@ -3554,7 +3721,13 @@ export function ProjectEditor({
         window.clearTimeout(markdownRenderTimerRef.current)
         markdownRenderTimerRef.current = null
       }
-      if (!preserveClosedPreview) {
+      mdpTrace('blank:worker-deactivate', {
+        willBlank: !preserveClosedPreview && !preserveCachedRenderOnDeactivate,
+        preserveClosedPreview,
+        preserveCachedRenderOnDeactivate,
+        htmlRefLen: markdownRenderedHtmlRef.current.length
+      })
+      if (!preserveClosedPreview && !preserveCachedRenderOnDeactivate) {
         setMarkdownRenderedHtml('')
         markdownRenderedHtmlRef.current = ''
         setMarkdownImagePaths([])
@@ -3642,6 +3815,10 @@ export function ProjectEditor({
               htmlLength: syncRestoreEntry.renderedHtml.length
             })
           } else {
+            mdpTrace('blank:owner-switch', {
+              nextOwner: (nextOwner ?? '').split(/[\\/]/).pop() ?? '',
+              htmlRefLen: markdownRenderedHtmlRef.current.length
+            })
             setMarkdownRenderedHtml('')
             markdownRenderedHtmlRef.current = ''
             setMarkdownImagePaths([])
@@ -3739,6 +3916,10 @@ export function ProjectEditor({
       cancelPreviewRevealFrames()
       cancelEditorPreviewSyncFrame()
       cancelFileTreeRestoreFrame()
+      if (previewScrollReconcileTimerRef.current !== null) {
+        window.clearInterval(previewScrollReconcileTimerRef.current)
+        previewScrollReconcileTimerRef.current = null
+      }
       editorScrollDisposableRef.current?.dispose()
       editorCursorDisposableRef.current?.dispose()
       editorModelDisposableRef.current?.dispose()
@@ -3817,6 +3998,42 @@ export function ProjectEditor({
     markdownRootPath,
     sendMarkdownRenderRequest
   ])
+
+  // Render-recovery watchdog: when the markdown preview should show content (render
+  // gate on + rendered-HTML buffer EMPTY) but no render is in flight, re-issue the
+  // worker render. The happy-path render lands in a few ms, so the boolean flips to
+  // false (HTML present) before the interval's first tick and this never fires. It
+  // recovers the cold-reopen case where the issued render's result was discarded by
+  // the reopen churn (markdownApplyRequestIdRef bumped between request and response)
+  // and no dep changed to re-send — leaving the preview permanently blank
+  // (PMSR-09/10/11). Gated on "no render in flight" so it never duplicates an
+  // in-progress render; the interval retries until a render lands or the gate closes.
+  const markdownPreviewStuckBlank = isMarkdownRenderAllowed && markdownRenderedHtml.length === 0
+  useEffect(() => {
+    if (!markdownPreviewStuckBlank) return
+    const recovery = window.setInterval(() => {
+      if (!markdownRenderAllowedRef.current || markdownRenderedHtmlRef.current) {
+        window.clearInterval(recovery)
+        return
+      }
+      // A render is in progress — let it complete rather than duplicating it.
+      if (markdownWorkerInFlightRef.current) return
+      if (!isMarkdownPreviewOpenRef.current) return
+      const activePath = activeFilePathRef.current
+      if (!activePath || !isMarkdownPath(activePath)) return
+      if (!fileContentRef.current) return
+      const worker = markdownWorkerRef.current
+      if (!worker || markdownWorkerOwnerRef.current !== activePath) return
+      // Stuck blank with everything ready: the prior render was lost. Force one.
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_RENDER_RECOVERY_FORCED, {
+        filePath: activePath.split(/[\\/]/).pop() ?? activePath,
+        contentLen: fileContentRef.current.length
+      })
+      mdpTrace('render-recovery:force', { activeFilePath: activePath.split(/[\\/]/).pop() ?? activePath })
+      sendMarkdownRenderRequest()
+    }, MARKDOWN_RENDER_RECOVERY_MS)
+    return () => window.clearInterval(recovery)
+  }, [markdownPreviewStuckBlank, sendMarkdownRenderRequest])
 
   useEffect(() => {
     if (!isMarkdownWorkerActive || !rootPath) return
@@ -4597,29 +4814,29 @@ export function ProjectEditor({
       //       flagged CLOSED (`isMarkdownPreviewOpenRef.current === false`) AND
       //       the rendered HTML blank, then an explicit re-open of the same file
       //       hits this early-return and never re-enables anything.
-      // In both cases `isMarkdownRenderAllowed = isMarkdownPreviewVisible &&
-      // isMarkdownRenderEnabled` is false, so `previewVisibleRef.current` (which
-      // mirrors it) reports `isMarkdownPreviewVisible() === false`. The decision
-      // is the pure `shouldReEnableMarkdownRenderOnReopenSameFile` predicate
-      // (locked by a unit test). Only act when the gate is actually OFF
-      // (`!markdownRenderAllowedRef.current`) so a normal re-click on an
-      // already-rendered file stays a no-op. For path (b) we additionally force
-      // the preview pane open first, mirroring the enable arm of
-      // `setMarkdownPreviewVisibility` (~L1960), because re-enabling the render
-      // gate is meaningless while the pane is flagged closed.
+      //   (c) Same RETAINED-VIEW reopen as (b) but the render gate is already
+      //       ON (`markdownRenderAllowedRef.current === true`) while the rendered
+      //       HTML buffer is EMPTY — a late worker-deactivate render blanked
+      //       `markdownRenderedHtmlRef` AFTER the gate re-enabled, so the preview
+      //       reports visible yet shows nothing (PMN-41 on EDR-throttled Windows).
+      // For (a)/(b) `isMarkdownRenderAllowed` is false; for (c) it is true but the
+      // HTML is blank. The decision is the pure `shouldRecoverPreviewOnReopenSameFile`
+      // predicate (locked by a unit test): recover on an explicit markdown open
+      // when the gate is OFF *or* the HTML buffer is empty, so a normal re-click
+      // on an already-rendered file (gate ON + HTML present) stays a no-op. For
+      // path (b) we additionally force the preview pane open first, mirroring the
+      // enable arm of `setMarkdownPreviewVisibility` (~L1960), because re-enabling
+      // the render gate is meaningless while the pane is flagged closed.
       if (
-        !markdownRenderAllowedRef.current &&
         !isBinaryRef.current &&
         !isImageRef.current &&
         !isSqliteRef.current &&
-        // Eligible when this is an explicit markdown open. The pane may currently
-        // be flagged closed (path b) — we self-heal it open below — so gate on
-        // "the open WANTS the preview" via `shouldEnableMarkdownForOpen`, not on
-        // the (possibly stale-closed) current pane flag. The narrower
-        // `shouldReEnableMarkdownRenderOnReopenSameFile` (which also requires the
-        // pane already open) remains exported for callers that need that stricter
-        // contract.
-        shouldEnableMarkdownForOpen(source, isMarkdownPath(path))
+        shouldRecoverPreviewOnReopenSameFile({
+          source,
+          isMarkdownFile: isMarkdownPath(path),
+          isRenderAllowed: markdownRenderAllowedRef.current,
+          hasRenderedHtml: Boolean(markdownRenderedHtmlRef.current)
+        })
       ) {
         if (!isMarkdownPreviewOpenRef.current) {
           // Path (b): the retained-view restore left the pane closed. Force it
@@ -5578,6 +5795,20 @@ export function ProjectEditor({
           const cacheRead = root && activePath
             ? readMarkdownSessionCache(root, activePath, fileContentRef.current)
             : null
+          // Diagnostic breadcrumb for the reopen-restore branch decision: which
+          // inputs drove which restore arm (zero-flash / re-apply / fresh render /
+          // bare reset). Lets a "blank preview on the cold first reopen" report
+          // show whether a cache entry existed and whether the HTML ref was empty.
+          mdpTrace('reopen-restore:decision', {
+            hasRetainedView: hasRetainedViewForScope,
+            hasSubpageReturn: hadSubpageReturnSnapshot,
+            pathMatch: activePath === markdownRestorePath,
+            previewOpen: isMarkdownPreviewOpenRef.current,
+            cacheEntry: Boolean(cacheRead?.entry),
+            htmlRefLen: markdownRenderedHtmlRef.current.length,
+            renderSourceLen: markdownRenderSourceRef.current.length,
+            renderAllowed: markdownRenderAllowedRef.current
+          })
           // Re-enable the render gate that `resetActiveFileState` cleared
           // on Diff / History entry, gated to soft-close paths
           // (retain-view via ESC shortcut, subpage-return via Diff /
@@ -5660,6 +5891,19 @@ export function ProjectEditor({
                 key: cacheRead.entry.key,
                 filePath: activePath
               }
+              // Re-affirm the rendered HTML onto state + ref. The string is
+              // byte-identical to what is already on screen, so React reuses the
+              // same dangerouslySetInnerHTML node — NO reflash (PMSR-13a/13b
+              // hold, this does NOT call beginPreviewRestore). Re-asserting the
+              // REF keeps shouldPreserveCachedRender (the worker-effect
+              // owner-switch guard, which requires markdownRenderedHtmlRef
+              // non-empty) true, so a follow-on owner-switch render that fires in
+              // the reopen-in-flight window after this branch ran cannot blank the
+              // preview and strand the first reopen at htmlLength 0 (PMSR-09/10/11
+              // on EDR-throttled Windows, where the late render lands past the
+              // snapshot-cleared preserve window).
+              markdownRenderedHtmlRef.current = cacheRead.entry.renderedHtml
+              setMarkdownRenderedHtml(cacheRead.entry.renderedHtml)
               // Bump the render nonce so the scroll-restore + mermaid-rebuild
               // layout effects re-run even though markdownRenderedHtml is the
               // same string (React would otherwise skip them). This re-applies
@@ -5700,6 +5944,9 @@ export function ProjectEditor({
               // preserved the rendered HTML; in both cases reset the phase to
               // 'idle' (this does not blank HTML, it only clears any stale
               // in-flight reveal phase).
+              mdpTrace('reopen-restore:retained-reset-no-cache', {
+                htmlRefLen: markdownRenderedHtmlRef.current.length
+              })
               resetPreviewRestoreState()
             }
             finalizeProjectEditorReopenRestore(
@@ -5733,6 +5980,10 @@ export function ProjectEditor({
             }
             resetPreviewRestoreState()
           } else {
+            mdpTrace('reopen-restore:fresh-render', {
+              htmlRefLen: markdownRenderedHtmlRef.current.length,
+              renderSourceLen: markdownRenderSourceRef.current.length
+            })
             beginPreviewRestore()
           }
         } else {
@@ -6126,11 +6377,21 @@ export function ProjectEditor({
     if (stored.previewScrollAnchor && stored.activeFilePath) {
       const pKey = getFileScrollKey(restoreScope, stored.activeFilePath)
       if (pKey) {
+        mdpTrace('stored-seed-scroll', {
+          storedScrollTop: stored.previewScrollAnchor.scrollTop ?? -1,
+          storedSlug: stored.previewScrollAnchor.slug ?? null
+        })
         previewScrollMemoryRef.current.set(pKey, {
           scrollRatio: stored.previewScrollAnchor.ratio,
           nearestHeadingSlug: stored.previewScrollAnchor.slug,
-          headingOffsetY: 0,
-          scrollTop: 0
+          // Carry the persisted absolute scroll values (matching the per-file
+          // applyFileMemory path), NOT a hardcoded 0. Zeroing them discarded the
+          // saved scrollTop / headingOffsetY, so restorePreviewFromMemory fell to
+          // slug-anchor alignment with a 0 offset and dropped the intra-section
+          // scroll on the project-editor REOPEN path (PFM-25). The type carries
+          // both fields optionally; default to 0 only when actually absent.
+          headingOffsetY: stored.previewScrollAnchor.headingOffsetY ?? 0,
+          scrollTop: stored.previewScrollAnchor.scrollTop ?? 0
         })
       }
     }
@@ -6438,12 +6699,40 @@ export function ProjectEditor({
     if (!previewVisibleRef.current) return
     if (previewRestorePhaseRef.current !== 'idle') return
     if (!markdownRenderedHtmlRef.current) return
-
-    const nearestSlug = scanPreviewNearestSlug()
-    updatePreviewActiveSlug(nearestSlug)
+    mdpTrace('capture-preview-scroll', {
+      writeScrollTop: preview.scrollTop,
+      editorVisible: isMarkdownEditorVisibleRef.current,
+      editorScrollTop: editorRef.current ? editorRef.current.getScrollTop() : -1
+    })
 
     const key = getFileScrollKey(lastEditorScopeRef.current, activeFilePathRef.current)
     if (!key) return
+
+    // Guard against the editor->preview sync clobbering a good captured scroll
+    // position with a TRANSIENT 0. When the editor pane is visible it drives the
+    // preview scroll (syncEditorToPreviewScroll); during an editor re-layout /
+    // close the editor can momentarily report scrollTop 0 and sync the preview to
+    // the top even though the user's reading position is deeper. Capturing that
+    // transient 0 persists it as the saved scroll, so the next reopen restores to
+    // the top (the PMSR-10/11 cascade: 0 saved -> 0 seeded -> restore to 0). Skip
+    // the capture when the preview reads 0 but the editor is NOT at the top and a
+    // good non-zero position was already captured — that 0 is an inconsistent sync
+    // artifact, not a real user scroll-to-top.
+    if (isMarkdownEditorVisibleRef.current && preview.scrollTop === 0) {
+      const editor = editorRef.current
+      const editorScrollTop = editor ? editor.getScrollTop() : 0
+      const prior = previewScrollMemoryRef.current.get(key)
+      if (editorScrollTop > 1 && prior && prior.scrollTop > 0) {
+        mdpTrace('capture-preview-scroll:skip-transient-zero', {
+          priorScrollTop: prior.scrollTop,
+          editorScrollTop
+        })
+        return
+      }
+    }
+
+    const nearestSlug = scanPreviewNearestSlug()
+    updatePreviewActiveSlug(nearestSlug)
 
     const maxScroll = Math.max(1, preview.scrollHeight - preview.clientHeight)
     let headingOffsetY = 0
@@ -6552,6 +6841,13 @@ export function ProjectEditor({
     const key = getFileScrollKey(lastEditorScopeRef.current, activeFilePathRef.current)
     if (!key) return false
     const memory = previewScrollMemoryRef.current.get(key)
+    mdpTrace('restore-preview-from-memory', {
+      hasMemory: Boolean(memory),
+      memScrollTop: memory?.scrollTop ?? -1,
+      memSlug: memory?.nearestHeadingSlug ?? null,
+      scrollHeight: preview.scrollHeight,
+      clientHeight: preview.clientHeight
+    })
     if (!memory) return false
 
     const getRestoredSlug = () => {
@@ -6772,6 +7068,82 @@ export function ProjectEditor({
     previewRestorePhase,
     queuePreviewReveal
   ])
+
+  // Watchdog: the preview-restore phase must never stay stuck NON-idle (content
+  // faded to opacity 0) once the render is fully settled. The happy-path reveal
+  // finalizes the phase to 'idle' in a few ms, so this watchdog does nothing then.
+  // It fires only when the queued reveal was lost — a deep-link "Jump to Editor"
+  // (and similar reopen-with-root-reload) cancels the reveal frame via the unmount
+  // cleanup AFTER it was queued, and no React dep changes to re-run the
+  // settled-reveal effect above — leaving the preview rendered in HTML but
+  // invisible (CDP-10 deep-link jump; PMSR-09/10/11 cold first reopen, where
+  // waitForPreviewReady requires phase === 'idle'). The dep is the BOOLEAN
+  // "is non-idle", NOT the phase string, so a `waiting-html` -> `restoring-layout`
+  // transition does NOT re-run the effect and reset the timer; the interval keeps
+  // measuring continuous non-idle time across those sub-phase changes. Gated on
+  // shouldRevealSettledPreview so it can never reveal mid-render (it waits while
+  // ANY work — markdown render, worker, or mermaid — is pending), preserving the
+  // no-flash guarantees.
+  const previewPhaseNonIdle = previewRestorePhase !== 'idle'
+  useEffect(() => {
+    if (!previewPhaseNonIdle) return
+    const nonIdleSince = performance.now()
+    const watchdog = window.setInterval(() => {
+      if (previewRestorePhaseRef.current === 'idle') {
+        window.clearInterval(watchdog)
+        return
+      }
+      if (performance.now() - nonIdleSince < PREVIEW_REVEAL_WATCHDOG_MS) return
+      const mermaidState = getMermaidPreviewStateRef.current()
+      const settled = shouldRevealSettledPreview({
+        isMarkdownRenderAllowed: markdownRenderAllowedRef.current,
+        renderedHtmlLength: markdownRenderedHtmlRef.current.length,
+        phase: previewRestorePhaseRef.current,
+        markdownRenderPending: markdownRenderPendingRef.current,
+        workerInFlight: markdownWorkerInFlightRef.current,
+        workerQueued: markdownWorkerQueuedRef.current,
+        mermaidPending: mermaidState.pending,
+        mermaidInFlight: mermaidRenderInFlightRef.current
+      })
+      // Diagnostic breadcrumb: the watchdog tripped (phase stuck non-idle past the
+      // grace). `settled` tells whether it could force the reveal or is still
+      // (legitimately or stuck) waiting on render/mermaid work.
+      mdpTrace('reveal-watchdog:tick', {
+        phase: previewRestorePhaseRef.current,
+        settled,
+        renderAllowed: markdownRenderAllowedRef.current,
+        htmlRefLen: markdownRenderedHtmlRef.current.length,
+        markdownRenderPending: markdownRenderPendingRef.current,
+        workerInFlight: markdownWorkerInFlightRef.current,
+        workerQueued: markdownWorkerQueuedRef.current,
+        mermaidPending: mermaidState.pending,
+        mermaidInFlight: mermaidRenderInFlightRef.current
+      })
+      if (!settled) return
+      // Settled but stranded: the queued reveal was lost. Finalize directly
+      // (restore scroll + flip phase to 'idle') instead of re-queuing through the
+      // cancellable setTimeout chain, so this cannot be lost a second time.
+      window.clearInterval(watchdog)
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_REVEAL_WATCHDOG_FORCED, {
+        filePath: (activeFilePathRef.current ?? '').split(/[\\/]/).pop() ?? '',
+        htmlLength: markdownRenderedHtmlRef.current.length,
+        waitedMs: +(performance.now() - nonIdleSince).toFixed(1)
+      })
+      restorePreviewFromMemoryRef.current()
+      suppressPreviewSyncOnRestoreRef.current = false
+      flushSync(() => {
+        previewRestorePhaseRef.current = 'idle'
+        setPreviewRestorePhase('idle')
+      })
+      // Mirror finalize(): if a reopen deferred the editor->preview alignment,
+      // run it now that the preview settled and phase is 'idle'.
+      if (pendingEditorSyncFromPreviewRef.current) {
+        pendingEditorSyncFromPreviewRef.current = false
+        scheduleEditorSyncFromPreview()
+      }
+    }, 300)
+    return () => window.clearInterval(watchdog)
+  }, [previewPhaseNonIdle, scheduleEditorSyncFromPreview])
 
   useEffect(() => {
     if (!isMarkdownRenderAllowed) return
@@ -8285,21 +8657,37 @@ export function ProjectEditor({
       window.setTimeout(resolve, ms)
     })
 
+    // HOLISTIC EDR hardening: this host taxes every process spawn 1.3-12.9s, so a
+    // readiness wait whose predicate depends on a git/conpty/rg spawn legitimately
+    // needs longer than its base ceiling under full-suite load. Scale every
+    // readiness-class waitFor ceiling here (one place → every ctx.waitFor caller).
+    // This is nearly free: waitFor SHORT-CIRCUITS the instant the predicate is true,
+    // so a passing wait is NOT slowed — the scale only extends the give-up point for
+    // a wait that would otherwise time out mid-spawn-tax (the dominant EDR flake
+    // class). On a fast/CI host the scale is inert. Only ceilings >= 3000ms are
+    // scaled, so short "confirm X does NOT happen within N ms" / quick-close waits
+    // (which expect a timeout) keep their tight window and do not gain false-detect
+    // time. Autotest-only code (this whole bootstrap runs only under ONWARD_AUTOTEST).
+    const EDR_WAIT_SCALE = 2.5
+    const EDR_WAIT_SCALE_MIN_MS = 3000
     const waitFor = async (
       label: string,
       predicate: () => boolean,
       timeoutMs = 6000,
       intervalMs = 80
     ) => {
+      const effectiveTimeout = timeoutMs >= EDR_WAIT_SCALE_MIN_MS
+        ? Math.round(timeoutMs * EDR_WAIT_SCALE)
+        : timeoutMs
       const start = performance.now()
       while (true) {
         if (predicate()) return true
         const elapsed = performance.now() - start
-        if (elapsed >= timeoutMs) break
-        await sleep(Math.min(intervalMs, Math.max(0, timeoutMs - elapsed)))
+        if (elapsed >= effectiveTimeout) break
+        await sleep(Math.min(intervalMs, Math.max(0, effectiveTimeout - elapsed)))
       }
       if (predicate()) return true
-      log('timeout', { label, timeoutMs })
+      log('timeout', { label, timeoutMs: effectiveTimeout, baseTimeoutMs: timeoutMs, edrScale: EDR_WAIT_SCALE })
       return false
     }
 

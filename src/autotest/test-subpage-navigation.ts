@@ -206,7 +206,19 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
 
   try {
     await writeAndSyncTerminal(terminalId, repoSetupCommand, sleep)
-    const fixtureCwd = await waitForTerminalCwd(terminalId, fixtureRoot, sleep)
+    // Generous hang-detector ceiling (was the 12 s default, then 90 s): the fixture
+    // build runs ~6 serial git spawns through the interactive PTY as ONE &&-joined
+    // command, and on an EDR host each spawn is taxed 1.3-12.9 s. WORST case = 6 x
+    // 12.9 s ~= 77 s of spawn tax alone, plus shell init + scheduling variance, which
+    // a bad-EDR window pushed past 90 s (observed: SN-00 timed out, the suite died at
+    // ~104 s). The OSC cwd updating to fixtureRoot IS the "build finished" signal (the
+    // prompt does not render between &&-joined commands), so 150 s comfortably covers
+    // the worst-case serial spawn tax while staying well under the 300 s runner
+    // budget; only a genuinely stuck build fails. waitForTerminalCwd returns EARLY on
+    // success, so a fast host is unaffected. TODO(follow-up): build this fixture via a
+    // deterministic main-process IPC (the GDS-44/46 pattern) to remove the PTY-spawn
+    // exposure entirely instead of widening the ceiling.
+    const fixtureCwd = await waitForTerminalCwd(terminalId, fixtureRoot, sleep, 150000)
     _assert('SN-00-fixture-root-ready', Boolean(fixtureCwd), {
       expected: normalizePath(fixtureRoot),
       actual: fixtureCwd ? normalizePath(fixtureCwd) : null
@@ -330,13 +342,16 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     })
     if (!initialShell || cancelled()) return results
 
-    const editorButton = getSubpageButton('editor')
-    _assert('SN-02-editor-switcher-current', Boolean(editorButton && editorButton.disabled), {
-      disabled: editorButton?.disabled ?? null
+    // Poll the button's current-page (disabled) state and the uniform-layout
+    // outcome instead of reading once: the subpage switch's React render can lag
+    // under EDR, so a single-shot read raced the commit. waitFor short-circuits.
+    const editorCurrent = await waitFor('SN-02-editor-current', () => Boolean(getSubpageButton('editor')?.disabled), 8000)
+    _assert('SN-02-editor-switcher-current', editorCurrent, {
+      disabled: getSubpageButton('editor')?.disabled ?? null
     })
-    const editorButtonsUniform = areVisibleShellButtonsUniform()
-    _assert('SN-02A-editor-header-buttons-uniform', editorButtonsUniform.ok, {
-      metrics: editorButtonsUniform.metrics
+    const editorUniform = await waitFor('SN-02A-editor-uniform', () => areVisibleShellButtonsUniform().ok, 8000)
+    _assert('SN-02A-editor-header-buttons-uniform', editorUniform, {
+      metrics: areVisibleShellButtonsUniform().metrics
     })
 
     await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
@@ -364,13 +379,13 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     })
     if (!diffOpened || cancelled()) return results
 
-    const diffButton = getSubpageButton('diff')
-    _assert('SN-05-diff-switcher-current', Boolean(diffButton && diffButton.disabled), {
-      disabled: diffButton?.disabled ?? null
+    const diffCurrent = await waitFor('SN-05-diff-current', () => Boolean(getSubpageButton('diff')?.disabled), 8000)
+    _assert('SN-05-diff-switcher-current', diffCurrent, {
+      disabled: getSubpageButton('diff')?.disabled ?? null
     })
-    const diffButtonsUniform = areVisibleShellButtonsUniform()
-    _assert('SN-05A-diff-header-buttons-uniform', diffButtonsUniform.ok, {
-      metrics: diffButtonsUniform.metrics
+    const diffButtonsUniform = await waitFor('SN-05A-diff-uniform', () => areVisibleShellButtonsUniform().ok, 8000)
+    _assert('SN-05A-diff-header-buttons-uniform', diffButtonsUniform, {
+      metrics: areVisibleShellButtonsUniform().metrics
     })
 
     const diffExistingReady = await waitForDiffFile('existing', 'existing.md')
@@ -446,13 +461,13 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     })
     if (!historyOpened || cancelled()) return results
 
-    const historyButton = getSubpageButton('history')
-    _assert('SN-09-history-switcher-current', Boolean(historyButton && historyButton.disabled), {
-      disabled: historyButton?.disabled ?? null
+    const historyCurrent = await waitFor('SN-09-history-current', () => Boolean(getSubpageButton('history')?.disabled), 8000)
+    _assert('SN-09-history-switcher-current', historyCurrent, {
+      disabled: getSubpageButton('history')?.disabled ?? null
     })
-    const historyButtonsUniform = areVisibleShellButtonsUniform()
-    _assert('SN-09A-history-header-buttons-uniform', historyButtonsUniform.ok, {
-      metrics: historyButtonsUniform.metrics
+    const historyButtonsUniform = await waitFor('SN-09A-history-uniform', () => areVisibleShellButtonsUniform().ok, 8000)
+    _assert('SN-09A-history-header-buttons-uniform', historyButtonsUniform, {
+      metrics: areVisibleShellButtonsUniform().metrics
     })
 
     const selectedUpdateCommit = await selectHistoryCommitByIndex('update-existing', 1)

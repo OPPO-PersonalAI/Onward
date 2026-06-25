@@ -46,7 +46,11 @@ function buildChangeDirectoryCommand(platform, fixtureRoot) {
 
 async function createCdpClient(port) {
   let targets = null
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  // EDR-tolerant startup connect (was 80 x 250ms = 20s): on an anti-malware host
+  // the Electron launch + renderer load are spawn-taxed, so the page target can
+  // appear past 20s. 360 x 250ms = 90s rides that out; breaks the instant a page
+  // target appears, so a fast host is unaffected.
+  for (let attempt = 0; attempt < 360; attempt += 1) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/json`)
       targets = await response.json()
@@ -141,15 +145,24 @@ async function createCdpClient(port) {
   }
 }
 
+// HOLISTIC EDR scale for this external CDP driver's readiness waits: this host
+// taxes every git/conpty spawn 1.3-12.9s, so a CDP-observed render/settle a wait
+// depends on legitimately needs longer under full-suite load. Scaling the ceiling
+// is nearly free — the loop returns the instant the expression is truthy, so a
+// passing wait is not slowed; the scale only extends the give-up point for a wait
+// that would otherwise time out mid-spawn-tax (observed: subpage-cdp render-settled
+// timeout). On a fast/CI host it is inert.
+const EDR_CDP_WAIT_SCALE = 2.5
 async function waitFor(cdp, label, expression, timeoutMs = 12000, intervalMs = 120) {
   const startedAt = Date.now()
+  const effectiveTimeout = Math.round(timeoutMs * EDR_CDP_WAIT_SCALE)
   let lastValue = null
-  while (Date.now() - startedAt < timeoutMs) {
+  while (Date.now() - startedAt < effectiveTimeout) {
     lastValue = await cdp.evaluate(expression)
     if (lastValue) return lastValue
     await sleep(intervalMs)
   }
-  throw new Error(`Timed out waiting for ${label}; last value: ${JSON.stringify(lastValue)}`)
+  throw new Error(`Timed out waiting for ${label} (after ${effectiveTimeout}ms, base ${timeoutMs}ms x${EDR_CDP_WAIT_SCALE}); last value: ${JSON.stringify(lastValue)}`)
 }
 
 async function findVisibleCenter(cdp, selector) {

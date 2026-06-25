@@ -119,10 +119,26 @@ class RepoCatFileProcess {
       repoRoot: this.repoRoot,
       platform: process.platform
     })
-    proc.stdout.on('data', (chunk: Buffer) => this.onData(chunk))
-    proc.stdout.on('error', () => this.fail(new Error('cat-file stdout error')))
+    // Guard every async handler against the exact process it was bound to.
+    // After a dispose()+respawn (the index-mutation freshness gate), `this.proc`
+    // points at the NEW process; a late stdout chunk or the delayed 'exit' of
+    // the KILLED process must NOT reach onData()/fail(). Feeding a dying
+    // process's bytes into the live parser misattributes one ref's body to the
+    // other request (observed as the GDS-33 staged/HEAD blob inversion on
+    // Windows, where proc.kill()'s EDR-mediated pipe teardown leaves a wide
+    // late-flush window), and an unconditional fail() on the stale exit would
+    // reject the NEW process's in-flight read.
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) return
+      this.onData(chunk)
+    })
+    proc.stdout.on('error', () => {
+      if (this.proc !== proc) return
+      this.fail(new Error('cat-file stdout error'))
+    })
     proc.on('exit', (code, signal) => {
-      if (this.proc === proc) this.proc = null
+      if (this.proc !== proc) return
+      this.proc = null
       // Diagnostic breadcrumb: lifecycle EXIT — next read respawns (and re-pays
       // the spawn cost). A burst of these in a trace means the batch is thrashing.
       performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_CATFILE_BATCH_PROCESS_EXITED, {
@@ -131,7 +147,8 @@ class RepoCatFileProcess {
       this.fail(new Error('cat-file process exited'))
     })
     proc.on('error', (e) => {
-      if (this.proc === proc) this.proc = null
+      if (this.proc !== proc) return
+      this.proc = null
       performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_CATFILE_BATCH_PROCESS_EXITED, {
         repoRoot: this.repoRoot, reason: 'error', message: String((e as Error)?.message ?? e).slice(0, 200)
       })
@@ -271,10 +288,21 @@ class RepoCatFileProcess {
     const proc = this.proc
     this.proc = null
     this.pending = null
+    // Drop any partially-buffered response so a respawn never parses the dead
+    // process's leftover bytes against the new process's pending request.
+    this.buf = Buffer.alloc(0)
     // Clear the snapshot identity so the next ensureProc() always records the
     // fresh token rather than inheriting the disposed process's stale one.
     this.spawnedIndexGeneration = null
     if (proc && !proc.killed) {
+      // Detach the handlers BEFORE kill so the dying process's late stdout flush
+      // / delayed 'exit' can never reach onData()/fail(). The `this.proc !== proc`
+      // guards in ensureProc() already drop stale events; explicit teardown makes
+      // it unambiguous and releases the bound closures.
+      try { proc.stdout.removeAllListeners('data') } catch { /* ignore */ }
+      try { proc.stdout.removeAllListeners('error') } catch { /* ignore */ }
+      try { proc.removeAllListeners('exit') } catch { /* ignore */ }
+      try { proc.removeAllListeners('error') } catch { /* ignore */ }
       try { proc.stdin.end() } catch { /* ignore */ }
       try { proc.kill() } catch { /* ignore */ }
     }

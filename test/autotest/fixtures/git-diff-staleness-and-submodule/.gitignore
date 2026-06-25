@@ -2,3 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 /runtime/
+# rename-aside husks left when a Windows/EDR handle held runtime/ open past the
+# rmSync retry window (see create-git-diff-staleness-fixture.mjs robustRmSync).
+/runtime.stale-*/

@@ -443,6 +443,14 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
     })
   } else {
     const PHANTOM_SETTLE_MS = 80
+    // TFA-11 polls for the transient all-white phantom frame rather than taking
+    // one fixed-time sample: phantomBlank() clears the WebGL backbuffer white but
+    // xterm's live render service repaints the real buffer on its next tick, so a
+    // single sample races the repaint (under EDR the window stretches / xterm
+    // repaints first → the white frame is missed and looksAllWhite spuriously
+    // fails even though the repro fired). Generous hang-detector ceiling: a
+    // slow-but-correct paint passes; only a never-white repro-infra failure trips it.
+    const PHANTOM_BLANK_OBSERVE_TIMEOUT_MS = 2000
     const RESTORE_TIMEOUT_MS = SURFACE_RESTORE_TIMEOUT_MS
     const RESTORE_POLL_MS = 60
     const reproSurface = findWebglSurface(terminalId)
@@ -455,11 +463,27 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
       // ---- TFA-11: phantom-blank + visibilitychange recovers ----
       {
         const phantomResult = repro.phantomBlank(terminalId)
-        await sleep(PHANTOM_SETTLE_MS)
-        const surfaceAfterPaint = findWebglSurface(terminalId)
-        const statsAfterPaint = surfaceAfterPaint ? readWebglPixels(surfaceAfterPaint.gl) : null
-        const phantomBlankApplied =
-          phantomResult.triggered && statsAfterPaint !== null && looksAllWhite(statsAfterPaint)
+        // Poll until the all-white phantom frame is observed (capturing the
+        // matching stats), instead of one fixed-time sample that races xterm's
+        // concurrent repaint. STRICTER than the old sample — it positively
+        // confirms the white frame existed rather than hoping to catch it.
+        let statsAfterPaint: WebglPixelStats | null = null
+        const phantomWhiteObserved = await waitFor(
+          'tfa-11-phantom-white-observed',
+          () => {
+            const surface = findWebglSurface(terminalId)
+            if (!surface) return false
+            const stats = readWebglPixels(surface.gl)
+            if (looksAllWhite(stats)) {
+              statsAfterPaint = stats
+              return true
+            }
+            return false
+          },
+          PHANTOM_BLANK_OBSERVE_TIMEOUT_MS,
+          RESTORE_POLL_MS
+        )
+        const phantomBlankApplied = phantomResult.triggered && phantomWhiteObserved
 
         // Same rationale as TFA-09: enter the manager directly so the 80ms
         // debounce isn't coalesced with focus events from earlier cases.

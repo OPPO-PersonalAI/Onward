@@ -430,8 +430,19 @@ export async function testPdfEpubDiff(ctx: AutotestContext): Promise<TestResult[
 
   const commitsReady = await waitFor(
     'git-history-commits-ready',
-    () => (getGitHistoryApi()?.getCommitCount?.() ?? 0) >= 2,
-    10000
+    () => {
+      const count = getGitHistoryApi()?.getCommitCount?.() ?? 0
+      if (count >= 2) return true
+      // Re-trigger a fresh history fetch each poll. Under EDR the git-state-mirror
+      // branch oid lags, so the first getHistory returned a stale 1-commit page and
+      // the renderer commit-list cache then FROZE at 1 (nothing re-fetched). The
+      // fixture genuinely has 2 commits; re-switchRepo forces a fresh getHistory so
+      // the 2nd appears once the oid propagates. Generous hang-detector ceiling.
+      getGitHistoryApi()?.switchRepo?.(repoPath)
+      return false
+    },
+    30000,
+    1000
   )
   record('git-history-commits-ready', commitsReady, {
     commits: getGitHistoryApi()?.getCommitCount?.()

@@ -28,19 +28,39 @@ FIXTURE_REPO=""
 OWNED_USER_DATA=0
 OWNED_FIXTURE=0
 
+# Best-effort recursive remove that tolerates transient Windows EDR/AV file locks
+# ("Device or resource busy" / EPERM): retry with backoff, and NEVER fail the run
+# on a cleanup error. A passed test must not be flipped to FAIL just because a
+# cleanup rm lost a race with a lingering git/conpty handle (the original
+# false-FAIL here: the test printed "passed", then `rm -rf` hit a busy lock and,
+# under `set -e`, propagated exit 1 from the EXIT trap).
+robust_rm() {
+  local target="$1"
+  [[ -z "$target" || ! -e "$target" ]] && return 0
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if rm -rf "$target" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "[autotest] WARN: could not remove $target after retries (left for the OS to release)" >&2
+  return 0
+}
+
 cleanup() {
   if [[ "$OWNED_USER_DATA" -eq 1 && -n "$USER_DATA_DIR" && -d "$USER_DATA_DIR" ]]; then
     if [[ "${ONWARD_AUTOTEST_KEEP_TMP:-0}" == "1" ]]; then
       echo "[autotest] retained userData for debugging: $USER_DATA_DIR"
     else
-      rm -rf "$USER_DATA_DIR"
+      robust_rm "$USER_DATA_DIR"
     fi
   fi
   if [[ "$OWNED_FIXTURE" -eq 1 && -n "$FIXTURE_REPO" && -d "$FIXTURE_REPO" ]]; then
     if [[ "${ONWARD_AUTOTEST_KEEP_TMP:-0}" == "1" ]]; then
       echo "[autotest] retained git fixture for debugging: $FIXTURE_REPO"
     else
-      rm -rf "$FIXTURE_REPO"
+      robust_rm "$FIXTURE_REPO"
     fi
   fi
 }

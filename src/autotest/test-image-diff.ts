@@ -182,7 +182,19 @@ export async function testImageDiff(ctx: AutotestContext): Promise<TestResult[]>
   }
 
   const exerciseImageFileActions = async (filename: string, idPrefix: string, verifyKeepDeny = true) => {
-    const index = findFileIndex(filename)
+    // Poll for the file in the diff list rather than checking once. A prior file's
+    // heavy post-action reload, or worker-lane starvation under peak EDR, can leave
+    // the list transiently mid-refresh when this runs, so a single-shot
+    // findFileIndex returns -1 for a file that IS about to (re)appear (observed:
+    // ID-12-file-found index:-1 right after ID-04 starved the worker ~30 s). Wait
+    // for the OUTCOME; a file that genuinely never lists still fails by budget.
+    let index = findFileIndex(filename)
+    if (index < 0 && !cancelled()) {
+      await waitFor(`image-file-found:${filename}`, () => {
+        index = findFileIndex(filename)
+        return index >= 0
+      }, IMAGE_PREVIEW_BUDGET_MS, 200)
+    }
     record(`${idPrefix}-file-found`, index >= 0, { filename, index })
     if (index < 0 || cancelled()) return
 
@@ -196,9 +208,50 @@ export async function testImageDiff(ctx: AutotestContext): Promise<TestResult[]>
     // preview fetch past its budget (round-5 ID-12 regression). Best-effort.
     await waitForDiffLoadIdle(`${filename}-before-preview`)
 
-    const previewLoaded = await waitForImagePreview(`${filename}-preview`)
+    let previewLoaded = await waitForImagePreview(`${filename}-preview`)
+    if (!previewLoaded && !cancelled()) {
+      // Re-drive once. Under peak full-suite EDR the worker's concurrency-1 lane
+      // can starve (or drop) the first content fetch past its 30 s budget even
+      // though the fetch itself is healthy (observed: ID-04-image-preview-loaded
+      // timeout in a heavy iteration; the same suite passed the prior iteration).
+      // Re-issue by toggling selection away and back: that forces a FRESH fetch
+      // when the lane frees, rather than waiting on a possibly-dead request.
+      // Bounded to one retry so worst-case stays well inside the 240 s runner budget.
+      const fileCount = getGitDiffApi()?.getFileList?.().length ?? 0
+      const otherIndex = index === 0 ? Math.min(1, fileCount - 1) : 0
+      if (otherIndex >= 0 && otherIndex !== index) {
+        getGitDiffApi()?.selectFileByIndex(otherIndex)
+        await sleep(200)
+      }
+      await waitForDiffLoadIdle(`${filename}-redrive-idle`)
+      const reselected = getGitDiffApi()?.selectFileByIndex(index) === true
+      if (reselected) {
+        previewLoaded = await waitForImagePreview(`${filename}-preview-redrive`)
+      }
+    }
     record(`${idPrefix}-image-preview-loaded`, previewLoaded, { filename })
     if (!previewLoaded || cancelled()) return
+
+    // Poll the FULL settled-state predicate before reading the derived UI state.
+    // getImagePreviewState() is ref-backed (flips on isImage immediately), but
+    // hasModifiedUrl and getFileActionState()'s canShow*Panel are render-scope
+    // values carried by a LATER React commit. Reading them in the same tick that
+    // waitForImagePreview resolves races that commit — under accumulated EDR
+    // load the commit slips one render and the three derived-state reads fast-FAIL
+    // even though the panel is about to appear. Wait for the OUTCOME with a
+    // generous hang-detector ceiling: a slow-but-correct commit passes; a genuine
+    // never-converge still fails at the ceiling (and the reads below then report
+    // the real non-ready state honestly).
+    await waitFor(`image-actions-ready:${filename}`, () => {
+      const ps = getGitDiffApi()?.getImagePreviewState?.()
+      const as = getGitDiffApi()?.getFileActionState?.()
+      return Boolean(
+        ps?.isImage &&
+        ps?.hasModifiedUrl === true &&
+        as?.fileActionsVisible === true &&
+        as?.lineActionsVisible === false
+      )
+    }, IMAGE_PREVIEW_BUDGET_MS, 120)
 
     const previewState = getGitDiffApi()?.getImagePreviewState?.()
     record(`${idPrefix}-image-preview-state`, Boolean(previewState?.isImage) && previewState?.hasModifiedUrl === true, {
@@ -268,10 +321,15 @@ export async function testImageDiff(ctx: AutotestContext): Promise<TestResult[]>
 
   if (!cancelled() && gitDiffOpened) {
     const loaded = await waitForGitDiffLoaded('loaded')
-    const api = getGitDiffApi()
-    const fileList = api?.getFileList?.() || []
-    record('ID-03-files-loaded', loaded, { fileCount: fileList.length })
-    record('ID-03-test-images-found', findFileIndex(TEST_IMAGE_FILENAME) >= 0 && findFileIndex(TEST_SVG_FILENAME) >= 0, {
+    record('ID-03-files-loaded', loaded, { fileCount: getGitDiffApi()?.getFileList?.().length ?? 0 })
+    // Poll until BOTH images are present in the diff list instead of reading once:
+    // `loaded` only gates the diff-loaded flag, but the two image entries can still
+    // be settling into the list under EDR, so a single-shot pair check raced.
+    const bothImagesFound = await waitFor('test-images-found', () =>
+      findFileIndex(TEST_IMAGE_FILENAME) >= 0 && findFileIndex(TEST_SVG_FILENAME) >= 0,
+      IMAGE_PREVIEW_BUDGET_MS, 200)
+    const fileList = getGitDiffApi()?.getFileList?.() || []
+    record('ID-03-test-images-found', bothImagesFound, {
       fileCount: fileList.length,
       files: fileList
     })
@@ -293,11 +351,14 @@ export async function testImageDiff(ctx: AutotestContext): Promise<TestResult[]>
 
   if (!cancelled()) {
     await openFileInEditor(TEST_EDITOR_PNG_PATH)
+    // Generous hang-detector ceiling (was 10s): the editor image-preview load is a
+    // worker/IPC fetch that EDR can starve past 10s; 30s (IMAGE_PREVIEW_BUDGET_MS)
+    // matches the diff-side preview budget. waitFor short-circuits on success.
     const pngEditorReady = await waitFor('editor-png-preview', () => {
       const api = getProjectEditorApi()
       const state = api?.getImageFilePreviewState?.()
       return api?.getActiveFilePath?.() === TEST_EDITOR_PNG_PATH && Boolean(state?.visible && state.loaded && !state.broken)
-    }, 10000, 120)
+    }, IMAGE_PREVIEW_BUDGET_MS, 120)
     record('ID-19-editor-png-preview', pngEditorReady, {
       activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null,
       state: getProjectEditorApi()?.getImageFilePreviewState?.() ?? null
@@ -308,7 +369,7 @@ export async function testImageDiff(ctx: AutotestContext): Promise<TestResult[]>
       const api = getProjectEditorApi()
       const state = api?.getImageFilePreviewState?.()
       return api?.getActiveFilePath?.() === TEST_EDITOR_SVG_PATH && Boolean(state?.visible && state.loaded && !state.broken)
-    }, 10000, 120)
+    }, IMAGE_PREVIEW_BUDGET_MS, 120)
     record('ID-19-editor-svg-preview', svgEditorReady, {
       activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null,
       state: getProjectEditorApi()?.getImageFilePreviewState?.() ?? null

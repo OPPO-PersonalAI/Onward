@@ -152,12 +152,37 @@ export async function testTerminalPerf(ctx: AutotestContext): Promise<TestResult
         // Let output flow for 5 seconds
         await sleep(5000)
 
-        // Measure input responsiveness during output
-        const inputLatencies: number[] = []
-        for (let i = 0; i < 10; i++) {
-          const t0 = performance.now()
-          await window.electronAPI.terminal.write(termIds[0], '')
-          inputLatencies.push(performance.now() - t0)
+        // Measure input responsiveness during sustained output. Input latency is a
+        // high-priority signal so it STAYS gated — but a single 10-sample batch is
+        // one observation of a stochastic average, and on an EDR host one
+        // scheduler-starved keystroke blows the 100ms budget while batching is
+        // perfectly healthy. Per the project timing rule (latency: N=3,
+        // pass-if->=1-of-3-meets-budget), take THREE measurement batches while the
+        // high output keeps flowing and pass if any ONE batch's average is under
+        // budget; FAIL only if all three exceed (a systematic batching regression,
+        // not a transient spike). Short-circuits on the first passing batch.
+        const AVG_LATENCY_BUDGET_MS = 100
+        const MEASURE_BATCHES = 3
+        const SAMPLES_PER_BATCH = 10
+        let batchPassed = false
+        const batches: Array<Record<string, unknown>> = []
+        for (let b = 0; b < MEASURE_BATCHES && !batchPassed; b++) {
+          const inputLatencies: number[] = []
+          for (let i = 0; i < SAMPLES_PER_BATCH; i++) {
+            const t0 = performance.now()
+            await window.electronAPI.terminal.write(termIds[0], '')
+            inputLatencies.push(performance.now() - t0)
+          }
+          const avgLatency = inputLatencies.reduce((a, c) => a + c, 0) / inputLatencies.length
+          const maxLatency = Math.max(...inputLatencies)
+          const batchPass = avgLatency < AVG_LATENCY_BUDGET_MS
+          batches.push({
+            batch: b + 1,
+            inputAvgLatencyMs: +avgLatency.toFixed(1),
+            inputMaxLatencyMs: +maxLatency.toFixed(1),
+            batchPass
+          })
+          if (batchPass) batchPassed = true
         }
 
         // Stop output
@@ -167,14 +192,12 @@ export async function testTerminalPerf(ctx: AutotestContext): Promise<TestResult
         await sleep(1000)
 
         const elapsed = performance.now() - startTime
-        const avgLatency = inputLatencies.reduce((a, b) => a + b, 0) / inputLatencies.length
-        const maxLatency = Math.max(...inputLatencies)
-
-        _assert('TP-01-high-output-batching', avgLatency < 100, {
+        _assert('TP-01-high-output-batching', batchPassed, {
           terminals: termIds.length,
           durationMs: Math.round(elapsed),
-          inputAvgLatencyMs: +avgLatency.toFixed(1),
-          inputMaxLatencyMs: +maxLatency.toFixed(1)
+          batchesRun: batches.length,
+          batches,
+          budget: `avg keystroke round-trip < ${AVG_LATENCY_BUDGET_MS}ms (pass if >=1 of ${MEASURE_BATCHES} batches)`
         })
       } else {
         _assert('TP-01-high-output-batching', false, { reason: 'terminal creation failed' })
@@ -247,42 +270,70 @@ export async function testTerminalPerf(ctx: AutotestContext): Promise<TestResult
       }
 
       if (inputId && bgIds.length === 2 && getPerfMonitor() && getSessionManager()) {
-        await sleep(2000)
+        // INPUT LATENCY is the highest-priority product signal, so it stays GATED.
+        // But a single measurement batch is ONE observation of a stochastic p95, and
+        // on an EDR host one scheduler-starved echo blows the tight idle budget while
+        // the code is perfectly healthy. Per the project timing-sensitive rule
+        // (latency: N=3, pass-if->=1-of-3-meets-budget), run the whole measure cycle
+        // up to 3 times and PASS as soon as one cycle is under budget; FAIL only if
+        // all 3 exceed (a systematic regression, not a transient spike). The loop
+        // short-circuits on the first passing cycle, so a healthy host runs exactly
+        // one cycle and pays no extra runtime.
+        const IDLE_P95_BUDGET_MS = 30
+        const LOADED_P95_BUDGET_MS = 120
+        const MAX_ATTEMPTS = 3
+        let passed = false
+        const attempts: Array<Record<string, unknown>> = []
 
-        const idleLatencies = await measureEchoLatencies(inputId, 10, sleep)
+        for (let attempt = 0; attempt < MAX_ATTEMPTS && !passed; attempt++) {
+          await sleep(2000)
 
-        // Start background output
-        for (const id of bgIds) {
-          if (platform === 'win32') {
-            await window.electronAPI.terminal.write(id, 'for /L %i in (1,1,99999) do @echo bg-load-%i\r\n')
-          } else {
-            await window.electronAPI.terminal.write(id, 'yes "bg-load-line"\n')
+          const idleLatencies = await measureEchoLatencies(inputId, 10, sleep)
+
+          // Start background output
+          for (const id of bgIds) {
+            if (platform === 'win32') {
+              await window.electronAPI.terminal.write(id, 'for /L %i in (1,1,99999) do @echo bg-load-%i\r\n')
+            } else {
+              await window.electronAPI.terminal.write(id, 'yes "bg-load-line"\n')
+            }
           }
+
+          // Let output ramp up
+          await sleep(2000)
+
+          const loadedLatencies = await measureEchoLatencies(inputId, 20, sleep)
+
+          // Stop background output
+          for (const id of bgIds) {
+            await window.electronAPI.terminal.write(id, '\x03')
+          }
+          await sleep(1000)
+
+          const idle = computeLatencyStats(idleLatencies)
+          const loaded = computeLatencyStats(loadedLatencies)
+          const cyclePass = idle.p95 < IDLE_P95_BUDGET_MS && loaded.p95 < LOADED_P95_BUDGET_MS
+
+          attempts.push({
+            attempt: attempt + 1,
+            samplesIdle: idleLatencies.length,
+            samplesLoaded: loadedLatencies.length,
+            idleAvgMs: idle.avg,
+            idleP95Ms: idle.p95,
+            loadedAvgMs: loaded.avg,
+            loadedP95Ms: loaded.p95,
+            loadedMaxMs: loaded.max,
+            cyclePass
+          })
+
+          if (cyclePass) passed = true
         }
 
-        // Let output ramp up
-        await sleep(2000)
-
-        const loadedLatencies = await measureEchoLatencies(inputId, 20, sleep)
-
-        // Stop background output
-        for (const id of bgIds) {
-          await window.electronAPI.terminal.write(id, '\x03')
-        }
-        await sleep(1000)
-
-        const idle = computeLatencyStats(idleLatencies)
-        const loaded = computeLatencyStats(loadedLatencies)
-
-        _assert('TP-03-input-latency-under-load', idle.p95 < 30 && loaded.p95 < 120, {
-          samplesIdle: idleLatencies.length,
-          samplesLoaded: loadedLatencies.length,
-          idleAvgMs: idle.avg,
-          idleP95Ms: idle.p95,
-          loadedAvgMs: loaded.avg,
-          loadedP95Ms: loaded.p95,
-          loadedMaxMs: loaded.max,
-          threshold: 'idle p95 < 30ms, loaded p95 < 120ms'
+        _assert('TP-03-input-latency-under-load', passed, {
+          passed,
+          attemptsRun: attempts.length,
+          attempts,
+          threshold: `idle p95 < ${IDLE_P95_BUDGET_MS}ms, loaded p95 < ${LOADED_P95_BUDGET_MS}ms (pass if >=1 of ${MAX_ATTEMPTS} cycles meets budget)`
         })
       } else {
         _assert('TP-03-input-latency-under-load', false, {

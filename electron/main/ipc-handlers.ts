@@ -776,6 +776,35 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       return { ok: false, status: 0, error: String(error) }
     }
   })
+  ipcMain.handle('debug:autotest-write-external-file', async (
+    _event,
+    payload?: { root?: unknown; relPath?: unknown; content?: unknown }
+  ): Promise<{ ok: boolean; error?: string }> => {
+    // Autotest-only: write a file directly via the main process so a test can
+    // simulate an EXTERNAL edit (one the app's save path never initiates)
+    // deterministically, WITHOUT depending on an interactive shell executing a
+    // queued PTY command. The git-diff staleness suite (GDS-44/46) used a PTY
+    // shell write that is EDR-fragile under full-suite load (the command can sit
+    // unexecuted past even the adaptive observe budget -> fileObserved:false). A
+    // direct fs write is instant and the watcher / GitStateMirror still has to
+    // DISCOVER the untracked mutation, so the external-edit contract is preserved.
+    // Gated strictly on ONWARD_AUTOTEST so it never exists in production builds.
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { ok: false, error: 'debug:autotest-write-external-file requires ONWARD_AUTOTEST=1' }
+    }
+    const root = typeof payload?.root === 'string' ? payload.root : ''
+    const relPath = typeof payload?.relPath === 'string' ? payload.relPath : ''
+    const content = typeof payload?.content === 'string' ? payload.content : ''
+    if (!root || !relPath) {
+      return { ok: false, error: 'Missing root or relPath.' }
+    }
+    try {
+      writeFileSync(resolve(root, relPath), content, 'utf-8')
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: String(error) }
+    }
+  })
   ipcMain.handle('performance-trace:record', (_event, payload) => {
     performanceTrace.recordRendererEvent(payload)
   })
@@ -2502,6 +2531,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.DEBUG_RESET_PERF_TRACE_METRICS)
   ipcMain.removeHandler('debug:get-api-server-port')
   ipcMain.removeHandler('debug:post-api-terminal-write')
+  ipcMain.removeHandler('debug:autotest-write-external-file')
   ipcMain.removeHandler('performance-trace:record')
   ipcMain.removeHandler('performance-trace:get-status')
   ipcMain.removeHandler('performance-trace:flush')

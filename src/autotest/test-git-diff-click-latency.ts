@@ -23,7 +23,12 @@ import type { AutotestContext, ClickLatencyMeasurementForAutotest, TestResult } 
 // so the next-iteration fix has a concrete target.
 
 const CLICK_TO_SETTLE_TARGET_MS = 7000
-const PER_FILE_TIMEOUT_MS = 8000
+// Per-file measurement-collection ceiling (was 8s). Under EDR, Monaco's
+// tokenize-settle for a clicked file can exceed 8s, so the per-file measurement
+// loop gave up and the suite collected ZERO samples (observed: samples:0 in
+// gdcl:tracker-vs-external). 12s lets the measurement settle under EDR so samples
+// are actually gathered; the loop still exits early the instant a measurement lands.
+const PER_FILE_TIMEOUT_MS = 12000
 const SUITE_WATCHDOG_MS = 180_000
 // Generous inter-file dwell so Monaco's previous diff-computed + rAF cycle
 // fully settles before the next tracker.start cancels it. Without this
@@ -70,7 +75,13 @@ interface PerFileResult {
 // remains independent: it only watches Monaco DOM mutations.
 const EXTERNAL_SETTLE_QUIET_MS = 200
 const EXTERNAL_SETTLE_CAP_MS = 7000
-const EXTERNAL_SETTLE_NO_MUTATION_MS = 600
+// Quiescence window: how long with no DOM mutation before the external settle is
+// declared done (was 600ms). Under EDR the first paint mutation can arrive late,
+// so 600ms occasionally fired BEFORE any mutation, yielding a null external
+// measurement (an unpaired sample that drops out → contributes to samples:0).
+// 1500ms gives the delayed first mutation room to arrive; still bounded by
+// EXTERNAL_SETTLE_CAP_MS so a genuinely-static view does not hang.
+const EXTERNAL_SETTLE_NO_MUTATION_MS = 1500
 const SUITE_WATCHDOG_RESERVE_MS = PER_FILE_TIMEOUT_MS + EXTERNAL_SETTLE_CAP_MS + 1000
 // Minimum mutations that must arrive before we trust lastMutationAt.
 // Below this, we treat the file as having no observable repaint (cached
@@ -328,7 +339,7 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
   const opened = await waitFor(
     'gdcl-open',
     () => Boolean(window.__onwardGitDiffDebug?.isOpen?.()),
-    8000
+    15000 // EDR-tolerant readiness ceiling (was 8s): the diff panel mount is git-spawn-gated; waitFor short-circuits
   )
   record('gdcl-open', opened)
   if (!opened || cancelled()) return results
@@ -402,7 +413,7 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
       const list = api.getFileList?.() ?? []
       return list.length > 0
     },
-    8000
+    15000 // EDR-tolerant readiness ceiling (was 8s): the file list is git-spawn-gated; waitFor short-circuits
   )
   record('gdcl-list-ready', listReady)
   if (!listReady) return results

@@ -17,7 +17,8 @@ import type { AutotestContext, TestResult } from './types'
 // Round-4 fix: the fixture repo is no longer built by writing a `git init &&
 // commit && commit` mega-command into the live PTY. On an EDR-throttled Windows
 // host the terminal could be parked at a shell "Press any key to continue" pause
-// (round-4 log: a `watchman` startup command failed -> "请按任意键继续..."), so
+// (round-4 log: a `watchman` startup command failed -> a localized "press any
+// key to continue" pause prompt), so
 // the autotest's keypress was swallowed by that prompt and the repo was NEVER
 // created — getHistory then correctly reported "not a Git repository" (ID-13
 // FAIL) and every downstream ID-15..ID-17 cascaded to timeout. The repo is now
@@ -193,16 +194,25 @@ export async function testImageHistoryDiff(ctx: AutotestContext): Promise<TestRe
       state: pngState || null
     })
     getGitHistoryApi()?.setImageCompareMode?.('swipe')
-    await sleep(200)
+    // Poll the GROUND TRUTH (compareMode flipped) instead of a fixed sleep: the
+    // mode-setter's React state propagation can exceed 200ms under EDR, so a
+    // single-shot read raced and saw null/stale. waitFor short-circuits on success.
+    const swipeApplied = await waitFor('git-history-png-swipe', () =>
+      getGitHistoryApi()?.getImagePreviewState?.()?.compareMode === 'swipe', 5000, 50)
     const swipeState = getGitHistoryApi()?.getImagePreviewState?.()
-    record('ID-16-git-history-png-swipe', swipeState?.compareMode === 'swipe', { state: swipeState || null })
+    record('ID-16-git-history-png-swipe', swipeApplied && swipeState?.compareMode === 'swipe', { state: swipeState || null })
     getGitHistoryApi()?.setImageCompareMode?.('onion')
-    await sleep(200)
+    const onionApplied = await waitFor('git-history-png-onion', () =>
+      getGitHistoryApi()?.getImagePreviewState?.()?.compareMode === 'onion', 5000, 50)
     const onionState = getGitHistoryApi()?.getImagePreviewState?.()
-    record('ID-16-git-history-png-onion', onionState?.compareMode === 'onion', { state: onionState || null })
+    record('ID-16-git-history-png-onion', onionApplied && onionState?.compareMode === 'onion', { state: onionState || null })
   }
 
   if (!cancelled() && getGitHistoryApi()?.isOpen?.()) {
+    // Poll until the SVG file is present in the history file list BEFORE reading
+    // its index: under EDR the list can still be settling when this runs, so a
+    // single-shot findHistoryFileIndex returned -1 (observed) and selection failed.
+    await waitFor('git-history-files-ready-for-svg', () => findHistoryFileIndex(TEST_SVG_FILENAME) >= 0, 5000, 50)
     const svgIndex = findHistoryFileIndex(TEST_SVG_FILENAME)
     const svgSelected = svgIndex >= 0 && getGitHistoryApi()?.selectFileByIndex?.(svgIndex) === true
     const svgPreviewLoaded = svgSelected && await waitFor('git-history-svg-state', () => {
@@ -218,9 +228,10 @@ export async function testImageHistoryDiff(ctx: AutotestContext): Promise<TestRe
       state: svgState || null
     })
     getGitHistoryApi()?.setSvgViewMode?.('text')
-    await sleep(200)
+    const svgTextApplied = await waitFor('git-history-svg-text-mode', () =>
+      getGitHistoryApi()?.getImagePreviewState?.()?.svgViewMode === 'text', 5000, 50)
     const svgTextState = getGitHistoryApi()?.getImagePreviewState?.()
-    record('ID-17-git-history-svg-text-mode', svgTextState?.svgViewMode === 'text', { state: svgTextState || null })
+    record('ID-17-git-history-svg-text-mode', svgTextApplied && svgTextState?.svgViewMode === 'text', { state: svgTextState || null })
     getGitHistoryApi()?.setSvgViewMode?.('visual')
     await sleep(200)
   }

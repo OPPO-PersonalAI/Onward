@@ -21,8 +21,8 @@
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "test:unit": "node test/autotest/run-unittest-suite.mjs",
     "preview": "electron-vite preview",
-    "postinstall": "electron-rebuild -f -w node-pty,better-sqlite3 && node scripts/ensure-node-pty-spawn-helper.js && node scripts/ensure-ripgrep-binary.js",
-    "rebuild": "electron-rebuild -f -w node-pty,better-sqlite3",
+    "postinstall": "node scripts/ensure-electron-binary.js && electron-rebuild -f -o better-sqlite3 && node scripts/ensure-node-pty-spawn-helper.js && node scripts/ensure-ripgrep-binary.js",
+    "rebuild": "electron-rebuild -f -o better-sqlite3",
     "lint:comments": "node scripts/check-chinese-comments.js",
     "compile:changelog": "node scripts/compile-changelog.js",
     "generate:changelog": "node scripts/generate-changelog.js",
@@ -47,6 +47,7 @@
     ],
     "asarUnpack": [
       "node_modules/@vscode/ripgrep/**",
+      "node_modules/@vscode/ripgrep-*/**",
       "node_modules/node-pty/**"
     ],
     "extraResources": [
@@ -100,7 +101,7 @@
     "@monaco-editor/react": "^4.7.0",
     "@parcel/watcher": "^2.5.6",
     "@pierre/diffs": "^1.0.10",
-    "@vscode/ripgrep": "^1.15.11",
+    "@vscode/ripgrep": "^1.18.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.15.0",
     "@xterm/addon-web-links": "^0.11.0",
@@ -122,6 +123,14 @@
     "seti-icons": "0.0.4",
     "yauzl": "^3.3.0",
     "yazl": "^3.3.1"
+  },
+  "optionalDependencies": {
+    "@vscode/ripgrep-darwin-arm64": "1.18.0",
+    "@vscode/ripgrep-darwin-x64": "1.18.0",
+    "@vscode/ripgrep-linux-arm64": "1.18.0",
+    "@vscode/ripgrep-linux-x64": "1.18.0",
+    "@vscode/ripgrep-win32-arm64": "1.18.0",
+    "@vscode/ripgrep-win32-x64": "1.18.0"
   },
   "pnpm": {
     "overrides": {
@@ -147,7 +156,6 @@
     },
     "onlyBuiltDependencies": [
       "@parcel/watcher",
-      "@vscode/ripgrep",
       "electron",
       "electron-winstaller",
       "esbuild",

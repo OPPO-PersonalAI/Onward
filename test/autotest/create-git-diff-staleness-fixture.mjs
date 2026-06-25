@@ -23,9 +23,72 @@
 //     output, so we do not normalise inside this script.
 
 import { execFileSync } from 'child_process'
-import { mkdirSync, writeFileSync, rmSync } from 'fs'
+import { mkdirSync, writeFileSync, rmSync, renameSync, readdirSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
+
+// Windows note: under EDR/AV a freshly-written git tree (or a prior suite's
+// lingering git/electron handle on the shared runtime/ dir) can briefly lock
+// files, so rmSync throws EPERM/EBUSY/EACCES. The lock is transient — the
+// scanner releases within ~1 s — so retry with linear backoff before giving up.
+// This is the fixture-builder analogue of the runner-side robust_rm helper.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+function robustRmSync(target, { retries = 10, baseDelayMs = 100 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(target, { recursive: true, force: true })
+      return
+    } catch (err) {
+      const code = err && err.code
+      const transient =
+        code === 'EPERM' || code === 'EBUSY' || code === 'ENOTEMPTY' || code === 'EACCES'
+      if (!transient) throw err
+      if (attempt >= retries) {
+        // Last resort (Windows): under FULL-SUITE EDR pressure a lingering
+        // git/electron/AV handle from a PRIOR group-runner (the three GDS group
+        // suites share this one runtime/ path) can hold the tree open past the
+        // ~5.5 s retry window, so rmSync never wins. We usually cannot DELETE a dir
+        // with a locked file inside, but on NTFS we CAN rename the dir aside (it is
+        // just a directory-entry rename; the stale handles keep pointing at the
+        // renamed inode), freeing the canonical path for a fresh build. The husk is
+        // swept best-effort here and on the next run; the runner EXIT trap + the
+        // orchestrator's __autotest_/runtime sweep are the final backstop.
+        const aside = `${target}.stale-${process.pid}-${attempt}`
+        renameSync(target, aside) // if this also throws, let it propagate — genuinely wedged
+        try {
+          rmSync(aside, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+        } catch {
+          // husk still locked — leave it; sweepStaleHusks() removes it next run
+        }
+        return
+      }
+      // Linear backoff: 100, 200, … up to ~5.5 s total — outlasts a transient scan lock.
+      sleepSync(baseDelayMs * (attempt + 1))
+    }
+  }
+}
+
+// Best-effort removal of `runtime.stale-*` husks left by a prior rename-aside on a
+// locked tree. Never throws: a husk still held open is simply skipped (it will be
+// retried on a later run once its handle is released).
+function sweepStaleHusks(parentDir, baseName) {
+  let entries
+  try {
+    entries = readdirSync(parentDir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.name.startsWith(`${baseName}.stale-`)) continue
+    try {
+      rmSync(join(parentDir, entry.name), { recursive: true, force: true, maxRetries: 2, retryDelay: 150 })
+    } catch {
+      // still locked — leave for a future run
+    }
+  }
+}
 
 // Match the convention established by `test/autotest/create-nested-git-submodule-fixture.mjs`:
 // fixtures live under `test/autotest/fixtures/<suite>/runtime/` so developers can inspect
@@ -78,7 +141,8 @@ function addSubmodule(parent, source, target) {
 
 // Wipe-and-recreate so test runs don't inherit a half-baked previous state.
 mkdirSync(fixtureRoot, { recursive: true })
-rmSync(runtimeRoot, { recursive: true, force: true })
+sweepStaleHusks(fixtureRoot, 'runtime') // clear any rename-aside husks from prior locked runs
+robustRmSync(runtimeRoot)
 mkdirSync(runtimeRoot, { recursive: true })
 
 const tempRoot = runtimeRoot
@@ -172,7 +236,7 @@ git(uninitializedRoot, ['submodule', 'deinit', '-f', 'modules/sub'])
 // so the directory truly is "exists but not a repo" (deinit may leave a
 // pointer file depending on git version). `git submodule status` will still
 // report it from `.gitmodules`, but `getGitRepoMeta` must reject it.
-rmSync(join(uninitializedRoot, 'modules', 'sub'), { recursive: true, force: true })
+robustRmSync(join(uninitializedRoot, 'modules', 'sub'))
 mkdirSync(join(uninitializedRoot, 'modules', 'sub'), { recursive: true })
 
 const manifest = {

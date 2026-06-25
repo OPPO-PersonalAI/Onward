@@ -66,7 +66,7 @@ function serializeError(error) {
 }
 
 async function waitForBrowserWebSocket(appLaunch) {
-  const deadline = Date.now() + 30000
+  const deadline = Date.now() + 90000 // EDR-tolerant CDP startup/target ceiling (was 30s); loop returns early on success
   let lastError = null
   while (Date.now() < deadline) {
     const { child, browserWebSocketPromise } = appLaunch
@@ -135,7 +135,7 @@ async function createCdpConnection(webSocketUrl) {
 }
 
 async function waitForPageTarget(connection, child) {
-  const deadline = Date.now() + 30000
+  const deadline = Date.now() + 90000 // EDR-tolerant CDP startup/target ceiling (was 30s); loop returns early on success
   let lastTargets = []
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) {
@@ -313,7 +313,7 @@ function waitForModifiedExpression(repoDir) {
 
 async function waitForApiLock(userDataDir) {
   const lockPath = join(userDataDir, 'onward-api.lock')
-  const deadline = Date.now() + 30000
+  const deadline = Date.now() + 90000 // EDR-tolerant CDP startup/target ceiling (was 30s); loop returns early on success
   let lastError = null
   while (Date.now() < deadline) {
     try {

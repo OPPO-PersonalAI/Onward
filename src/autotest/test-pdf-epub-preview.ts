@@ -46,6 +46,23 @@ function platformBuildDeleteCommand(filenames: string[]): string {
   return filenames.map(f => `rm -f '${f}'`).join(' && ')
 }
 
+// Write a small scratch marker file into the test's cwd. Must be platform-aware
+// like the copy/delete builders above: the previous raw `printf '%s' '…' > '…'`
+// is a POSIX-only idiom, and when the terminal shell is NOT bash (Windows
+// PowerShell/cmd) the single quotes around the redirect target are NOT stripped,
+// so the file is created with LITERAL quotes in its name (observed:
+// `'__autotest_pdf_epub_marker.txt'`). That quoted name then evades BOTH the
+// runner EXIT-trap sweep and the orchestrator sweep (both key on the unquoted
+// `__autotest_` prefix), leaking into the working tree. Explicitly invoking
+// PowerShell with Set-Content -LiteralPath (mirroring platformBuildCopyCommand)
+// guarantees a correctly-named file regardless of the terminal's default shell.
+function platformBuildWriteMarkerCommand(filename: string, content: string): string {
+  if (window.electronAPI.platform === 'win32') {
+    return `powershell -Command "Set-Content -LiteralPath '${filename}' -Value '${content}' -NoNewline"`
+  }
+  return `printf '%s' '${content}' > '${filename}'`
+}
+
 export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResult[]> {
   const { log, sleep, waitFor, assert, cancelled, terminalId, rootPath } = ctx
   const results: TestResult[] = []
@@ -67,7 +84,7 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
   // Prepare a scratch marker file first so we can reliably switch off the
   // PDF/EPUB view between assertions.
   await termExec(
-    `printf '%s' 'onward-autotest-marker' > '${TEST_MARKER_FILENAME}'`,
+    platformBuildWriteMarkerCommand(TEST_MARKER_FILENAME, 'onward-autotest-marker'),
     'marker:create'
   )
 

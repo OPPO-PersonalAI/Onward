@@ -1,6 +1,6 @@
 ---
 name: ow_full_regression_test
-description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts and failing-runner names. No analysis, no edits to fix contract failures. Environment / toolchain blockers that stop test cases from executing (missing interpreter or pnpm, absent node_modules, ABI mismatch, stale build artefacts, leftover processes, full disk) are auto-healed and the run retried — bounded per symptom — so every test case actually runs; this self-heal never edits source, test, or fixture files to flip a red assertion. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain.
+description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts, failing-runner names, and a cheap per-failure triage smell (timing/crash/flake — a signal, not analysis). No edits to fix contract failures. Environment / toolchain blockers that stop test cases from executing (missing interpreter or pnpm, absent node_modules, ABI mismatch, stale build artefacts, leftover processes, full disk) are auto-healed and the run retried — bounded per symptom — so every test case actually runs; this self-heal never edits source, test, or fixture files to flip a red assertion. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain.
 ---
 
 # ow_full_regression_test
@@ -8,10 +8,16 @@ description: Run the Onward full automated-test regression. Invoked explicitly b
 Three independent modes, picked explicitly by the user:
 
 - **Test mode** (default) — clean build → run regression → report
-  pass/fail counts. Stops there. No analysis, no edits.
+  pass/fail counts + a cheap per-failure "triage smell" (`⏱ timing/hang` /
+  `💥 crash` / `🔀 flake/drift`, from status + one crash-signature grep). Stops
+  there — the smell is an orientation signal, not analysis; no edits.
 - **Repair mode** (`--repair`) — work on the failures from the most
-  recent test run. Cluster → Plan Mode → fix → targeted verify →
-  final full pass.
+  recent test run. **Triage each failure (EDR timing flake → harden the
+  test by polling ground-truth; crash/hang → fix the product, often a
+  teardown-ordering bug; real drift → fix production)** → cluster by shared
+  root cause (a shifting failure set is ONE meta-bug — find the leverage
+  point, don't whack-a-mole) → Plan Mode → fix → targeted isolation verify →
+  final full pass (`--repeat 2` if any flake was repaired — passing once ≠ stable).
 - **Clean mode** (`--clean`) — wipe gitignored test artefacts and
   report the reclaim. No tests run, no fixes applied.
 
@@ -283,13 +289,30 @@ Read `summary.json` and report to the user:
    `status` is `FAIL` or `TIMEOUT`). Just names. No log excerpts,
    no theories.
 3. The full path to the run directory so the user can inspect it.
-4. If failures > 0, end with one line: "Run `--repair` to enter
+4. **A cheap one-line "triage smell" per failing runner** — a SIGNAL to help the
+   user decide whether `--repair` is worth it, NOT an analysis (it does not turn
+   Test mode into Repair mode). Derive it from the `status` already in
+   `summary.json` plus ONE bounded crash-signature grep:
+   - `status: TIMEOUT` → `⏱ timing/hang` — either an oversized/timing suite
+     (flake) or a genuine product hang; the 3–5-min red line in `--repair` decides.
+   - `status: FAIL` and its `logs/<suite>.log` matches a crash signature
+     (`Segmentation fault` / `Access violation` / `0xC0000005` / `STATUS_`) →
+     `💥 crash` — a product-stability bug, NOT a flake (fix the code, often a
+     teardown-ordering bug).
+   - `status: FAIL` otherwise → `🔀 flake/drift` — most likely an EDR timing flake
+     (passes in isolation, reads a stale/early state) or a real behaviour drift;
+     `--repair` triages which.
+   These tags are orientation only — never verdicts, and you must not act on them
+   in Test mode. (Full triage logic lives in Mode B § *Triage FIRST*.)
+5. If failures > 0, end with one line: "Run `--repair` to enter
    repair mode for these failures."
 
-**Do not** open `logs/<suite>.log`, do not search for assertion
-markers, do not group by root cause, do not enter Plan Mode, do not
-propose fixes. Test mode stops at "here's the score." The user picks
-the next move.
+**Do not** otherwise open `logs/<suite>.log` (the single crash-signature `grep`
+in point 4 is the ONLY permitted peek), do not search for assertion markers, do
+not excerpt logs, do not group by root cause, do not enter Plan Mode, do not
+propose fixes. The smell tags are a cheap orientation signal, not analysis — Test
+mode still stops at "here's the score, and what each failure smells like." The
+user picks the next move.
 
 ---
 
@@ -320,6 +343,71 @@ which require user confirmation before any edit:
    pinned.
 
 When in doubt: leave the test alone, fix production.
+
+### Triage FIRST: EDR flake vs crash vs real drift (hard-won field lessons)
+
+The "fix production, the test is ground truth" default above is correct for a
+genuine behaviour regression — but on this EDR/anti-malware Windows host (every
+process spawn is taxed 1.3–12.9 s) a **large fraction of failures are not product
+regressions at all** — they are *timing-design races in the test*, which legitimately
+fall under exception 1 above ("the test contains a verifiable bug"). So before you
+reach for the production code, classify each failure into one of three buckets, because
+each is fixed in an opposite way. (The full write-up lives in `docs/lessons.md`
+§ "EDR full-regression convergence" — read it before a repair pass.)
+
+**Bucket 1 — EDR / timing flake (a test-design race). The most common here. Fix the TEST.**
+Tells: it passes in isolation but flaked only in the full run; the assertion read a value
+that was *stale / empty / `-1`* (a single-shot read of async-populated state); the gate is
+a *latency / median / p95 / ratio* comparison; there is a *fixed `sleep(N)`* right before
+the assert; or a `TIMEOUT` that is "many fast operations summing", not "one operation
+hanging". The bug is the test's **timing assumption**, not the app. Fix = **poll the
+deterministic ground-truth outcome** (with a generous hang-detector ceiling; `waitFor`
+short-circuits on success so it never slows a healthy run) **instead of reading a
+stale/early/proxy snapshot**; gate *correctness*, measure *latency* non-gating (or
+N=3, pass-if-≥1-of-3). This is NOT "editing the test to go green" — you are removing a
+false timing assumption, and a genuinely broken final state still fails.
+  - *Beware the proxy-predicate trap*: `!isLoading()` is also true when the list is
+    momentarily EMPTY (nothing present ⇒ nothing loading). Fold the real
+    "present-and-settled" condition INTO the wait predicate.
+
+**Bucket 2 — Crash / segfault / genuine hang (product stability). Fix the PRODUCT CODE.**
+Tells: a native crash / `Segmentation fault` / `Access violation` / `0xC0000005`; an
+unhandled rejection; or ONE operation that genuinely takes minutes (a watcher that never
+quiesces, an unbounded retry, an O(n²) scan — see the existing § *Per-runner 5-minute
+budget* "3–5-minute red line"). This is a real bug; do NOT split or widen it away. Often
+it is a **resource-teardown ordering** bug: dispose the things that USE a resource before
+you free the resource (reverse-topological order) — e.g. dispose native subsystems that
+hold a `webContents` ref before `w.destroy()` frees it, else use-after-free → segfault.
+An un-reproducible crash is located by **which step it died on**: what trace/log got
+written vs. what did NOT is bisection signal; add **synchronous, crash-survivable
+breadcrumbs** (a `console.log`, captured in the runner log) rather than trusting a
+buffered perf-trace that is lost on a teardown crash.
+
+**Bucket 3 — Genuine product behaviour drift. Fix the PRODUCTION code (the default above).**
+The app's observable behaviour actually changed/regressed; the test is right. Proceed
+with the production-first hypothesis loop.
+
+**The shifting failure set is ONE meta-bug, not N.** If repeated runs fail *different*
+suites each time, that drift is itself the diagnosis: a single shared, *probabilistic*
+root cause (usually Bucket 1), NOT many independent bugs. Do not fix suite-by-suite —
+**find the leverage point**: most suites' readiness waits funnel through ONE shared
+helper (the autotest `waitFor` built in `ProjectEditor.tsx`; the common
+`waitForGitDiffOpen` / `waitForImagePreview` / … all delegate to it). One change at that
+confluence can turn many suites green at once. When you catch yourself making the same
+fix in N places, stop and look for the upstream chokepoint.
+
+**Before any GLOBAL knob/scale, check its effect direction per sub-group.** Scaling a
+timeout is free for waits that SUCCEED (they short-circuit) but it *multiplies* the cost
+of waits that habitually TIME OUT — so a blanket scale can itself CAUSE a `TIMEOUT`
+(observed: scaling a never-converging two-task loop pushed a runner past its budget).
+The same knob can help one suite and break another; per the existing TIMEOUT rule, the
+answer is fix-the-program or trim/split, never just widen.
+
+**Passing once ≠ stable.** A single green full pass on a timing-sensitive regression can
+be a calm-EDR luck window — with N≈80 suites in series, even a 0.5 % per-suite flake rate
+gives only ~66 % all-green per run, ~44 % for two in a row (`(1-p)^N`). For any repair
+whose failures were Bucket 1, the final confirmation (Step 6) must be **`--repeat 2`/`3`
+and require CONSECUTIVE green** before declaring done. Never report premature success.
 
 ### Hard precondition
 
@@ -400,7 +488,13 @@ ProjectEditor markdown outline restore, Git Diff submodule discovery)
 into one cluster. Order clusters by the size of the script set they
 cover (largest first): fixing a shared root cause early often turns
 several runners green in one cycle and keeps the verify-rebuild count
-down. Write the clusters into `repair-progress.json`.
+down. Write the clusters into `repair-progress.json`, and **tag each cluster with
+its triage bucket** (`flake` / `crash` / `drift`, per § *Triage FIRST* above) so the
+fix loop applies the right kind of fix. Special case: if the failing suites span
+*unrelated* subsystems yet each shows Bucket-1 flake tells (passed in isolation,
+stale/empty read, latency gate, fixed sleep), do not treat them as N clusters —
+suspect ONE shared timing root cause and look for the leverage point (the shared
+`waitFor` / readiness helper) before fixing anything per-suite.
 
 If a failure log is opaque, use the Explore subagent (or Grep / Read
 directly) to walk the suspect code path before forming a hypothesis;
@@ -482,10 +576,21 @@ could not see:
 python3 test/autotest/run-full-regression.py --build
 ```
 
+**If ANY repaired cluster was triaged Bucket-1 (EDR / timing flake)**, a single
+green full pass is not sufficient evidence — it can be a calm-EDR luck window
+(`(1-p)^N`; see § *Triage FIRST*). For that case run the final confirmation as
+**`--repeat 2`** (the orchestrator builds once on iter 1, reuses it for the rest)
+and require it to report `STABLE` (every iteration green) before declaring done:
+
+```bash
+python3 test/autotest/run-full-regression.py --build --repeat 2
+```
+
 Record the new run directory in `final_full_run`.
 
 - **All green** (`failed: 0`, ignoring scripts owned by `deferred`
-  clusters which will still show red): set `final_status` to
+  clusters which will still show red — and `STABLE` across all iterations if you
+  used `--repeat`): set `final_status` to
   `all_green` and deliver the four-question task-completion report
   required by `CLAUDE.md`. End with: "Files staged: …, ready to
   commit when you are." DO NOT run `git commit`.
