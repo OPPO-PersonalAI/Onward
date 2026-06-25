@@ -2,3 +2,13 @@
 # regenerated outputs from different platforms (macOS / Linux / Windows)
 # don't ping-pong between CRLF and LF when committed.
 ThirdPartyNotices.txt text eol=lf
+
+# Force LF for the compiled Change Log assets and their source Markdown. The
+# changelog compiler (scripts/compile-changelog.js) runs on every build and on
+# Windows writes CRLF, which would otherwise show as a spurious modification of
+# every HTML file + index.json after each build. Pinning eol=lf makes git store
+# LF and normalise the working tree's CRLF away when diffing, so these files are
+# byte-stable across macOS / Linux / Windows. Same rationale as the bundle above.
+resources/changelog/**/*.html  text eol=lf
+resources/changelog/index.json text eol=lf
+resources/changelog/**/*.md    text eol=lf
