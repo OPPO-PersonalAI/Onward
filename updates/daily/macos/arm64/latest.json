@@ -1,12 +1,12 @@
 {
   "channel": "daily",
-  "version": "2.1.0-daily.20260601.1",
-  "tag": "v2.1.0-daily.20260601.1",
+  "version": "2.1.0-daily.20260629.1",
+  "tag": "v2.1.0-daily.20260629.1",
   "platform": "macos",
   "arch": "arm64",
-  "artifactName": "Onward.2-v2.1.0-daily.20260601.1-macos-arm64.zip",
-  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260601.1/Onward.2-v2.1.0-daily.20260601.1-macos-arm64.zip",
-  "sha256": "24cc2232b0bb8d232e9198727ad283d0e2fec04ac17c901308c05fd340854388",
-  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260601.1\n\nChanges since `v2.1.0-daily.20260530.1`.\n\n## Bug Fixes\n- Fixed high idle CPU usage on Windows caused by the terminal repeatedly flipping the working-directory path separator.\n",
-  "publishedAt": "2026-06-01T07:29:15.052Z"
+  "artifactName": "Onward.2-v2.1.0-daily.20260629.1-macos-arm64.zip",
+  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260629.1/Onward.2-v2.1.0-daily.20260629.1-macos-arm64.zip",
+  "sha256": "24e068996b56f2bd303ea4c8c543dd845f33196327a0396d5eacda0cfca644aa",
+  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260629.1\n\nChanges since `v2.1.0-daily.20260601.1`.\n\n## New Features\n- Add perf optimization master plan + bottleneck recon report\n- Harmonize performance report HTML navigation\n- Cut EDR git-spawn cost (prewarm + adaptive reconcile backoff + op-aggregation) + regression timing monitor\n- De-flake PSQL-28 file-copy-menu-visible\n- Open local HTML files in the in-app browser + zoom & auto-refresh\n- Add ow_build clean-slate/dev build skill + --clear-build regression opt-in + dual-platform CLAUDE.md rule\n\n## Bug Fixes\n- 5-state badge, watcher teardown crash fix, exhaustive matrix autotest\n- Fix Task rename lost after auto-update restart\n- Seal single-terminal transient WebGL atlas-merge corruption\n- Discover no-.gitmodules gitlinks so nested repos show in Diff/History\n- Repair the 10 failing regression runners (root-caused as product bugs vs stale tests)\n- Eliminate environment-caused regression failures at the source\n- Harden Windows/EDR autotest suite — program bug fixes + EDR-robust test design + class-2 splits\n- Harden Windows/EDR full regression to STABLE 2/2 + fix quit-path teardown segfault\n- Add --background mode + repair loop & cardinal rule to ow_full_regression_test\n- Repair clean-slate dev build — macOS Electron health check + @parcel/watcher native packaging\n- Canonicalize nested-submodule fixture temp root (macOS /var->/private/var path mismatch)\n",
+  "publishedAt": "2026-06-29T03:45:09.208Z"
 }
