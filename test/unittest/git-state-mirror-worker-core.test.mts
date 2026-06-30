@@ -410,3 +410,27 @@ test('computeMirrorDelta surfaces a changed-resource fingerprint when status sha
   assert.equal(delta.status, undefined)
   assert.equal(delta.files, undefined)
 })
+
+test('computeMirrorDelta surfaces a ref-only move (refsDigest changed) as a minimal NON-EMPTY delta — the push freshness signal', () => {
+  // A `git push` advances origin/<branch> without moving HEAD: branchOid / status
+  // / files are byte-identical, only refsDigest moves. The delta MUST carry
+  // refsDigest so the worker-entry short-circuit (`Object.keys(delta).length <= 1`)
+  // passes and a mirror-update broadcasts → the History cache re-keys. Without
+  // this, the ref move would be swallowed (the original phantom-fork-after-push bug).
+  const prev = { ...stateWithGen('/repo', 'clean', 1), refsDigest: 'refs-pre' }
+  const next = { ...stateWithGen('/repo', 'clean', 1), refsDigest: 'refs-post' }
+  const delta = computeMirrorDelta(prev, next)
+  assert.equal(delta.refsDigest, 'refs-post')
+  // Unchanged dimensions must NOT bloat the delta.
+  assert.equal(delta.status, undefined)
+  assert.equal(delta.files, undefined)
+  assert.equal((delta as Partial<MirrorState>).branchOid, undefined)
+  // Non-empty beyond capturedAt → the broadcast fires.
+  assert.ok(Object.keys(delta).length > 1)
+})
+
+test('computeMirrorDelta seeds refsDigest on the first snapshot (prev === null)', () => {
+  const next = { ...stateWithGen('/repo', 'clean', 1), refsDigest: 'refs-seed' }
+  const delta = computeMirrorDelta(null, next)
+  assert.equal(delta.refsDigest, 'refs-seed')
+})

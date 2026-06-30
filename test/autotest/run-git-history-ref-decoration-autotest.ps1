@@ -18,8 +18,8 @@ if (-not $AppBin) {
 
 if (-not $LogFile) {
   $RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
-$LogFile = Join-Path $RepoRoot "traces/test-logs/onward-git-history-multi-terminal-scope-autotest.log"
-New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
+  $LogFile = Join-Path $RepoRoot "traces/test-logs/onward-git-history-ref-decoration-autotest.log"
+  New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }
 
 if (-not $TargetRepo) {
@@ -35,9 +35,9 @@ if (Test-Path $LogFile) {
   Remove-Item $LogFile -Force
 }
 
-$UserDataDir = Join-Path $env:TEMP ("onward-ghms-userdata-" + [guid]::NewGuid().ToString("N"))
+$UserDataDir = Join-Path $env:TEMP ("onward-refdec-userdata-" + [guid]::NewGuid().ToString("N"))
 $ResultsDir = Join-Path $RootDir "test\autotest\results"
-$FixtureBase = Join-Path $ResultsDir ("git-history-scope-fixtures-" + [guid]::NewGuid().ToString("N"))
+$FixtureBase = Join-Path $ResultsDir ("git-history-ref-decoration-fixtures-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $ResultsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $UserDataDir, $FixtureBase | Out-Null
 
@@ -45,7 +45,7 @@ try {
   $env:ONWARD_DEBUG = "1"
   $env:ONWARD_USER_DATA_DIR = $UserDataDir
   $env:ONWARD_AUTOTEST = "1"
-  $env:ONWARD_AUTOTEST_SUITE = "git-history-multi-terminal-scope"
+  $env:ONWARD_AUTOTEST_SUITE = "git-history-ref-decoration"
   $env:ONWARD_AUTOTEST_CWD = $TargetRepo
   $env:ONWARD_AUTOTEST_FIXTURE_EXTRA = $FixtureBase
   $env:ONWARD_AUTOTEST_EXIT = "1"
@@ -59,26 +59,20 @@ try {
   $content = Get-Content $LogFile -Raw
 
   if ($content -match "\[AutoTest\] FAIL") {
-    Write-Host "Git History multi-terminal scope autotest FAILED" -ForegroundColor Red
+    Write-Host "Git History ref-decoration autotest FAILED" -ForegroundColor Red
     Select-String -Path $LogFile -Pattern "\[AutoTest\] FAIL" | ForEach-Object { Write-Host $_.Line -ForegroundColor Red }
     exit 1
   }
 
-  if ($content -notmatch "GHMS-10-clear-stale-repo-state") {
-    Write-Host "Missing GHMS-10-clear-stale-repo-state result. Log: $LogFile" -ForegroundColor Yellow
-    Get-Content $LogFile -Tail 120
+  # Sentinel: the suite must have run through the unconditional tag steps (RD-07 is
+  # the last unconditional assertion before the optional worktree capstone).
+  if ($content -notmatch "RD-07-tag-delete-clears") {
+    Write-Host "Missing RD-07-tag-delete-clears result (suite did not run to completion). Log: $LogFile" -ForegroundColor Yellow
+    Get-Content $LogFile -Tail 160
     exit 1
   }
 
-  # Sentinel: the ref-only-move (push) decoration-freshness step must have run
-  # (it is the regression lock for the refsDigest cache-key fix).
-  if ($content -notmatch "GHMS-16-ref-move-refreshes-decoration-no-phantom-fork") {
-    Write-Host "Missing GHMS-16-ref-move-refreshes-decoration-no-phantom-fork result. Log: $LogFile" -ForegroundColor Yellow
-    Get-Content $LogFile -Tail 120
-    exit 1
-  }
-
-  Write-Host "Git History multi-terminal scope autotest PASSED" -ForegroundColor Green
+  Write-Host "Git History ref-decoration autotest PASSED" -ForegroundColor Green
   Write-Host "  Log: $LogFile"
 }
 finally {

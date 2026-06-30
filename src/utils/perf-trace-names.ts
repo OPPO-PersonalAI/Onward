@@ -579,6 +579,12 @@ export const PERF_TRACE_EVENT = {
   WORKER_GIT_STATE_MIRROR_WATCHER_POLL: 'worker:git-state-mirror.watcher-poll',
   WORKER_GIT_STATE_MIRROR_WATCHER_SUSPENDED_PROBE: 'worker:git-state-mirror.watcher-suspended-probe',
   WORKER_GIT_STATE_MIRROR_CHANGE_FINGERPRINT: 'worker:git-state-mirror.change-fingerprint',
+  // A ref-only change (push/fetch advancing origin/<branch> without moving HEAD)
+  // flipped refsDigest, the History list cache's second freshness signal. ph='i'.
+  // Off-hot-path → diagnostic coverage: a future "phantom fork after push is back"
+  // trace shows whether the mirror surfaced the ref move (and thus whether the
+  // History cache re-keyed) vs. swallowed it like the original ref-blind bug did.
+  WORKER_GIT_STATE_MIRROR_REFS_DIGEST_CHANGED: 'worker:git-state-mirror.refs-digest-changed',
   WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE: 'worker:git-state-mirror.recompute-status-done',
   // Always-on reconcile heartbeat (parallel to the watcher; see
   // docs/git-status-reconcile-design.md). reconcile-tick fires each worker-local

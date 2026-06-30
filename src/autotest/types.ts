@@ -286,7 +286,7 @@ export interface PromptSenderDebugApi {
 export interface GitHistoryDebugApi {
   isOpen: () => boolean
   getCommitCount: () => number
-  getCommits?: () => Array<{ sha: string; summary: string }>
+  getCommits?: () => Array<{ sha: string; summary: string; refs?: string }>
   getSelectedShas: () => string[]
   getFiles: () => Array<{ filename: string; status: string }>
   getSelectedFile: () => { filename: string } | null

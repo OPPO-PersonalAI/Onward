@@ -52,6 +52,14 @@ export interface RepoPrewarmRequest {
    * the History prewarm is skipped until the first mirror-update carries it.
    */
   branchOid?: string
+  /**
+   * The mirror snapshot's refsDigest — the History cache's SECOND freshness key
+   * (a ref-only move: push/fetch advancing origin/<branch> with HEAD unchanged).
+   * Threaded through so the prewarmed key matches the on-demand handler's key
+   * exactly (both read the same snapshot); a ref-only move re-warms via the
+   * dedup key below. Undefined on a cold attach → `'norefs'` fallback.
+   */
+  refsDigest?: string
   reason: RepoPrewarmReason
 }
 
@@ -73,7 +81,7 @@ export interface RepoPrewarmDeps {
    * known branchOid. Optional so callers without History wiring can omit it.
    * Must never reject (the coordinator guards it anyway).
    */
-  prewarmHistory?: (cwd: string, repoRoot: string | null, branchOid: string) => Promise<void>
+  prewarmHistory?: (cwd: string, repoRoot: string | null, branchOid: string, refsDigest: string | undefined) => Promise<void>
   /** Emit a perf/diagnostic trace event. No-op in tests that don't assert on traces. */
   trace?: (event: string, payload: Record<string, unknown>) => void
   /**
@@ -172,11 +180,14 @@ export class RepoPrewarmCoordinator {
   }
 
   private async warmHistory(req: RepoPrewarmRequest): Promise<void> {
-    const { cwd, repoRoot, branchOid } = req
+    const { cwd, repoRoot, branchOid, refsDigest } = req
     // History caches key on branchOid; without it we cannot build a freshness-
     // correct key, so skip (a later mirror-update will carry branchOid).
     if (!branchOid || !this.deps.prewarmHistory) return
-    const key = `${cwd}::${branchOid}`
+    // Dedup on cwd::branchOid::refsDigest so a ref-only move (push/fetch → new
+    // refsDigest, same HEAD) re-warms the page the on-demand handler will request,
+    // instead of being deduped away as already-warm.
+    const key = `${cwd}::${branchOid}::${refsDigest ?? 'norefs'}`
     if (this.historyPrewarmedKeys.has(key)) return
     this.historyPrewarmedKeys.add(key)
     // Yield to any foreground History/Diff open racing the attach / branch
@@ -184,7 +195,7 @@ export class RepoPrewarmCoordinator {
     if (this.attachDelayMs > 0) await this.sleep(this.attachDelayMs)
     // Guarded: a History prewarm failure must not abort or surface — the UI
     // falls back to a cache-miss recompute on open.
-    await this.deps.prewarmHistory(cwd, repoRoot ?? null, branchOid).catch(() => {})
+    await this.deps.prewarmHistory(cwd, repoRoot ?? null, branchOid, refsDigest).catch(() => {})
   }
 
   /**
@@ -238,9 +249,9 @@ export class RepoPrewarmCoordinator {
     return this.diffPrewarmedCwds.has(cwd)
   }
 
-  /** Test / introspection hook — has (cwd, branchOid)'s History already been prewarmed? */
-  hasPrewarmedHistory(cwd: string, branchOid: string): boolean {
-    return this.historyPrewarmedKeys.has(`${cwd}::${branchOid}`)
+  /** Test / introspection hook — has (cwd, branchOid, refsDigest)'s History already been prewarmed? */
+  hasPrewarmedHistory(cwd: string, branchOid: string, refsDigest?: string): boolean {
+    return this.historyPrewarmedKeys.has(`${cwd}::${branchOid}::${refsDigest ?? 'norefs'}`)
   }
 
   /** Drop all dedup state. Called on bridge dispose so a fresh session re-warms. */

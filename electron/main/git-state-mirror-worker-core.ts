@@ -361,6 +361,7 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
     out.repoName = next.repoName
     out.branch = next.branch
     out.branchOid = next.branchOid
+    out.refsDigest = next.refsDigest
     out.status = next.status
     out.files = next.files
     out.repos = next.repos
@@ -372,6 +373,12 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
   if (prev.repoName !== next.repoName) out.repoName = next.repoName
   if (prev.branch !== next.branch) out.branch = next.branch
   if (prev.branchOid !== next.branchOid) out.branchOid = next.branchOid
+  // refsDigest is the History-cache freshness signal for ref-only moves (push /
+  // fetch advancing origin/<branch> without moving HEAD). Surfacing it here makes
+  // such a move a non-empty delta, so the mirror-update broadcasts (otherwise the
+  // ref-blind changeFingerprint would short-circuit it) and getLatest carries the
+  // new digest into the next History cache key.
+  if (prev.refsDigest !== next.refsDigest) out.refsDigest = next.refsDigest
   if (prev.status !== next.status) out.status = next.status
   if (prev.submodulesLoading !== next.submodulesLoading) out.submodulesLoading = next.submodulesLoading
   if (!sameFileList(prev.files, next.files)) out.files = next.files

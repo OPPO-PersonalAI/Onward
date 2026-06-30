@@ -545,9 +545,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     // per-commit `git diff` spawns — the dominant History-prewarm EDR tax). Both
     // run in the low `::history-precompute` lane; the batch keys each commit
     // exactly as the renderer's single-commit click does, so a click is an L9 HIT.
-    prewarmHistory: async (cwd, repoRoot, branchOid) => {
+    prewarmHistory: async (cwd, repoRoot, branchOid, refsDigest) => {
       const startedMs = Date.now()
-      const list = await gitIpcWorkerClient.getHistory(cwd, 50, 0, branchOid, true)
+      // MUST pass the SAME refsDigest the on-demand handler injects (both read the
+      // same getLatest snapshot) or the prewarmed key (…::norefs) is one the
+      // renderer never requests → every open misses. background=true → low lane.
+      const list = await gitIpcWorkerClient.getHistory(cwd, 50, 0, branchOid, refsDigest, true)
       if (!list?.success) return
       const batch = await gitIpcWorkerClient.prewarmHistoryDiffs(cwd, branchOid, 50).catch(() => ({ warmed: 0 }))
       performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_HISTORY_DONE, {
@@ -1851,11 +1854,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Get Git history list
   ipcMain.handle(IPC.GIT_GET_HISTORY, async (_, cwd: string, options?: { limit?: number; skip?: number }) => {
-    // Inject branchOid from the GitStateMirror snapshot (no extra git spawn) as
-    // the L8 list cache's freshness key, so a prewarmed first page is a HIT and
-    // a new commit (branchOid moved) structurally misses → fresh recompute.
-    const branchOid = gitStateMirrorRouter.getLatest(cwd)?.branchOid
-    return await gitIpcWorkerClient.getHistory(cwd, options?.limit, options?.skip, branchOid)
+    // Inject branchOid + refsDigest from the GitStateMirror snapshot (no extra git
+    // spawn) as the L8 list cache's two freshness keys: a new commit moves
+    // branchOid; a ref-only move (push/fetch advancing origin/<branch> with HEAD
+    // unchanged) moves refsDigest. Both structurally miss → fresh recompute, so a
+    // prewarmed first page is a HIT and the `%D` decorations never go stale.
+    const snapshot = gitStateMirrorRouter.getLatest(cwd)
+    return await gitIpcWorkerClient.getHistory(cwd, options?.limit, options?.skip, snapshot?.branchOid, snapshot?.refsDigest)
   })
 
   // Get Git history diff (range + file)

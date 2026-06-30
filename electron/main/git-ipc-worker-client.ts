@@ -133,18 +133,21 @@ class GitIpcWorkerClient {
     limit?: number,
     skip?: number,
     branchOid?: string,
+    refsDigest?: string,
     background?: boolean
   ): Promise<GitHistoryResult> {
-    // branchOid (supplied by main from the GitStateMirror snapshot) is part of
-    // the worker-side L8 list cache key; carry it through and into the dedupe
-    // key so a prewarm and a foreground open at the same HEAD coalesce. The
-    // background History prewarm runs in the low `::history-precompute` lane.
+    // branchOid + refsDigest (both supplied by main from the GitStateMirror
+    // snapshot) are the worker-side L8 list cache's two freshness signals; carry
+    // them through and into the dedupe key so a prewarm and a foreground open at
+    // the same HEAD + ref state coalesce, and a ref-only move (push/fetch) is a
+    // structural miss. The background prewarm runs in the low
+    // `::history-precompute` lane.
     const bg = background === true
-    return this.enqueueWorkerTask<GitHistoryResult>('getHistory', { cwd, limit, skip, branchOid }, {
+    return this.enqueueWorkerTask<GitHistoryResult>('getHistory', { cwd, limit, skip, branchOid, refsDigest }, {
       priority: bg ? 'low' : 'normal',
       repoKey: historyLaneKey(cwd, bg),
       repoConcurrencyLimit: 1,
-      dedupeKey: `git-ipc:history:${resolve(cwd)}:${branchOid ?? 'nohead'}:${limit ?? 50}:${skip ?? 0}`,
+      dedupeKey: `git-ipc:history:${resolve(cwd)}:${branchOid ?? 'nohead'}:${refsDigest ?? 'norefs'}:${limit ?? 50}:${skip ?? 0}`,
       label: bg ? 'worker git history (precompute)' : 'worker git history'
     })
   }

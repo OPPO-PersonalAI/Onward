@@ -8,10 +8,14 @@
  * `GitDiffRequestCacheController` the Diff list uses (TTL + maxEntries + in-flight
  * dedupe + force invalidation). Three layers:
  *
- *   - L8 History LIST  — `getGitHistory`. Key `repoRoot::branchOid::limit::skip`.
- *     branchOid is the freshness signal: a new commit / amend / checkout moves
- *     HEAD, producing a NEW key, so the prior page just ages out. Caller (main)
- *     supplies branchOid from the GitStateMirror snapshot — no extra git spawn.
+ *   - L8 History LIST  — `getGitHistory`. Key
+ *     `repoRoot::branchOid::refsDigest::limit::skip`. TWO freshness signals, both
+ *     from the GitStateMirror snapshot (no extra git spawn): `branchOid` moves on
+ *     commit / amend / checkout (HEAD moved); `refsDigest` moves on a ref-only
+ *     change — `git push` / `git fetch` advancing origin/<branch> WITHOUT moving
+ *     HEAD — so the cached `%D` branch/remote decorations re-key instead of going
+ *     stale (the "phantom fork after push" bug, where origin/<branch> kept being
+ *     drawn at its pre-push commit for the 30-min TTL). A new key just ages out.
  *
  *   - L9 commit DIFF   — `getGitHistoryDiff`. Key `repoRoot::<stable options>`.
  *     IMMUTABLE: a committed diff never changes, so this only evicts on capacity
@@ -73,18 +77,23 @@ const HISTORY_FILE_CONTENT_MAX_ENTRIES = 128
 // is a HIT on the user's click (the proven Diff-list-prewarm contract).
 
 /**
- * L8 list key. `branchOid` is the third freshness signal; `'nohead'` is the
- * fallback when the caller could not supply it (rare — all UI/prewarm callers
- * route through main, which reads branchOid from the mirror). With `'nohead'`
- * the entry still works but relies on the TTL rather than structural freshness.
+ * L8 list key. TWO freshness signals: `branchOid` (HEAD moved) and `refsDigest`
+ * (a ref-only move — push/fetch — that left HEAD put). `'nohead'` / `'norefs'`
+ * are the fallbacks when the caller could not supply one (rare — all UI/prewarm
+ * callers route through main, which reads both from the mirror snapshot). With a
+ * fallback the entry still works but relies on the TTL rather than structural
+ * freshness for that dimension. Prewarm MUST pass the same `refsDigest` as the
+ * on-demand handler (both read the same `getLatest` snapshot) or the prewarmed
+ * key would never be requested and every History open would miss.
  */
 export function buildHistoryListCacheKey(
   cwd: string,
   branchOid: string | undefined,
+  refsDigest: string | undefined,
   limit: number,
   skip: number
 ): string {
-  return `${resolve(cwd)}::${branchOid ?? 'nohead'}::${limit}::${skip}`
+  return `${resolve(cwd)}::${branchOid ?? 'nohead'}::${refsDigest ?? 'norefs'}::${limit}::${skip}`
 }
 
 /** L9 commit-diff key. Immutable per (cwd, options) — a committed diff never changes. */

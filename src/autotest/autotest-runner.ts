@@ -60,6 +60,7 @@ import { testGlobalSearch } from './test-global-search'
 import { testFileIndexCacheUi } from './test-file-index-cache-ui'
 import { testSettingsUpdate } from './test-settings-update'
 import { testGitHistoryMultiTerminalScope } from './test-git-history-multi-terminal-scope'
+import { testGitHistoryRefDecoration } from './test-git-history-ref-decoration'
 import { testFileWatch } from './test-file-watch'
 import { testPreviewPositionRestore } from './test-preview-position-restore'
 import { testPreviewSearch } from './test-preview-search'
@@ -535,6 +536,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitHistoryMultiTerminalScope(ctx)
       collectSuiteResults('GitHistoryMultiTerminalScope', results)
       await ctx.reopenProjectEditor('phase3.5-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-history-ref-decoration')) {
+      log('phase3.6:begin')
+      await ctx.reopenProjectEditor('phase3.6-setup')
+      await sleep(300)
+      const results = await testGitHistoryRefDecoration(ctx)
+      collectSuiteResults('GitHistoryRefDecoration', results)
+      await ctx.reopenProjectEditor('phase3.6-cleanup')
       await sleep(500)
     }
 

@@ -95,7 +95,8 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
         cwd,
         Number(payload.limit) || undefined,
         Number(payload.skip) || undefined,
-        typeof payload.branchOid === 'string' ? payload.branchOid : undefined
+        typeof payload.branchOid === 'string' ? payload.branchOid : undefined,
+        typeof payload.refsDigest === 'string' ? payload.refsDigest : undefined
       )
     case 'getHistoryDiff':
       return await getGitHistoryDiff(cwd, payload.options as GitHistoryDiffOptions)

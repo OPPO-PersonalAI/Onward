@@ -46,6 +46,7 @@ import {
   type MirrorWorkerEntryCore
 } from './git-state-mirror-worker-core'
 import { buildMirrorChangeFingerprint } from './git-state-mirror-change-fingerprint'
+import { buildMirrorRefsDigest } from './git-state-mirror-refs-digest'
 import {
   GitReconcileScheduler,
   RECONCILE_FOCUSED_INTERVAL_MS,
@@ -414,12 +415,17 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       missingCount: changeFingerprint.missingCount,
       durationMs: changeFingerprint.durationMs
     })
+    // Spawn-free ref digest (sibling freshness signal to branchOid). gitDir is
+    // resolved from the same rev-parse as repoRoot; on a non-worktree checkout
+    // it IS the repo's .git, on a linked worktree the helper resolves commondir.
+    const refsDigest = meta.gitDir ? (await buildMirrorRefsDigest(meta.gitDir)).digest : undefined
     return {
       cwd,
       repoRoot: meta.repoRoot,
       repoName,
       branch: parsed.branch,
       branchOid: parsed.branchOid ?? undefined,
+      refsDigest,
       status: parsed.status,
       files: parsed.files,
       capturedAt,
@@ -510,6 +516,16 @@ async function runRecompute(
   if (!delta) return false // stale, detached, or no-op
   // Short-circuit: only emit when delta has actual fields beyond capturedAt.
   if (Object.keys(delta).length <= 1) return false
+  // Diagnostic breadcrumb: a ref-only move (push/fetch) surfaced through the
+  // delta. Emitted here (not in the pure computeMirrorDelta, which is unit-tested
+  // without a tracer) right before the broadcast that re-keys the History cache.
+  if (delta.refsDigest !== undefined) {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_REFS_DIGEST_CHANGED, {
+      cwd: entry.cwd,
+      repoRoot: next.repoRoot,
+      branchOid: next.branchOid ?? null
+    })
+  }
   emit({ kind: 'mirror-update', cwd: entry.cwd, state: next, delta })
   return true
 }

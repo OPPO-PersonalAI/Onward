@@ -390,6 +390,55 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
       hideWhitespace: getHistoryApi()?.getHideWhitespace?.() ?? null
     })
 
+    // -----------------------------------------------------------------------
+    // GHMS-15/16 — ref-only move (push) refreshes the graph's `%D` decorations.
+    // Locks the refsDigest cache-key fix ("phantom fork after push"): a remote-
+    // tracking ref advancing WITHOUT moving HEAD must re-key the L8 History cache
+    // so origin/<branch> follows to the new commit instead of being drawn stale.
+    // branchOid is identical across both update-refs; only refsDigest moves.
+    // -----------------------------------------------------------------------
+    const REMOTE_DECORATION = 'origin/onward-test' // %D strips the refs/remotes/ prefix
+    const refsForSummary = (summary: string): string =>
+      getHistoryApi()?.getCommits?.().find((c) => c.summary === summary)?.refs ?? ''
+    // Re-fetch History (close → open → load reads the CURRENT refsDigest) until the
+    // expected decoration state appears. The mirror recompute that produces the new
+    // refsDigest can lag the shell `update-ref` under EDR, so re-trigger the open.
+    const waitForDecoration = async (summary: string, shouldContain: boolean): Promise<boolean> => {
+      const startedAt = performance.now()
+      while (performance.now() - startedAt < 45000 && !cancelled()) {
+        dispatchEscape()
+        await waitFor('phase3.5-refmove-close', () => !getHistoryApi() || !getHistoryApi()!.isOpen(), 4000)
+        window.dispatchEvent(new CustomEvent('git-history:open', { detail: { terminalId: terminalB } }))
+        const reloaded = await waitFor(
+          'phase3.5-refmove-reopen-loaded',
+          () => Boolean(getHistoryApi()?.isOpen() && getHistoryApi()!.getCommitCount() > 0 && !getHistoryApi()!.isLoading()),
+          30000
+        )
+        if (reloaded && refsForSummary(summary).includes(REMOTE_DECORATION) === shouldContain) return true
+        await sleep(800)
+      }
+      return false
+    }
+
+    // Seed origin/onward-test one commit BEHIND head (on "history base").
+    await writeAndSyncTerminal(terminalB, 'git update-ref refs/remotes/origin/onward-test HEAD~1\r', sleep)
+    const baseDecoratedBeforePush = await waitForDecoration('history base', true)
+    _assert('GHMS-15-remote-ref-decorates-base-before-push', baseDecoratedBeforePush, {
+      historyBaseRefs: refsForSummary('history base'),
+      historyHeadRefs: refsForSummary('history head')
+    })
+
+    // Simulate the PUSH: advance origin/onward-test onto HEAD. HEAD/branchOid are
+    // unchanged → ONLY refsDigest moves. The fix must re-key so the decoration
+    // follows to "history head" and clears from "history base" (no phantom fork).
+    await writeAndSyncTerminal(terminalB, 'git update-ref refs/remotes/origin/onward-test HEAD\r', sleep)
+    const headDecoratedAfterPush = await waitForDecoration('history head', true)
+    const baseClearedAfterPush = !refsForSummary('history base').includes(REMOTE_DECORATION)
+    _assert('GHMS-16-ref-move-refreshes-decoration-no-phantom-fork', Boolean(headDecoratedAfterPush && baseClearedAfterPush), {
+      historyHeadRefs: refsForSummary('history head'),
+      historyBaseRefs: refsForSummary('history base')
+    })
+
     dispatchEscape()
     const closed = await waitFor(
       'phase3.5-history-close',

@@ -1,0 +1,319 @@
+<!--
+  SPDX-FileCopyrightText: 2026 OPPO
+  SPDX-License-Identifier: Apache-2.0
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Git History ref 标签陈旧（push 后幽灵分叉）— 缓存策略评审</title>
+<style>
+  html { scroll-behavior: auto; } /* No-animation jump per project HTML rule */
+  :root {
+    --bg: #0e1116; --bg-2: #161b22; --panel: #1b222c; --panel-2: #222b37;
+    --text: #e6edf3; --muted: #9aa7b4; --line: #2b3542;
+    --accent: #4f9cf9; --accent-2: #7c9cff;
+    --good: #3fb950; --bad: #f85149; --warn: #d29922; --info: #58a6ff;
+    --code-bg: #0b0f14; --shadow-1: 0 6px 24px rgba(0,0,0,0.45);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "PingFang SC", Roboto, Helvetica, Arial, sans-serif; }
+  body.lang-zh .en { display: none; }
+  body.lang-en .zh { display: none; }
+  #toc { position: fixed; top: 0; left: 0; width: 300px; height: 100vh; overflow-y: auto;
+    background: var(--bg-2); border-right: 1px solid var(--line); padding: 22px 18px; }
+  #toc h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 12px; }
+  #toc a { display: block; color: var(--muted); text-decoration: none; padding: 6px 10px;
+    border-radius: 6px; font-size: 13.5px; margin: 2px 0; border-left: 2px solid transparent; }
+  #toc a:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
+  #toc a.active { color: var(--text); background: color-mix(in srgb, var(--accent) 18%, transparent); border-left-color: var(--accent); }
+  #toc a.sub { padding-left: 22px; font-size: 12.5px; }
+  .toggle { margin: 18px 0; display: flex; gap: 6px; }
+  .toggle button { flex: 1; background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; cursor: pointer; font-size: 12.5px; }
+  .toggle button.on { background: var(--accent); border-color: var(--accent); color: #06101f; font-weight: 600; }
+  main { margin-left: 300px; padding: 40px 48px 120px; max-width: 1100px; }
+  h1 { font-size: 27px; line-height: 1.25; margin: 0 0 6px; }
+  .subtitle { color: var(--muted); margin: 0 0 26px; font-size: 15px; }
+  section { scroll-margin-top: 18px; padding-top: 26px; border-top: 1px solid var(--line); margin-top: 30px; }
+  section:first-of-type { border-top: none; margin-top: 10px; }
+  h2.sec { font-size: 21px; margin: 0 0 14px; }
+  h3 { font-size: 16.5px; margin: 22px 0 10px; color: var(--accent-2); }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 22px; } li { margin: 5px 0; }
+  code { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; font-size: 12.5px; color: #d6e0ea; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+    overflow-x: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.5; }
+  pre .c { color: #6e7d8c; } pre .k { color: #ff7b72; } pre .s { color: #a5d6ff; } pre .f { color: #d2a8ff; } pre .hl { color: #e3b341; font-weight: 600; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; margin: 16px 0; }
+  @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; box-shadow: var(--shadow-1); }
+  .card h4 { margin: 0 0 8px; font-size: 14.5px; display: flex; align-items: center; gap: 8px; }
+  .callout { border-radius: 10px; padding: 14px 16px; margin: 16px 0; border: 1px solid var(--line); background: var(--panel); }
+  .callout.bad { border-left: 4px solid var(--bad); } .callout.good { border-left: 4px solid var(--good); }
+  .callout.warn { border-left: 4px solid var(--warn); } .callout.info { border-left: 4px solid var(--info); }
+  .callout .lbl { font-weight: 700; margin-right: 6px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; vertical-align: middle; }
+  .pill.red { background: rgba(248,81,73,.16); color: #ff9d96; border: 1px solid rgba(248,81,73,.4); }
+  .pill.green { background: rgba(63,185,80,.16); color: #7ee787; border: 1px solid rgba(63,185,80,.4); }
+  .pill.amber { background: rgba(210,153,34,.16); color: #e3b341; border: 1px solid rgba(210,153,34,.4); }
+  .pill.blue { background: rgba(79,156,249,.16); color: #9cc7ff; border: 1px solid rgba(79,156,249,.4); }
+  .pill.gray { background: #2a333f; color: var(--muted); border: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--line); padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  td.rec, th.rec { background: rgba(63,185,80,.10); }
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin: 16px 0; }
+  @media (max-width: 980px) { .ba { grid-template-columns: 1fr; } }
+  .ba > div { padding: 14px 16px; } .ba > div:first-child { border-right: 1px solid var(--line); }
+  .ba h4 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; }
+  .diagram { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 16px 0;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; white-space: pre; overflow-x: auto; color: #cdd9e5; }
+  .diagram .ok { color: #7ee787; } .diagram .no { color: #ff9d96; } .diagram .key { color: #e3b341; } .diagram .dim { color: #6e7d8c; }
+  a.src { color: var(--accent); text-decoration: none; } a.src:hover { text-decoration: underline; }
+  .meta-table { max-width: 640px; }
+  .tag { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body class="lang-zh">
+
+<nav id="toc">
+  <h2>目录 / Contents</h2>
+  <div class="toggle">
+    <button id="btn-zh" class="on" onclick="setLang('zh')">中文</button>
+    <button id="btn-en" onclick="setLang('en')">EN</button>
+  </div>
+  <a class="toc-link" href="#bug"><span class="zh">① 问题与现场证据</span><span class="en">① The bug + evidence</span></a>
+  <a class="toc-link" href="#current"><span class="zh">② 当前策略（为什么会陈旧）</span><span class="en">② Current strategy</span></a>
+  <a class="toc-link" href="#peers"><span class="zh">③ 同行产品调研</span><span class="en">③ Peer-product research</span></a>
+  <a class="toc-link" href="#options"><span class="zh">④ 候选方案 A / B / C</span><span class="en">④ Candidate options</span></a>
+  <a class="toc-link sub" href="#optA"><span class="zh">A — refsDigest 入键</span><span class="en">A — refsDigest in key</span></a>
+  <a class="toc-link sub" href="#optB"><span class="zh">B — ref 变更强制失效</span><span class="en">B — force-invalidate</span></a>
+  <a class="toc-link sub" href="#optC"><span class="zh">C — decoration 解耦</span><span class="en">C — decouple decorations</span></a>
+  <a class="toc-link sub" href="#mitig"><span class="zh">附：短 TTL 缓解</span><span class="en">aside: short TTL</span></a>
+  <a class="toc-link" href="#compare"><span class="zh">⑤ 对比矩阵</span><span class="en">⑤ Trade-off matrix</span></a>
+  <a class="toc-link" href="#reco"><span class="zh">⑥ 推荐</span><span class="en">⑥ Recommendation</span></a>
+  <a class="toc-link" href="#verify"><span class="zh">⑦ 验证计划</span><span class="en">⑦ Verification</span></a>
+  <a class="toc-link" href="#decision"><span class="zh">⑧ 待你决策</span><span class="en">⑧ Decision needed</span></a>
+  <a class="toc-link" href="#meta"><span class="zh">⑨ 元信息 + 更新历史</span><span class="en">⑨ Metadata</span></a>
+</nav>
+
+<main>
+  <h1><span class="zh">Git History「push 后幽灵分叉」— ref 标签陈旧缓存策略评审</span><span class="en">Git History "phantom fork after push" — ref-decoration staleness cache strategy</span></h1>
+  <p class="subtitle"><span class="zh">现状 vs 候选方案 + 权衡，供决策。缓存策略属敏感改动，方案未经你确认前不落生产代码。</span><span class="en">Current vs candidate strategies + trade-offs, for your decision. Cache strategy is a sensitive change; no production code lands before you confirm.</span></p>
+
+  <!-- ① -->
+  <section id="bug">
+    <h2 class="sec">① <span class="zh">问题与现场证据</span><span class="en">The bug + evidence</span></h2>
+    <div class="callout bad">
+      <span class="zh"><span class="lbl">现象：</span>在 Git History 里，当前分支 <code>kae-0.36</code> 的本地标签停在 <code>58feede</code>，而远端标签 <code>origin/kae-0.36</code> 却画在 3 个提交之前的 <code>d2b0c86</code>，看起来"当前分支跟远端分叉了"。但磁盘上 <code>kae-0.36 == origin/kae-0.36 == 58feede</code>，二者完全对齐。Onward 把远端标签画在了一个 push 之前的旧位置上。</span>
+      <span class="en"><span class="lbl">Symptom:</span> In Git History the local label <code>kae-0.36</code> sits on <code>58feede</code> while the remote label <code>origin/kae-0.36</code> is drawn 3 commits back on <code>d2b0c86</code> — looking like the branch forked from its remote. But on disk <code>kae-0.36 == origin/kae-0.36 == 58feede</code>, fully aligned. Onward drew the remote label at its pre-push position.</span>
+    </div>
+    <h3><span class="zh">四方实证（已闭环）</span><span class="en">Four-way confirmation</span></h3>
+    <ul>
+      <li><span class="zh"><b>实仓库</b>：<code>git ls-remote</code> + fetch 后追踪参考都显示 <code>origin/kae-0.36 = 58feede</code>，ahead/behind = 0/0。</span><span class="en"><b>Repo:</b> <code>git ls-remote</code> + post-fetch tracking ref both show <code>origin/kae-0.36 = 58feede</code>, ahead/behind = 0/0.</span></li>
+      <li><span class="zh"><b>截图</b>：本地标签在 <code>58feede</code>，远端标签在 <code>d2b0c86</code>（差 3 个提交）。</span><span class="en"><b>Screenshot:</b> local label on <code>58feede</code>, remote label on <code>d2b0c86</code> (3 commits apart).</span></li>
+      <li><span class="zh"><b>诊断包 trace</b>：6 分钟内开了约 10 次 Git History，全部命中同一份缓存，<code>list-cache.hit</code> 的 <code>ageMs</code> 从 64s 涨到 <b>427s（≈7 分钟）</b>，且整份 trace 无任何 <code>list-cache.invalidate</code> 事件。</span><span class="en"><b>Bundle trace:</b> ~10 Git History opens in 6 min, all the same cache entry; <code>list-cache.hit</code> <code>ageMs</code> climbed 64s → <b>427s (≈7 min)</b>; zero <code>list-cache.invalidate</code> events anywhere.</span></li>
+      <li><span class="zh"><b>源码</b>：缓存键不含任何 ref 状态（见 ② 节）。</span><span class="en"><b>Source:</b> the cache key contains no ref state (see §②).</span></li>
+    </ul>
+    <div class="callout info">
+      <span class="zh"><span class="lbl">复现已固化：</span><code>test/unittest/git-history-cache.test.mts</code> 已加入可执行复现（17 passed / 1 skipped 目标用例），打在真实缓存代码路径上，无需 git/Electron 构建。</span>
+      <span class="en"><span class="lbl">Repro pinned:</span> <code>test/unittest/git-history-cache.test.mts</code> now carries an executable reproduction (17 passed / 1 skipped target), exercising the real cache path — no git/Electron build needed.</span>
+    </div>
+  </section>
+
+  <!-- ② -->
+  <section id="current">
+    <h2 class="sec">② <span class="zh">当前策略：为什么 push 后会陈旧</span><span class="en">Current strategy: why it goes stale after push</span></h2>
+    <p><span class="zh">Git History 列表（L8 缓存）的键<b>只认 HEAD 的 commit OID</b>，且把分支/远端标签（<code>git log</code> 的 <code>%D</code> 字段）<b>一起烤进了缓存值</b>。</span><span class="en">The Git History list (L8 cache) key tracks <b>only HEAD's commit OID</b>, and bakes the branch/remote labels (git log's <code>%D</code> field) <b>into the cached value</b>.</span></p>
+    <pre><span class="c">// electron/main/git-history-cache.ts:81-88 — 键里没有任何 ref 状态 / no ref state in the key</span>
+buildHistoryListCacheKey(cwd, branchOid, limit, skip)
+  → `${resolve(cwd)}::${branchOid ?? 'nohead'}::${limit}::${skip}`
+<span class="c">// :55  HISTORY_LIST_TTL_MS = 30 * 60 * 1000  (30 分钟保底 TTL)</span>
+
+<span class="c">// electron/main/git-utils.ts:2289-2299 — git log 格式串里含 %D（decoration）</span>
+const format = ['%H','%h','%P','%an','%ae','%ad', <span class="hl">'%D'</span>, '%s','%b'].join(SEP)
+<span class="c">// :1595  解析后塞进 GitCommitInfo.refs（即标签来源）→ 随列表一起被缓存</span></pre>
+
+    <h3><span class="zh">深层原因：ref 事件"到了门口被吞掉"</span><span class="en">Deeper cause: the ref event arrives but is swallowed</span></h3>
+    <p><span class="zh">缓存键的"新鲜度信号"branchOid 来自 GitStateMirror 快照。而 mirror 的<b>变更指纹</b>压根没把 ref 算进去：</span><span class="en">The key's freshness signal (branchOid) comes from the GitStateMirror snapshot. But the mirror's <b>change-fingerprint</b> does not include refs at all:</span></p>
+    <div class="diagram"><span class="dim">git push  →  origin/kae-0.36: d2b0c86 → 58feede   (HEAD 不动 / HEAD unchanged)</span>
+
+  .git/refs/remotes/origin/kae-0.36  <span class="key">改变</span>
+        │
+        ▼  <span class="ok">watcher 触发（已监听 .git/refs/** + packed-refs）</span>  git-state-mirror-worker-core.ts:146-156
+        │
+        ▼  computeDelta 比对 change-fingerprint
+        │     change-fingerprint 输入 = repoRoot + 工作区 status + 工作区文件 stat   <span class="no">（不含 ref！）</span>  change-fingerprint.ts:52-84
+        │
+        ▼  指纹未变 → delta 为空 → <span class="no">mirror-update 被短路，不广播</span>
+        │
+        ▼  getLatest(cwd).branchOid 仍是旧快照 → 缓存键不变 → <span class="no">命中旧缓存（含旧 %D 标签）</span>  ipc-handlers.ts:1857
+        │
+        ▼  最长陈旧 30 分钟（TTL）或直到 HEAD 自己移动</div>
+
+    <div class="callout warn">
+      <span class="zh"><span class="lbl">关键认知：</span>Onward 的 watcher <b>已经</b>监听了 <code>.git/refs/**</code> 和 <code>packed-refs</code>，所以<b>没有</b> VS Code 那个"漏看 packed-refs"的缺陷（issue #79776）。push 的 ref 事件本来就到了——是"指纹不含 ref"把它吞了。这意味着修复成本很低：信号已在手，只差消费它。</span>
+      <span class="en"><span class="lbl">Key insight:</span> Onward's watcher <b>already</b> watches <code>.git/refs/**</code> and <code>packed-refs</code>, so it does <b>not</b> have VS Code's packed-refs gap (issue #79776). The push ref event already arrives — it's the ref-blind fingerprint that swallows it. So the fix is cheap: the signal is in hand; we just need to consume it.</span>
+    </div>
+  </section>
+
+  <!-- ③ -->
+  <section id="peers">
+    <h2 class="sec">③ <span class="zh">同行产品调研</span><span class="en">Peer-product research</span></h2>
+    <p><span class="zh">（按项目硬性规则，非平凡设计前先看成熟同类怎么做。）核心问题：提交图的 ref 标签如何在 push/fetch 后保持新鲜？</span><span class="en">(Per the project hard rule: study mature peers before non-trivial design.) Core question: how do peers keep the graph's ref labels fresh after push/fetch?</span></p>
+    <table>
+      <thead><tr><th><span class="zh">产品</span><span class="en">Product</span></th><th><span class="zh">机制</span><span class="en">Mechanism</span></th></tr></thead>
+      <tbody>
+        <tr><td><b>VS Code Git Graph</b><br><span class="tag">mhutchie</span></td><td><span class="zh"><b>decoration 从不进缓存</b>。提交用 <code>git log</code>（<b>不带 %D</b>）；ref 用单独的 <code>git show-ref -d --head</code> 查；每次渲染客户端合并标签。监听 <code>.git/refs/heads/*</code> 与 <code>refs/remotes/*</code>（但漏 <code>packed-refs</code>）。</span><span class="en"><b>Never caches decorations.</b> Commits via <code>git log</code> (<b>no %D</b>); refs via a separate <code>git show-ref -d --head</code>; merges labels client-side every render. Watches loose <code>refs/heads/*</code> + <code>refs/remotes/*</code> (misses <code>packed-refs</code>).</span></td></tr>
+        <tr><td><b>GitLens</b></td><td><span class="zh">按 <b>ref 可变性</b>分级 TTL：完整 SHA（不可变）缓存 <b>5 分钟</b>；符号/可变 ref（分支、HEAD、远端追踪）只给 <b>60 秒</b>保底 TTL。即"不可变按 SHA 长缓存、可变 ref 单独短期"。</span><span class="en">Granular TTLs by <b>ref mutability</b>: full SHA (immutable) cached <b>5 min</b>; symbolic/mutable refs (branches, HEAD, remote-tracking) get a <b>60-second</b> failsafe TTL. I.e. immutable-by-SHA cached long, mutable refs short.</span></td></tr>
+        <tr><td><b>JetBrains</b><br><span class="tag">git4idea</span></td><td><span class="zh">逐提交数据持久化缓存；ref 在每次 <code>.git</code> 变更事件时从仓库实时刷新。<b>显式监听 <code>packed-refs</code></b>（<code>isPackedRefs</code>），补上了 VS Code 漏的那一环。</span><span class="en">Per-commit data cached persistently; refs refreshed live from repo state on every <code>.git</code> change event. <b>Explicitly watches <code>packed-refs</code></b> (<code>isPackedRefs</code>) — closing VS Code's gap.</span></td></tr>
+        <tr><td><b>GitKraken / Fork</b></td><td><span class="zh">靠<b>定时 auto-fetch</b>（GitKraken 默认每 1 分钟）刷新远端 ref，间接触发重绘——绕开"外部 push 检测"，不直接适用于本地 push 后的即时刷新。</span><span class="en">Rely on <b>periodic auto-fetch</b> (GitKraken default every 1 min) to refresh remote refs, indirectly redrawing — sidestepping external-push detection; not directly applicable to instant refresh after a local push.</span></td></tr>
+      </tbody>
+    </table>
+    <div class="callout good">
+      <span class="zh"><span class="lbl">同行共识：</span>把 <b>decoration 当作可变状态、与按 SHA 不可变的提交数据解耦</b>，放到独立的失效路径上（git-graph 每次重查、GitLens 给短 TTL、JetBrains 按事件刷新）。并且<b>必须监听 <code>packed-refs</code></b>——这点 Onward 已经做到了。</span>
+      <span class="en"><span class="lbl">Peer consensus:</span> treat <b>decorations as mutable state, decoupled from immutable per-SHA commit data</b>, on their own invalidation path (git-graph re-queries each time, GitLens short-TTLs them, JetBrains refreshes on event). And <b>you must watch <code>packed-refs</code></b> — which Onward already does.</span>
+    </div>
+    <p class="tag">Sources: <a class="src" href="https://github.com/mhutchie/vscode-git-graph/blob/develop/src/dataSource.ts">git-graph dataSource.ts</a> · <a class="src" href="https://github.com/mhutchie/vscode-git-graph/blob/develop/src/repoFileWatcher.ts">repoFileWatcher.ts</a> · <a class="src" href="https://github.com/microsoft/vscode/issues/79776">vscode#79776 (packed-refs)</a> · <a class="src" href="https://github.com/gitkraken/vscode-gitlens/blob/main/CHANGELOG.md">GitLens CHANGELOG (TTL by ref mutability)</a> · <a class="src" href="https://android.googlesource.com/platform/tools/idea/+/upstream-master/plugins/git4idea/src/git4idea/repo/GitRepositoryUpdater.java">git4idea GitRepositoryUpdater.java</a> · <a class="src" href="https://help.gitkraken.com/gitkraken-desktop/preferences/">GitKraken auto-fetch</a></p>
+  </section>
+
+  <!-- ④ -->
+  <section id="options">
+    <h2 class="sec">④ <span class="zh">候选方案</span><span class="en">Candidate options</span></h2>
+    <div class="callout info">
+      <span class="zh"><span class="lbl">共同前提：</span>三个方案都需要"<b>让 mirror 开始把 ref 变更暴露出来</b>"（今天 watcher 监听了 ref，但指纹把事件吞了）。区别只在<b>如何消费</b>这个 ref 信号。</span>
+      <span class="en"><span class="lbl">Shared prerequisite:</span> all three need the mirror to <b>start surfacing ref changes</b> (today the watcher sees refs but the fingerprint swallows the event). They differ only in <b>how that ref signal is consumed</b>.</span>
+    </div>
+
+    <h3 id="optA">A — <span class="zh">refsDigest 入缓存键（结构性新鲜度，延续现有 branchOid 模型）</span><span class="en">refsDigest in the cache key (structural freshness)</span></h3>
+    <div class="diagram"><span class="dim">键: cwd :: branchOid :: <span class="key">refsDigest</span> :: limit :: skip</span>
+mirror 每个 recompute 周期算一个 refsDigest（hash 仓库 ref 集，如 git show-ref / for-each-ref 输出）
+  → push 后 origin 移动 → refsDigest 变 → <span class="key">新键 → 结构性 miss → 重跑 git log（带新 %D）</span></div>
+    <ul>
+      <li><span class="zh"><b>改动点：</b>MirrorState 加 <code>refsDigest</code> 字段（与 branchOid 并列）；worker recompute 时计算；<code>ipc-handlers.ts:1857</code> 取出并传入 <code>buildHistoryListCacheKey</code>；指纹纳入 ref（让 mirror-update 在 ref 变时也广播）。</span><span class="en"><b>Touches:</b> add <code>refsDigest</code> to MirrorState (beside branchOid); compute it in the worker recompute; read it at <code>ipc-handlers.ts:1857</code> and pass into <code>buildHistoryListCacheKey</code>; make the fingerprint ref-aware so mirror-update fires on ref moves.</span></li>
+      <li><span class="zh"><b>同行对应：</b>介于 git-graph 与现状之间——仍把 %D 烤进列表，但让键对 ref 敏感。</span><span class="en"><b>Peer match:</b> between git-graph and the status quo — still bakes %D into the list, but makes the key ref-sensitive.</span></li>
+      <li><span class="zh"><span class="pill green">优点</span> 最小、最贴合现有"结构性新鲜度"哲学（branchOid 已是这个套路）；无新失效接线；复用 mirror 既有 recompute。</span><span class="en"><span class="pill green">Pros</span> Minimal; consistent with the existing "structural freshness" philosophy (branchOid already does this); no new invalidation wiring; reuses the mirror's existing recompute.</span></li>
+      <li><span class="zh"><span class="pill amber">取舍</span> 任意 ref 移动都会让该仓库<b>所有页</b>换键失效（粗粒度）；标签仍随列表一起重算。因 History 列表只有 50 条且已 prewarm，重算成本低，可接受。需定 refsDigest 范围（建议：全部本地分支 + 全部远端追踪 ref + tag，覆盖图上所有可能标签）。</span><span class="en"><span class="pill amber">Trade-off</span> Any ref move re-keys (invalidates) <b>all pages</b> for that repo (coarse); labels recompute with the list. Since the list is 50 commits and prewarmed, recompute is cheap → acceptable. Must fix the refsDigest scope (suggest: all local branches + all remote-tracking refs + tags, covering every label that can appear).</span></li>
+    </ul>
+
+    <h3 id="optB">B — <span class="zh">ref 变更触发强制失效（复用 diff 缓存的现成先例）</span><span class="en">force-invalidate on ref change (reuse the diff-cache precedent)</span></h3>
+    <div class="diagram"><span class="dim">键不变（仍 branchOid）</span>
+ref 变 → mirror-update 广播 → <span class="key">historyListCache 强制失效该仓库所有页</span>（仿 git-state-mirror-router.ts:455 的 gitDiffCacheInvalidator.invalidate(cwd,'mirror')）
+  → 下次开 History → miss → 重跑</div>
+    <ul>
+      <li><span class="zh"><b>改动点：</b>同样需指纹纳入 ref（或加并行 refs 指纹 + 新信号）；在 router 的 mirror-update 分支里，对 history 列表缓存调 <code>invalidateKey</code>/<code>clear</code>（参照 diff 的 <code>git-diff-content-cache-wiring.ts:323</code>）。</span><span class="en"><b>Touches:</b> also needs the fingerprint ref-aware (or a parallel refs-fingerprint + new signal); in the router's mirror-update branch, call <code>invalidateKey</code>/<code>clear</code> on the history list cache (mirroring diff's <code>git-diff-content-cache-wiring.ts:323</code>).</span></li>
+      <li><span class="zh"><b>同行对应：</b>JetBrains 的"按 .git 事件刷新"。</span><span class="en"><b>Peer match:</b> JetBrains' "refresh on .git event".</span></li>
+      <li><span class="zh"><span class="pill green">优点</span> 复用现成失效信号路径；键保持简单。</span><span class="en"><span class="pill green">Pros</span> Reuses an existing invalidation path; keeps the key simple.</span></li>
+      <li><span class="zh"><span class="pill amber">取舍</span> 比 A 多一条显式失效接线；同样粗粒度（清整仓库的页）；与现有"结构性新鲜度（靠键）"哲学不完全一致（改成"命令式失效"）。</span><span class="en"><span class="pill amber">Trade-off</span> One more explicit invalidation wire than A; equally coarse (clears the repo's pages); slightly off the existing "structural freshness via key" philosophy (becomes imperative invalidation).</span></li>
+    </ul>
+
+    <h3 id="optC">C — <span class="zh">decoration 与提交列表解耦（同行共识 / git-graph + JetBrains 模型）</span><span class="en">decouple decorations from the commit list (peer consensus)</span></h3>
+    <div class="diagram"><span class="dim">提交列表缓存（不带 %D，按 sha 不可变，可长 TTL）  +  ref 来源（mirror 的 ref→sha 映射，或一次 git show-ref）</span>
+每次读 History：取缓存列表 → <span class="key">用当前 ref 映射现场贴标签</span> → 返回（标签永远新鲜）</div>
+    <ul>
+      <li><span class="zh"><b>改动点：</b><code>git log</code> 去掉 <code>%D</code>；列表缓存值不再含标签；新增"取 ref 映射 + 合并 decoration"的读时步骤（理想来源是 mirror 现成的 ref 快照，避免额外 git 调用）。</span><span class="en"><b>Touches:</b> drop <code>%D</code> from <code>git log</code>; the list cache value no longer holds labels; add a read-time "fetch ref map + merge decorations" step (ideally sourced from the mirror's existing ref snapshot to avoid an extra git spawn).</span></li>
+      <li><span class="zh"><b>同行对应：</b>最强——git-graph 正是如此；JetBrains 缓存提交、按事件刷 ref；GitLens 按可变性分 TTL。</span><span class="en"><b>Peer match:</b> strongest — exactly git-graph; JetBrains caches commits + refreshes refs on event; GitLens splits TTL by mutability.</span></li>
+      <li><span class="zh"><span class="pill green">优点</span> 架构最干净；标签永远新鲜；提交列表可用更长 TTL（提交按 sha 不可变）；细粒度（标签变不必重算提交）。</span><span class="en"><span class="pill green">Pros</span> Cleanest architecture; labels always fresh; the list can use a longer TTL (commits immutable per sha); fine-grained (label changes don't recompute commits).</span></li>
+      <li><span class="zh"><span class="pill red">取舍</span> 改动面最大（缓存值结构、读时合并逻辑、ref 来源）；风险最高。其核心收益"标签变了不必重算提交"对 Onward 而言较弱——History 列表只有 50 条且已 prewarm，重算本就便宜。</span><span class="en"><span class="pill red">Trade-off</span> Largest change (cache payload shape, read-time merge, ref source); highest risk. Its core benefit — "refresh labels without recomputing commits" — is marginal for Onward, where the list is only 50 commits and prewarmed, so recompute is already cheap.</span></li>
+    </ul>
+
+    <h3 id="mitig"><span class="zh">附：短 TTL 缓解（不是真修复）</span><span class="en">aside: short-TTL mitigation (not a real fix)</span></h3>
+    <div class="callout warn">
+      <span class="zh">把 L8 的 TTL 从 30 分钟降到 ~60 秒（仿 GitLens 的可变-ref 保底 TTL），可把陈旧窗口从 30 分钟压到 60 秒。<b>一行常量改动</b>、零结构风险，但<b>不消除</b>问题：60 秒内重开仍看到旧标签，且会牺牲 prewarm 命中率（30 分钟 TTL 本是为"几分钟后再开仍命中"设计的）。只建议作为临时止血或与 A 叠加。</span>
+      <span class="en">Drop the L8 TTL from 30 min to ~60 s (à la GitLens's mutable-ref failsafe) to shrink the stale window from 30 min to 60 s. <b>One-constant change</b>, zero structural risk, but does <b>not</b> eliminate it: reopening within 60 s still shows stale labels, and it hurts prewarm hit-rate (the 30-min TTL exists so "reopen minutes later" still hits). Only as a stopgap or layered onto A.</span>
+    </div>
+  </section>
+
+  <!-- ⑤ -->
+  <section id="compare">
+    <h2 class="sec">⑤ <span class="zh">对比矩阵</span><span class="en">Trade-off matrix</span></h2>
+    <table>
+      <thead><tr>
+        <th><span class="zh">维度</span><span class="en">Dimension</span></th>
+        <th class="rec">A · refsDigest 入键</th><th>B · 强制失效</th><th>C · 标签解耦</th>
+      </tr></thead>
+      <tbody>
+        <tr><td><span class="zh">改动面 / 风险</span><span class="en">Change size / risk</span></td><td class="rec"><span class="pill green">小</span></td><td><span class="pill amber">中</span></td><td><span class="pill red">大</span></td></tr>
+        <tr><td><span class="zh">标签新鲜度保证</span><span class="en">Label freshness</span></td><td class="rec"><span class="zh">ref 变即新</span><span class="en">fresh on ref change</span></td><td><span class="zh">ref 变即新</span><span class="en">fresh on ref change</span></td><td><span class="zh">永远新</span><span class="en">always fresh</span></td></tr>
+        <tr><td><span class="zh">失效粒度</span><span class="en">Invalidation granularity</span></td><td class="rec"><span class="zh">整仓库换键</span><span class="en">whole-repo re-key</span></td><td><span class="zh">整仓库清空</span><span class="en">whole-repo clear</span></td><td><span class="zh">只重贴标签</span><span class="en">labels only</span></td></tr>
+        <tr><td><span class="zh">复用现有机制</span><span class="en">Reuses existing</span></td><td class="rec"><span class="zh">结构性键（branchOid）</span><span class="en">structural key</span></td><td><span class="zh">diff 失效先例</span><span class="en">diff invalidator</span></td><td><span class="zh">需新读时合并</span><span class="en">new read-time merge</span></td></tr>
+        <tr><td><span class="zh">与现有哲学一致性</span><span class="en">Philosophy fit</span></td><td class="rec"><span class="pill green">高</span></td><td><span class="pill amber">中</span></td><td><span class="pill amber">中</span></td></tr>
+        <tr><td><span class="zh">额外 git 调用</span><span class="en">Extra git calls</span></td><td class="rec"><span class="zh">recompute 内算 digest（≈0）</span><span class="en">digest in recompute (~0)</span></td><td><span class="zh">≈0</span></td><td><span class="zh">读时取 ref（可由 mirror 供）</span><span class="en">ref read per open (mirror can supply)</span></td></tr>
+        <tr><td><span class="zh">同行背书</span><span class="en">Peer backing</span></td><td class="rec"><span class="zh">部分（GitLens 思路）</span><span class="en">partial (GitLens)</span></td><td><span class="zh">JetBrains</span></td><td><span class="zh">最强（git-graph）</span><span class="en">strongest (git-graph)</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ⑥ -->
+  <section id="reco">
+    <h2 class="sec">⑥ <span class="zh">推荐</span><span class="en">Recommendation</span></h2>
+    <div class="callout good">
+      <span class="zh"><span class="lbl">推荐 A（refsDigest 入键）+ 让指纹纳入 ref。</span>理由：(1) 它是延续现有 <code>branchOid</code> 结构性新鲜度模型的<b>最小、最一致</b>改动，无新失效接线；(2) Onward 的 watcher 已监听 <code>packed-refs</code>，ref 信号现成；(3) C 的核心收益"标签变了不必重算提交"对 Onward 价值有限——列表仅 50 条且已 prewarm，重算很便宜，所以 C 属过度设计。把 C 记为<b>理想终态</b>（同行共识），若将来 History 规模变大、重算变贵，再演进到 C。</span>
+      <span class="en"><span class="lbl">Recommend A (refsDigest in key) + make the fingerprint ref-aware.</span> Why: (1) it's the <b>smallest, most consistent</b> extension of the existing <code>branchOid</code> structural-freshness model, with no new invalidation wiring; (2) Onward's watcher already watches <code>packed-refs</code>, so the ref signal is in hand; (3) C's core benefit — "refresh labels without recomputing commits" — is marginal here (50-commit, prewarmed list → cheap recompute), so C is over-engineering. Record C as the <b>ideal end-state</b> (peer consensus); evolve to it later if History grows large and recompute becomes expensive.</span>
+    </div>
+  </section>
+
+  <!-- ⑦ -->
+  <section id="verify">
+    <h2 class="sec">⑦ <span class="zh">验证计划</span><span class="en">Verification plan</span></h2>
+    <ul>
+      <li><span class="zh"><b>单元测试（已就绪）：</b><code>git-history-cache.test.mts</code> 的复现已是绿（特征测试，锁住当前错误行为）。修复落地时把 <code>[pending step-2 fix]</code> 那条 skip 用例打开、反转 <code>REPRODUCES BUG</code> 的断言、并更新 <code>test/README.md §2</code> 与缓存文件头注释。</span><span class="en"><b>Unit test (ready):</b> the repro in <code>git-history-cache.test.mts</code> is green (characterization, locking current wrong behaviour). When the fix lands, un-skip the <code>[pending step-2 fix]</code> test, invert the <code>REPRODUCES BUG</code> assertions, and update <code>test/README.md §2</code> + the cache file header.</span></li>
+      <li><span class="zh"><b>autotest（红→绿门）：</b>在 <code>run-git-history</code>（GH-*）里加一步 <code>git update-ref refs/remotes/origin/&lt;branch&gt; &lt;newoid&gt;</code>（只动远端追踪指针、不动 HEAD），断言重开历史后 decoration 已刷新。修复前红、修复后绿。</span><span class="en"><b>autotest (red→green gate):</b> in <code>run-git-history</code> (GH-*) add a <code>git update-ref refs/remotes/origin/&lt;branch&gt; &lt;newoid&gt;</code> step (moves only the remote-tracking ref, not HEAD); assert decorations refresh on reopen. Red before the fix, green after.</span></li>
+      <li><span class="zh"><b>诊断埋点：</b>新增 ref 变更→失效/换键的 trace 事件（如 <code>main:git.history.list-cache.refs-invalidate</code>）登记 <code>perf-trace-names.ts</code> + <code>infra/trace.md</code>——失效是控制流拐点，按硬规则需可观测，这样下次"幽灵分叉又出现"的 trace 能看出 ref 失效有没有触发。</span><span class="en"><b>Diagnostic trace:</b> register a ref-change → invalidate/re-key event (e.g. <code>main:git.history.list-cache.refs-invalidate</code>) in <code>perf-trace-names.ts</code> + <code>infra/trace.md</code> — invalidation is a control-flow inflection point (observable per the hard rule), so a future "phantom fork is back" trace shows whether ref invalidation fired.</span></li>
+      <li><span class="zh"><b>跨平台：</b>fixture 与断言需在 Windows/macOS/Linux 都成立（CRLF、packed vs loose ref 两种形态都要覆盖）。</span><span class="en"><b>Cross-platform:</b> fixture + assertions must hold on Windows/macOS/Linux (cover both packed and loose ref forms; CRLF).</span></li>
+    </ul>
+  </section>
+
+  <!-- ⑧ -->
+  <section id="decision">
+    <h2 class="sec">⑧ <span class="zh">待你决策</span><span class="en">Decision needed</span></h2>
+    <div class="callout info">
+      <span class="zh"><span class="lbl">请定：</span>(1) 选哪个方案？<b>默认推荐 A</b>（refsDigest 入键 + 指纹纳入 ref）；B、C 如上权衡。(2) refsDigest 的<b>范围</b>：仅当前分支的 upstream / 全部远端追踪 ref / 全部 ref（含 tag）？（推荐"全部本地分支 + 全部远端追踪 ref"，保证图上每个标签都覆盖。）(3) 是否同时把 L8 TTL 降到 60s 作为叠加缓解？定了之后我进 Plan Mode，给出精确 file:line 改动 + 配对单测/autotest，经你批准再写生产代码。</span>
+      <span class="en"><span class="lbl">Please decide:</span> (1) Which option? <b>Default: A</b> (refsDigest in key + ref-aware fingerprint); B/C trade-offs above. (2) refsDigest <b>scope</b>: just the current branch's upstream / all remote-tracking refs / all refs (incl tags)? (Recommend "all local branches + all remote-tracking refs" so every drawn label is covered.) (3) Also drop the L8 TTL to 60 s as a layered mitigation? Once decided I enter Plan Mode with exact file:line edits + paired unit/autotests, for your approval before any production code.</span>
+    </div>
+  </section>
+
+  <!-- ⑨ -->
+  <section id="meta">
+    <h2 class="sec">⑨ <span class="zh">文档元信息 + 更新历史</span><span class="en">Metadata + update history</span></h2>
+    <table class="meta-table"><tbody>
+      <tr><th><span class="zh">生成分支</span><span class="en">Branch</span></th><td><code>master</code></td></tr>
+      <tr><th><span class="zh">反映的应用版本 / commit</span><span class="en">App version / commit</span></th><td><code>2.0.1</code> / <code>4ff8cf7</code>（<span class="zh">诊断包来自</span><span class="en">bundle from</span> <code>2.1.0-daily.20260629.1</code>）</td></tr>
+      <tr><th><span class="zh">文档版本</span><span class="en">Doc version</span></th><td><code>v1.0</code></td></tr>
+    </tbody></table>
+    <h3><span class="zh">更新历史（仅追加）</span><span class="en">Update history (append-only)</span></h3>
+    <table>
+      <thead><tr><th>Ver</th><th><span class="zh">日期</span><span class="en">Date</span></th><th>Branch</th><th><span class="zh">变更摘要</span><span class="en">Summary</span></th></tr></thead>
+      <tbody>
+        <tr><td>v1.0</td><td>2026-06-29</td><td><code>master</code></td><td><span class="zh">首版：Git History「push 后幽灵分叉」(ref 标签陈旧) 的现状 + 同行调研 + 候选 A/B/C 与权衡，推荐 A，供决策。</span><span class="en">Initial: current state + peer research + candidates A/B/C with trade-offs for the Git History "phantom fork after push" (stale ref decorations); recommends A, for decision.</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+  function setLang(l) {
+    document.body.classList.remove('lang-zh', 'lang-en');
+    document.body.classList.add('lang-' + l);
+    document.getElementById('btn-zh').classList.toggle('on', l === 'zh');
+    document.getElementById('btn-en').classList.toggle('on', l === 'en');
+    document.documentElement.lang = (l === 'zh') ? 'zh-CN' : 'en';
+  }
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toc a.toc-link'));
+  var sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); }).filter(Boolean);
+  var obs = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) {
+        var id = '#' + e.target.id;
+        links.forEach(function (a) { a.classList.toggle('active', a.getAttribute('href') === id); });
+      }
+    });
+  }, { rootMargin: '-10% 0px -80% 0px', threshold: 0 });
+  sections.forEach(function (s) { obs.observe(s); });
+</script>
+</body>
+</html>

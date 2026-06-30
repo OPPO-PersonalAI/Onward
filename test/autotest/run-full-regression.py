@@ -135,6 +135,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-diff-submodules-autotest.sh",
     "test/autotest/run-repo-prewarm-autotest.sh",
     "test/autotest/run-git-history-multi-terminal-scope-autotest.sh",
+    "test/autotest/run-git-history-ref-decoration-autotest.sh",
     "test/autotest/run-git-nested-submodules-autotest.sh",
     "test/autotest/run-global-search-autotest.sh",
     "test/autotest/run-image-diff-autotest.sh",

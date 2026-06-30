@@ -2229,7 +2229,8 @@ export async function getGitHistory(
   cwd: string,
   limit = 50,
   skip = 0,
-  branchOid?: string
+  branchOid?: string,
+  refsDigest?: string
 ): Promise<GitHistoryResult> {
   // Use getGitRepoMeta (single git process) for install + repo + root checks
   const repoMeta = await getGitRepoMeta(cwd)
@@ -2257,20 +2258,22 @@ export async function getGitHistory(
   const repoRoot = repoMeta.repoRoot
 
   // L8 History list cache (prewarm decision ⑦): key resolve(cwd)::branchOid::
-  // limit::skip. A new commit moves branchOid (supplied by main from the
-  // GitStateMirror snapshot), structurally invalidating the page without an
-  // extra spawn. Only SUCCESSFUL loads are cached (cachedHistoryRequest skips
-  // failures so a transient git error never pins the 30 min entry).
+  // refsDigest::limit::skip. branchOid moves on a new commit; refsDigest moves on
+  // a ref-only change (push/fetch advancing origin/<branch> with HEAD unchanged) —
+  // both supplied by main from the GitStateMirror snapshot, structurally
+  // invalidating the page without an extra spawn so the `%D` decorations stay
+  // fresh. Only SUCCESSFUL loads are cached (cachedHistoryRequest skips failures
+  // so a transient git error never pins the 30 min entry).
   return cachedHistoryRequest(
     getHistoryListCacheController(),
-    buildHistoryListCacheKey(cwd, branchOid, limit, skip),
+    buildHistoryListCacheKey(cwd, branchOid, refsDigest, limit, skip),
     () => loadGitHistoryUncached(cwd, repoRoot, gitExecutable, limit, skip),
     {
       onCacheHit: (ageMs) => performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_HISTORY_LIST_CACHE_HIT, {
-        cwd: resolve(cwd), branchOid: branchOid ?? null, limit, skip, ageMs
+        cwd: resolve(cwd), branchOid: branchOid ?? null, refsDigest: refsDigest ?? null, limit, skip, ageMs
       }),
       onMiss: () => performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_HISTORY_LIST_CACHE_MISS, {
-        cwd: resolve(cwd), branchOid: branchOid ?? null, limit, skip
+        cwd: resolve(cwd), branchOid: branchOid ?? null, refsDigest: refsDigest ?? null, limit, skip
       })
     }
   )

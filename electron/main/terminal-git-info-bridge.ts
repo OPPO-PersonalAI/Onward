@@ -207,6 +207,7 @@ export class TerminalGitInfoBridge {
       cwd: subscribedCwd,
       repoRoot: snapshot?.repoRoot ?? null,
       branchOid: snapshot?.branchOid,
+      refsDigest: snapshot?.refsDigest,
       reason
     })
     // Emit immediately if router already had the latest snapshot for this
@@ -252,16 +253,18 @@ export class TerminalGitInfoBridge {
         this.tryEmit(entry, stateToInfo(state, entry.cwd ?? cwd))
       }
     }
-    // History re-warm on branchOid change (decision ⑦). The coordinator dedups
-    // by cwd::branchOid, so this is a cheap no-op on the common working-tree-edit
-    // update and only does real work when a new commit / amend / checkout moved
-    // HEAD. Gated on `matched` so updates for repos no terminal watches are
-    // ignored, and on a non-null branchOid (the History cache's freshness key).
+    // History re-warm on branchOid OR refsDigest change (decision ⑦). The
+    // coordinator dedups by cwd::branchOid::refsDigest, so this is a cheap no-op on
+    // the common working-tree-edit update and only does real work when a new commit
+    // moved HEAD (branchOid) or a push/fetch moved a ref (refsDigest). Gated on
+    // `matched` so updates for repos no terminal watches are ignored, and on a
+    // non-null branchOid (the History cache's primary freshness key).
     if (matched && state.branchOid) {
       this.prewarm?.onMirrorUpdated({
         cwd,
         repoRoot: state.repoRoot,
         branchOid: state.branchOid,
+        refsDigest: state.refsDigest,
         reason: 'branch-change'
       })
     }

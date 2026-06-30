@@ -53,6 +53,18 @@ export interface MirrorState {
    * on non-repo / unknown state.
    */
   branchOid?: string
+  /**
+   * Order-independent SHA-1 of EVERY decoration-bearing ref: local branches
+   * (refs/heads) + remote-tracking refs (refs/remotes) + tags (refs/tags).
+   * Sibling freshness signal to branchOid:
+   * a `git push` advances origin/<branch> WITHOUT moving HEAD, so branchOid is
+   * unchanged but refsDigest moves — feeding the History list cache key (keyed
+   * `repoRoot::branchOid::refsDigest::limit::skip`) so the `%D` ref decorations
+   * recompute instead of going stale for the 30-min TTL (the "phantom fork after
+   * push" bug). Computed by a spawn-free `.git/refs` read in the worker.
+   * Undefined on non-repo / git-status failure.
+   */
+  refsDigest?: string
   /** Status colour bucket — drives the terminal-grid-branch--{status} className. */
   status: TerminalGitStatus | null
   /** File list (unstaged + staged + untracked). Empty array when clean. */

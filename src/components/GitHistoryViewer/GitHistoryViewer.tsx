@@ -1303,7 +1303,7 @@ export function GitHistoryViewer({
     const api = {
       isOpen: () => isOpenRef.current,
       getCommitCount: () => commitsRef.current.length,
-      getCommits: () => commitsRef.current.map((commit) => ({ sha: commit.sha, summary: commit.summary })),
+      getCommits: () => commitsRef.current.map((commit) => ({ sha: commit.sha, summary: commit.summary, refs: commit.refs })),
       getSelectedShas: () => selectedShasRef.current,
       getFiles: () => filesRef.current.map(f => ({
         filename: f.filename,
