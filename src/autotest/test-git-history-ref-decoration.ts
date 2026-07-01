@@ -176,8 +176,10 @@ export async function testGitHistoryRefDecoration(ctx: AutotestContext): Promise
       ].join(' && ')) + '\r'
 
     await writeAndSyncTerminal(terminalId, fixtureCommand, sleep)
-    // Heavy multi-commit fixture under EDR spawn tax → generous cwd budget.
-    const cwd = await waitForTerminalCwd(terminalId, fixtureRoot, sleep, 90000)
+    // Heavy multi-commit fixture (~8 git spawns) under EDR spawn tax (1.3-12.9s each) can exceed
+    // 90s at peak full-run load -> generous hang-detector ceiling. waitForTerminalCwd short-circuits
+    // on success, so a healthy run (~10s here) is unaffected; only a pathological run uses the budget.
+    const cwd = await waitForTerminalCwd(terminalId, fixtureRoot, sleep, 150000)
     _assert('RD-01b-fixture-ready', Boolean(cwd), { expected: normalizePath(fixtureRoot), actual: cwd ? normalizePath(cwd) : null })
     if (!cwd || cancelled()) return results
 

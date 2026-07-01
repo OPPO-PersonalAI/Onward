@@ -74,7 +74,16 @@ try {
     if ($env:ONWARD_AUTOTEST_KEEP_TMP -eq '1') {
       Write-Host "[autotest] retained tmp for debugging: $TmpRoot"
     } else {
-      Remove-Item -Recurse -Force $TmpRoot
+      # Tolerate transient Windows EDR/AV file locks (Electron helper still holding the cwd
+      # handle just after exit): retry, then warn-and-continue. Parity with the .sh robust_rm.
+      $removed = $false
+      foreach ($i in 1..10) {
+        try { Remove-Item -Recurse -Force $TmpRoot -ErrorAction Stop; $removed = $true; break }
+        catch { Start-Sleep -Milliseconds 300 }
+      }
+      if (-not $removed) {
+        Write-Host "[autotest] WARN: could not remove $TmpRoot after retries (left for the OS to release)"
+      }
     }
   }
 }

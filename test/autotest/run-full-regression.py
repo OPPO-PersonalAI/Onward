@@ -270,6 +270,18 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # GitDiff click-latency suite measures multi-trial first-click vs
     # cache-warm latencies; needs more headroom than 180s allows.
     "test/autotest/run-git-diff-click-latency-autotest.sh": 300,
+    # Heavy multi-commit git fixture (~8 sequential git spawns, each EDR-taxed 1.3-12.9s) +
+    # 8 ref-decoration reopen/verify steps. The 90s->150s internal fixture-ready ceiling can
+    # need >180s total under peak full-run EDR load; 240s < 300s (NOT over-budget backlog),
+    # ~30s on a healthy host. Internal ceiling (150s) stays < this timeout so a genuine
+    # fixture-build hang fails the RD-01b assertion (clear signal), not an opaque timeout.
+    "test/autotest/run-git-history-ref-decoration-autotest.sh": 240,
+    # Two-terminal scope suite: terminal B builds a heavy multi-commit git fixture (~8 EDR-taxed git
+    # spawns; GHMS-04 ceiling 90s->150s) THEN runs history open/load/switch/reload + diff + restore +
+    # ref-move across both terminals. The full chain can exceed 180s under peak full-run EDR load; 280s
+    # < 300s (NOT over-budget backlog), ~25s on a healthy host. Internal fixture ceiling (150s) stays <
+    # this timeout so a real fixture-build hang fails the GHMS-04 assertion, not an opaque timeout.
+    "test/autotest/run-git-history-multi-terminal-scope-autotest.sh": 280,
     # PDF / EPUB suites render large binary fixtures through PDF.js; the test
     # source for pdf-epub-preview alone is 1000+ lines covering font, outline,
     # search, and state-restore.  Measured: 88 assertions completed in 600s

@@ -13,6 +13,18 @@ function ensureDir(path) {
 
 function writeFile(path, content) {
   ensureDir(dirname(path))
+  // Idempotent write: skip when the on-disk content is already byte-identical, so an
+  // unchanged rebuild does not bump the file mtime and spuriously mark it modified in
+  // git. The compiler runs on every build, so most rebuilds regenerate byte-identical
+  // HTML; without this guard every build re-touches every changelog file (cross-platform,
+  // but most visible on Windows where the stat-dirty entries tend to linger in git status).
+  if (existsSync(path)) {
+    try {
+      if (readFileSync(path, 'utf-8') === content) return
+    } catch {
+      // fall through to write on any read error
+    }
+  }
   writeFileSync(path, content, 'utf-8')
 }
 

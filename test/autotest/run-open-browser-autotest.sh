@@ -22,10 +22,28 @@ APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/open-browser-autotest.log}"
 TMP_ROOT=""
 
+# Best-effort recursive remove that tolerates transient Windows EDR/AV file locks
+# ("Device or resource busy" / EPERM): retry with backoff, and NEVER fail the run on a
+# cleanup error. A passed test must not flip to FAIL because a teardown rm lost a race with a
+# lingering Electron helper handle on the cwd. Mirrors run-terminal-rename-restart-survival.
+robust_rm() {
+  local target="$1"
+  [[ -z "$target" || ! -e "$target" ]] && return 0
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if rm -rf "$target" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "[autotest] WARN: could not remove $target after retries (left for the OS to release)" >&2
+  return 0
+}
+
 cleanup() {
   find "$ROOT_DIR" -maxdepth 1 -name '__autotest_*' -exec rm -rf {} + 2>/dev/null || true
   if [[ -n "$TMP_ROOT" && "${ONWARD_AUTOTEST_KEEP_TMP:-0}" != "1" ]]; then
-    rm -rf "$TMP_ROOT"
+    robust_rm "$TMP_ROOT"
   fi
 }
 trap cleanup EXIT
