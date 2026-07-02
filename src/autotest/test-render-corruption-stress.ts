@@ -835,6 +835,77 @@ export async function testRenderCorruptionStress(ctx: AutotestContext): Promise<
         })
       }
     }
+
+    // ── RCS-EPOCH-01/02: per-owner model-epoch fix present & engaged ──
+    // The multi-Task garble fix (patches/@xterm__addon-webgl) adds a per-owner
+    // monotonic `TextureAtlas._modelEpoch` (bumped on merge AND clearTexture) and
+    // a per-GlyphRenderer `_seenModelEpoch`; `beginFrame()` returns true whenever
+    // the epoch advanced, so EVERY owning terminal independently re-resolves its
+    // model after a shared-atlas mutation — instead of only the first renderer
+    // consuming a single shared clear flag (the root cause of the sibling garble).
+    // The 12k-glyph sweep above forced merges, so the shared atlas epoch must have
+    // advanced (EPOCH-01), and every terminal that has rendered must be tracking
+    // that epoch (EPOCH-02). Revert the patch → `_modelEpoch` is undefined
+    // (EPOCH-01 fails); revert only the beginFrame rewrite → `_seenModelEpoch` is
+    // never set (EPOCH-02 fails). Both reads are the same runtime-accessible path
+    // RCS-ATLAS-03 uses (addon → _renderer → _charAtlas / _glyphRenderer).
+    {
+      const driverAddon = getWebglAddon(sessionMgr, driver) as (WebglAddonProbe & {
+        _renderer?: { _charAtlas?: { _modelEpoch?: number } }
+        clearTextureAtlas?: () => void
+      }) | null
+      const atlas = driverAddon?._renderer?._charAtlas
+      const epochBefore = atlas?._modelEpoch
+      const reachable = typeof epochBefore === 'number'
+      // A real page MERGE depends on the GPU's maxAtlasPages (min(32,
+      // MAX_TEXTURE_IMAGE_UNITS)); 15 pages here is just under the ~16 threshold
+      // on Apple/ANGLE-Metal, so a merge may not fire deterministically. The
+      // fix bumps `_modelEpoch` on BOTH merge AND clearTexture, so drive the
+      // deterministic path: the public `clearTextureAtlas()` triggers
+      // `_charAtlas.clearTexture()`, which (with the atlas already populated to
+      // 15 pages) must advance `_modelEpoch`. This proves the epoch-bump site is
+      // wired without relying on GPU-dependent merge timing.
+      let epochAfter = epochBefore
+      if (reachable && typeof driverAddon?.clearTextureAtlas === 'function') {
+        try { driverAddon.clearTextureAtlas() } catch { /* ignore */ }
+        epochAfter = driverAddon?._renderer?._charAtlas?._modelEpoch
+      }
+      const advanced = reachable && typeof epochAfter === 'number' && (epochAfter as number) > (epochBefore as number)
+      log('RCS-EPOCH-01:atlas-model-epoch', {
+        reachable,
+        epochBefore: reachable ? epochBefore : null,
+        epochAfter: typeof epochAfter === 'number' ? epochAfter : null,
+        advanced,
+        interpretation: advanced
+          ? 'shared atlas _modelEpoch advanced on clearTextureAtlas() → per-owner epoch fix bump site is wired'
+          : reachable
+            ? '_modelEpoch present but did NOT advance on clearTextureAtlas() → bump site MISSING'
+            : '_modelEpoch undefined → per-owner epoch fix is MISSING (patch reverted / not applied)'
+      })
+      _assert('RCS-EPOCH-01-atlas-model-epoch-advanced', advanced, {
+        epochBefore: reachable ? epochBefore : null,
+        epochAfter: typeof epochAfter === 'number' ? epochAfter : null
+      })
+
+      const seen = probedIds.map((id) => {
+        const addon = getWebglAddon(sessionMgr, id) as (WebglAddonProbe & {
+          _renderer?: { _glyphRenderer?: ({ value?: { _seenModelEpoch?: number } } & { _seenModelEpoch?: number }) }
+        }) | null
+        const gr = addon?._renderer?._glyphRenderer
+        const se = (gr?.value?._seenModelEpoch) ?? (gr?._seenModelEpoch)
+        return { id, seenModelEpoch: typeof se === 'number' ? se : null }
+      })
+      const allTracking = seen.length > 0 && seen.every((s) => typeof s.seenModelEpoch === 'number')
+      log('RCS-EPOCH-02:per-owner-seen-epoch', {
+        terminals: seen.length,
+        seen,
+        allTracking,
+        interpretation: allTracking
+          ? 'every owning terminal has a numeric _seenModelEpoch → epoch-aware beginFrame is live on all owners (per-owner re-resolve engaged)'
+          : 'a terminal lacks _seenModelEpoch → epoch-aware beginFrame NOT engaged (fix reverted/broken, or terminal has not rendered)'
+      })
+      _assert('RCS-EPOCH-02-per-owner-seen-epoch-tracked', allTracking, { seen })
+    }
   }
 
   if (cancelled()) return results
