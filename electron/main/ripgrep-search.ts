@@ -149,6 +149,8 @@ let searchCounter = 0
 
 export class RipgrepSearchManager {
   private worker: Worker | null = null
+  // Quit latch (see git-state-mirror-router): no worker spawns after quit begins.
+  private disposed = false
   private nextRequestId = 1
   private pending = new Map<number, PendingRequest>()
   private activeSearchId: string | null = null
@@ -165,7 +167,7 @@ export class RipgrepSearchManager {
     const rgPath = this.getRipgrepPath()
 
     setImmediate(() => {
-      if (this.activeSearchId !== searchId || mainWindow.isDestroyed()) return
+      if (this.activeSearchId !== searchId || mainWindow.isDestroyed() || this.disposed) return
       void mainWorkScheduler.enqueue(
         {
           lane: 'background-index',
@@ -178,7 +180,7 @@ export class RipgrepSearchManager {
         },
         () => this.request('start', { searchId, rgPath, options })
       ).catch((error) => {
-        if (this.activeSearchId !== searchId || mainWindow.isDestroyed()) return
+        if (this.activeSearchId !== searchId || mainWindow.isDestroyed() || this.disposed) return
         performanceTrace.record(PERF_TRACE_EVENT.WORKER_RIPGREP_START_ERROR, {
           searchId,
           error: String(error)
@@ -204,6 +206,7 @@ export class RipgrepSearchManager {
   }
 
   dispose(): void {
+    this.disposed = true
     this.cancel()
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
@@ -224,6 +227,7 @@ export class RipgrepSearchManager {
   }
 
   private ensureWorker(): Worker {
+    if (this.disposed) throw new Error('Ripgrep search worker client disposed (quit in progress)')
     if (this.worker) return this.worker
 
     const workerPath = join(__dirname, 'ripgrep-search-worker-entry.js')

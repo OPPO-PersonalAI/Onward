@@ -47,6 +47,8 @@ const WORKER_REQUEST_TIMEOUT_MS = 90000
 
 class SqliteWorkerClient {
   private worker: Worker | null = null
+  // Quit latch (see git-state-mirror-router): no worker spawns after quit begins.
+  private disposed = false
   private nextRequestId = 1
   private pending = new Map<number, PendingRequest>()
 
@@ -75,6 +77,7 @@ class SqliteWorkerClient {
   }
 
   dispose(): void {
+    this.disposed = true
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
       pending.reject(new Error('SQLite worker disposed'))
@@ -87,6 +90,7 @@ class SqliteWorkerClient {
   }
 
   private ensureWorker(): Worker {
+    if (this.disposed) throw new Error('SQLite worker client disposed (quit in progress)')
     if (this.worker) return this.worker
 
     const workerPath = join(__dirname, 'sqlite-worker-entry.js')

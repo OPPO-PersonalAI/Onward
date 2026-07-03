@@ -2164,21 +2164,29 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       return rangeSelected
     }, adaptiveDiffBudget(), 80)
     // The line-count label derives from the SAME selection state the keep action
-    // consumes, so its appearance confirms the selection committed — but it is a DOM
-    // repaint that lags under EDR. Generous hang-detector ceiling (was 3 s, which
-    // lost the race under EDR and left the keep acting on an uncommitted selection →
-    // the downstream split never happened → a 270 s dead-wait cascade). At 30 s the
-    // label is observed under EDR; only a genuine no-selection still fails.
+    // consumes, so its appearance confirms the selection committed. The selection
+    // is now stable across diff-load churn (GitDiffViewer no longer wipes it when
+    // ensureFileContent's identity changes), so the label renders within a couple
+    // of frames — a SHORT bounded ceiling is correct. Keep it UNDER the 3000 ms
+    // EDR_WAIT_SCALE floor so it is not multiplied: a doomed run costs ~1.5 s here
+    // instead of wedging the group for 75 s (30 s × 2.5 EDR scale).
     const rangeVisible = await waitFor('GDS-33-range-visible', () => {
       const label = (document.querySelector('.git-diff-line-count')?.textContent ?? '').trim()
       return label.includes('1') && !label.includes('No lines')
-    }, 30000, 50)
-    const rangeAction = await window.__onwardGitDiffDebug?.triggerLineAction?.('keep')
+    }, 1500, 50)
+    // FAIL-FAST: only issue the keep + wait for the split when the range selection
+    // actually committed (rangeSelected reads the same ref the keep action consumes).
+    // On a genuinely uncommitted selection the keep cannot split the file, so the
+    // 90 s split-ready wait would be a guaranteed dead-wait — skipping it turns a
+    // doomed run into a fast honest FAIL (rangeAction/splitReady stay false, so the
+    // record verdict is identical) instead of a 280 s watchdog kill. Mirrors the
+    // existing !splitReady guard below.
+    const rangeAction = rangeSelected ? await window.__onwardGitDiffDebug?.triggerLineAction?.('keep') : false
     // Diff-CONTENT population waits (partial-stage re-diff) — EDR-aware ceiling.
-    const splitReady = await waitFor('GDS-33-split-ready', () => {
+    const splitReady = rangeSelected ? await waitFor('GDS-33-split-ready', () => {
       const files = window.__onwardGitDiffDebug?.getFileList() ?? []
       return findDiffFileIndex(files, parentFile, 'staged') >= 0 && findDiffFileIndex(files, parentFile, 'unstaged') >= 0
-    }, adaptiveDiffBudget(), 80)
+    }, adaptiveDiffBudget(), 80) : false
     // FAIL-FAST: only run the two downstream content waits if the partial stage
     // actually split the file. Otherwise each would burn the full adaptiveDiffBudget
     // ceiling IN SERIES (3 such waits ≈ 270 s > the 280 s watchdog = a structurally

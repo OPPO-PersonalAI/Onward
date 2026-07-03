@@ -57,6 +57,8 @@ const WORKER_REQUEST_TIMEOUT_MS = 15000
 
 class GitStatusWorkerClient {
   private worker: Worker | null = null
+  // Quit latch (see git-state-mirror-router): no worker spawns after quit begins.
+  private disposed = false
   private nextRequestId = 1
   private pending = new Map<number, PendingRequest>()
 
@@ -96,6 +98,7 @@ class GitStatusWorkerClient {
   }
 
   dispose(): void {
+    this.disposed = true
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
       pending.reject(new Error('Git status worker disposed'))
@@ -126,6 +129,7 @@ class GitStatusWorkerClient {
   }
 
   private ensureWorker(): Worker {
+    if (this.disposed) throw new Error('Git status worker client disposed (quit in progress)')
     if (this.worker) return this.worker
 
     const workerPath = join(__dirname, 'git-status-worker-entry.js')

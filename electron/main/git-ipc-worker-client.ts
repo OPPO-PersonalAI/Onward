@@ -90,6 +90,8 @@ const WORKER_REQUEST_TIMEOUT_MS = 90000
 
 class GitIpcWorkerClient {
   private worker: Worker | null = null
+  // Quit latch (see git-state-mirror-router): no worker spawns after quit begins.
+  private disposed = false
   private nextRequestId = 1
   private pending = new Map<number, PendingRequest>()
 
@@ -328,6 +330,7 @@ class GitIpcWorkerClient {
   }
 
   dispose(): void {
+    this.disposed = true
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
       this.pending.delete(id)
@@ -357,6 +360,7 @@ class GitIpcWorkerClient {
   }
 
   private ensureWorker(): Worker {
+    if (this.disposed) throw new Error('Git IPC worker client disposed (quit in progress)')
     if (this.worker) return this.worker
 
     const workerPath = join(__dirname, 'git-ipc-worker-entry.js')

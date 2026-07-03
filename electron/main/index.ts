@@ -328,25 +328,63 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
   isQuitting = true
   installUpdateOnQuit = false
 
-  persistWindowState()
-  await shutdownTelemetry()
-  await persistTerminalCwdSnapshot()
-  await flushAppStateStorage()
-  const shutdownResult = await ptyManager.shutdownAll()
-  if (shutdownResult.timedOut > 0) {
-    console.warn(
-      `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
-    )
+  // Bounded teardown. Under autotest / heavy load a single awaited step
+  // (telemetry flush, per-terminal cwd snapshot via PTY round-trips, app-state
+  // worker flush, PTY shutdown) can be slow enough that this serial chain never
+  // reaches app.quit() before the test watchdog (or an impatient user) gives up
+  // — the observed "20/20 passed then never quits -> 280s watchdog kill". Race
+  // the graceful teardown against a hard-exit floor so quit is ALWAYS bounded,
+  // mirroring the DEBUG_QUIT fallback (ipc-handlers.ts: race(shutdown, timeout)
+  // -> app.exit(0)). Step order is preserved: persistTerminalCwdSnapshot writes
+  // cwds into app-state via setTerminalLastCwds(), so flushAppStateStorage MUST
+  // stay AFTER it; persistWindowState is synchronous and runs first, so window
+  // bounds are never lost even if the floor fires mid-teardown.
+  const HARD_EXIT_MS = process.env.ONWARD_AUTOTEST === '1' ? 20000 : 12000
+
+  const gracefulTeardown = async (): Promise<void> => {
+    persistWindowState()
+    await shutdownTelemetry()
+    await persistTerminalCwdSnapshot()
+    await flushAppStateStorage()
+    const shutdownResult = await ptyManager.shutdownAll()
+    if (shutdownResult.timedOut > 0) {
+      console.warn(
+        `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
+      )
+    }
+
+    logQuitPhase('debug-quit:cleanup-start')
+    await cleanupIpcHandlers()
+    logQuitPhase('debug-quit:cleanup-done')
+    destroyAllWindowsForQuit('debug-quit')
+    logQuitPhase('debug-quit:windows-destroyed')
+    flushPerformanceTrace('debug-quit')
+    logQuitPhase('debug-quit:before-app-quit')
   }
 
-  logQuitPhase('debug-quit:cleanup-start')
-  await cleanupIpcHandlers()
-  logQuitPhase('debug-quit:cleanup-done')
-  destroyAllWindowsForQuit('debug-quit')
-  logQuitPhase('debug-quit:windows-destroyed')
-  flushPerformanceTrace('debug-quit')
-  logQuitPhase('debug-quit:before-app-quit')
-  app.quit()
+  let hardExitTimer: ReturnType<typeof setTimeout> | null = null
+  const hardExitFloor = new Promise<'floor'>((resolve) => {
+    hardExitTimer = setTimeout(() => resolve('floor'), HARD_EXIT_MS)
+  })
+
+  const outcome = await Promise.race<'graceful' | 'floor'>([
+    gracefulTeardown().then((): 'graceful' => 'graceful').catch((error): 'graceful' => {
+      console.warn('[debug-quit] graceful teardown error:', error)
+      return 'graceful'
+    }),
+    hardExitFloor
+  ])
+  if (hardExitTimer) {
+    clearTimeout(hardExitTimer)
+  }
+
+  if (outcome === 'floor') {
+    // Graceful teardown overran the floor — force exit so quit is never unbounded.
+    logQuitPhase('debug-quit:hard-exit-floor')
+    app.exit(0)
+  } else {
+    app.quit()
+  }
   return { success: true }
 }
 

@@ -41,6 +41,10 @@ const WORKER_REQUEST_TIMEOUT_MS = 30000
 
 class AppStateWorkerClient {
   private worker: Worker | null = null
+  // Quit latch: mirror git-state-mirror-router's `disposed` guard so a task
+  // still draining when quit begins cannot spawn a fresh worker_thread into a
+  // tearing-down runtime (v8::ToLocalChecked Empty MaybeLocal on module load).
+  private disposed = false
   private nextRequestId = 1
   private pending = new Map<number, PendingRequest>()
 
@@ -59,6 +63,7 @@ class AppStateWorkerClient {
   }
 
   dispose(): void {
+    this.disposed = true
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
       pending.reject(new Error('AppState worker disposed'))
@@ -71,6 +76,7 @@ class AppStateWorkerClient {
   }
 
   private ensureWorker(): Worker {
+    if (this.disposed) throw new Error('AppState worker client disposed (quit in progress)')
     if (this.worker) return this.worker
 
     const workerPath = join(__dirname, 'app-state-worker-entry.js')

@@ -3974,17 +3974,25 @@ export function GitDiffViewer({
     ensureFileContentRef.current = ensureFileContent
   }, [ensureFileContent])
 
+  // Clear the previous file's line selection + decorations only when the
+  // SELECTED FILE actually changes — not when `ensureFileContent`'s identity
+  // churns during diff-load / content-refresh. Depending on `ensureFileContent`
+  // here re-ran the effect on every content refresh and wiped an active line
+  // selection mid-flight via setSelectedLineRangeValue(null) — which also clears
+  // lineSelectionInfoRef, the ref the keep/discard line actions read — so a
+  // range stage acted on a cleared selection and never split the file. Reach the
+  // loader through its ref (kept fresh in the effect above) and drop it from deps.
   useEffect(() => {
     if (selectedFile) {
       const key = getFileKey(selectedFile)
       const isStale = staleFileContentKeysRef.current.has(key)
-      ensureFileContent(selectedFile, isStale, isStale ? 'auto-refresh' : 'select')
+      ensureFileContentRef.current?.(selectedFile, isStale, isStale ? 'auto-refresh' : 'select')
       setActionMessage(null)
     }
     setSelectedLineRangeValue(null)
     originalDecorationsRef.current?.clear()
     modifiedDecorationsRef.current?.clear()
-  }, [selectedFile, ensureFileContent, getFileKey, setSelectedLineRangeValue])
+  }, [selectedFile, getFileKey, setSelectedLineRangeValue])
 
   // Renderer-side prefetch loop. The heavy prefetch lives in the main-
   // process precompute scheduler; this loop primes the renderer's

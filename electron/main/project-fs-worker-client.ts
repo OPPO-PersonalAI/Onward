@@ -41,6 +41,8 @@ const WORKER_REQUEST_TIMEOUT_MS = 90000
 
 class ProjectFsWorkerClient {
   private worker: Worker | null = null
+  // Quit latch (see git-state-mirror-router): no worker spawns after quit begins.
+  private disposed = false
   private nextRequestId = 1
   private pending = new Map<number, PendingRequest>()
 
@@ -97,6 +99,7 @@ class ProjectFsWorkerClient {
   }
 
   dispose(): void {
+    this.disposed = true
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
       pending.reject(new Error('Project FS worker disposed'))
@@ -135,6 +138,7 @@ class ProjectFsWorkerClient {
   }
 
   private ensureWorker(): Worker {
+    if (this.disposed) throw new Error('Project FS worker client disposed (quit in progress)')
     if (this.worker) return this.worker
     const workerPath = join(__dirname, 'project-fs-worker-entry.js')
     this.worker = new Worker(workerPath)
