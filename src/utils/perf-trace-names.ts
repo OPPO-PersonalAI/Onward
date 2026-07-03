@@ -393,6 +393,12 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_DIFF_CONTENT_CACHE_SKIP_STALE_GENERATION: 'main:git.diff.content-cache.skip-stale-generation',
   MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT: 'main:git.diff.content-cache.invalidate-project',
   MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU: 'main:git.diff.content-cache.invalidate-lru',
+  // Read-path stat revalidation dropped a content-cache HIT because the working-tree
+  // file's stat token no longer matched the token captured at store time (the file
+  // changed since it was cached, yet no watcher/mirror invalidation fired for it).
+  // This is the freshness backstop that makes the FS-watcher a latency optimization
+  // rather than the sole correctness authority for stale-diff-after-edit. ph='i'.
+  MAIN_GIT_DIFF_CONTENT_CACHE_STAT_REVALIDATE_STALE: 'main:git.diff.content-cache.stat-revalidate-stale',
   MAIN_GIT_DIFF_PRECOMPUTE_SCHEDULE: 'main:git.diff.precompute.schedule',
   MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE: 'main:git.diff.precompute.skip-too-large',
   RENDERER_SUBPAGE_FRESHNESS_CHECK: 'renderer:subpage.freshness-check',

@@ -229,6 +229,13 @@ function buildDefaultDeps(): FetchFileContentDeps<GitFileContentResult> {
         filename,
         changeType
       })
+    },
+    recordStatRevalidateStale: ({ project, filename, changeType }) => {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_STAT_REVALIDATE_STALE, {
+        project,
+        filename,
+        changeType
+      })
     }
   }
 }

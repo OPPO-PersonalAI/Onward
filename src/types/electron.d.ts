@@ -371,6 +371,9 @@ export type GitDiffContentCacheMissReason =
   | 'invalidated-watch'
   | 'invalidated-mirror'
   | 'invalidated-refresh'
+  // Read-path stat revalidation proved the working-tree file changed since it was
+  // cached (the watcher/mirror never fired for it) -> drop the hit and re-fetch.
+  | 'invalidated-stat-revalidate'
   | 'renderer-force-refresh'
   | 'project-queue-evicted'
   | 'single-file-too-large'

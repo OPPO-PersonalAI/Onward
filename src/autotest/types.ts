@@ -42,6 +42,7 @@ export interface ClickLatencyMeasurementForAutotest {
     | 'invalidated-watch'
     | 'invalidated-mirror'
     | 'invalidated-refresh'
+    | 'invalidated-stat-revalidate'
     | 'renderer-force-refresh'
     | 'project-queue-evicted'
     | 'single-file-too-large'

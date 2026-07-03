@@ -116,6 +116,21 @@ export class GitDiffContentCache<T> {
     return entry.value
   }
 
+  /**
+   * Like {@link get}, but also returns the stored freshness token so a read-path
+   * stat-revalidation can compare it against the current working-tree stat before
+   * serving the cached body. Same LRU bookkeeping as `get` (touch + move-to-front).
+   */
+  getEntry(project: string, key: string): { value: T; staleToken: string | undefined } | null {
+    const bucket = this.projects.get(project)
+    if (!bucket) return null
+    const entry = bucket.entries.get(key)
+    if (!entry) return null
+    entry.touchOrder = this.nextTouchOrder()
+    this.moveProjectToFront(project)
+    return { value: entry.value, staleToken: entry.staleToken }
+  }
+
   getProjectGeneration(project: string): GitDiffContentCacheGeneration {
     return `${this.globalGeneration}:${this.projectGenerations.get(project) ?? 0}`
   }

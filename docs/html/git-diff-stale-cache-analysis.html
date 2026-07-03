@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Git Diff 缓存陈旧 + 打开慢 · 根因分析与策略选型 / Git Diff Stale-Cache + Slow-Open · Root Cause & Strategy</title>
+<style>
+  /* No animated jumps: clicking a TOC link jumps instantly. */
+  html { scroll-behavior: auto; }
+  :root {
+    --bg: #0e0f13; --panel: #16181f; --panel-2: #1c1f28; --border: #2a2e3a;
+    --text: #c9ccd6; --text-dim: #8a8f9c; --text-strong: #eef0f6;
+    --accent: #6ea8fe; --accent-2: #a78bfa; --good: #3ddc84; --warn: #f5a524; --bad: #ef4444;
+    --code-bg: #0b0c10; --shadow-1: 0 6px 24px rgba(0,0,0,.35);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+    line-height: 1.7; font-size: 15px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; color: #dfe4ee; font-size: .88em; border: 1px solid var(--border); }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+  pre code { background: none; border: none; padding: 0; }
+
+  /* ---- Fixed left TOC ---- */
+  #toc {
+    position: fixed; top: 0; left: 0; width: 288px; height: 100vh; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--border); padding: 22px 16px 60px;
+  }
+  #toc .toc-title { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim); margin: 0 8px 12px; }
+  #toc a { display: block; color: var(--text-dim); padding: 6px 10px; border-radius: 7px; font-size: 13.5px; border-left: 2px solid transparent; }
+  #toc a:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); text-decoration: none; }
+  #toc a.active { color: var(--text-strong); background: color-mix(in srgb, var(--accent) 16%, transparent); border-left-color: var(--accent); font-weight: 600; }
+  #toc a.sub { padding-left: 22px; font-size: 12.5px; }
+
+  main { margin-left: 288px; padding: 40px 48px 120px; max-width: 1020px; }
+  header.doc-head { margin-bottom: 8px; }
+  h1 { font-size: 27px; color: var(--text-strong); margin: 0 0 6px; line-height: 1.3; }
+  h2 { font-size: 21px; color: var(--text-strong); margin: 44px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); scroll-margin-top: 18px; }
+  h3 { font-size: 16.5px; color: var(--text-strong); margin: 26px 0 10px; scroll-margin-top: 18px; }
+  p { margin: 10px 0; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 5px 0; }
+
+  .subtitle { color: var(--text-dim); font-size: 14px; margin: 0 0 18px; }
+
+  /* language toggle */
+  .lang-bar { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center;
+    background: linear-gradient(var(--bg), var(--bg) 70%, transparent); padding: 8px 0 12px; margin-bottom: 4px; }
+  .lang-btn { cursor: pointer; border: 1px solid var(--border); background: var(--panel-2); color: var(--text-dim);
+    padding: 4px 12px; border-radius: 999px; font-size: 12.5px; }
+  .lang-btn.active { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text-strong); border-color: var(--accent); }
+  .lang-en { display: none; }
+  body.en .lang-zh { display: none; }
+  body.en .lang-en { display: initial; }
+  body.en li.lang-zh, body.en p.lang-zh, body.en div.lang-zh { display: none; }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin: 14px 0; box-shadow: var(--shadow-1); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .callout { border-left: 4px solid var(--accent); background: var(--panel-2); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.bad { border-left-color: var(--bad); }
+  .callout.good { border-left-color: var(--good); }
+  .callout .tag { font-weight: 700; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; display: block; margin-bottom: 4px; }
+  .callout.warn .tag { color: var(--warn); }
+  .callout.bad .tag { color: var(--bad); }
+  .callout.good .tag { color: var(--good); }
+  .callout.accent .tag { color: var(--accent); }
+
+  .pill { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); margin: 0 3px 3px 0; }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+  .pill.good { color: var(--good); border-color: color-mix(in srgb, var(--good) 55%, var(--border)); background: color-mix(in srgb, var(--good) 12%, transparent); }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .pill.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--text-strong); font-weight: 600; }
+  tr:nth-child(even) td { background: color-mix(in srgb, var(--panel) 60%, transparent); }
+  .rec-row td { background: color-mix(in srgb, var(--good) 10%, transparent) !important; }
+
+  .mono-small { font-family: var(--mono); font-size: 12.5px; color: var(--text-dim); }
+  .fileref { font-family: var(--mono); font-size: 12.5px; color: var(--accent-2); }
+
+  .timeline { list-style: none; padding-left: 0; margin: 10px 0; }
+  .timeline li { position: relative; padding: 8px 0 8px 132px; border-left: 2px solid var(--border); margin-left: 92px; }
+  .timeline li .t { position: absolute; left: -92px; width: 84px; text-align: right; font-family: var(--mono); font-size: 12px; color: var(--text-dim); top: 8px; }
+  .timeline li .dot { position: absolute; left: -7px; top: 12px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
+  .timeline li.bad .dot { background: var(--bad); } .timeline li.good .dot { background: var(--good); } .timeline li.warn .dot { background: var(--warn); }
+  .timeline li .ev { font-family: var(--mono); font-size: 12.5px; color: var(--text-strong); }
+  .timeline li .note { color: var(--text-dim); font-size: 13px; }
+
+  svg { max-width: 100%; height: auto; display: block; margin: 8px auto; }
+  .diagram { background: var(--code-bg); border: 1px solid var(--border); border-radius: 12px; padding: 10px; margin: 14px 0; }
+
+  .metrics { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+  .metric { flex: 1 1 140px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .metric .v { font-size: 22px; font-weight: 700; color: var(--text-strong); font-family: var(--mono); }
+  .metric .v.bad { color: var(--bad); } .metric .v.good { color: var(--good); } .metric .v.warn { color: var(--warn); }
+  .metric .k { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+  footer.meta { margin-top: 60px; border-top: 1px solid var(--border); padding-top: 18px; color: var(--text-dim); font-size: 13px; }
+  footer.meta table { font-size: 12.5px; }
+
+  @media (max-width: 820px) {
+    #toc { display: none; }
+    main { margin-left: 0; padding: 24px 18px 90px; }
+  }
+</style>
+</head>
+<body>
+
+<nav id="toc" aria-label="Table of contents">
+  <div class="toc-title">目录 / Contents</div>
+  <a href="#overview">1 · 概述 / Overview</a>
+  <a href="#evidence">2 · 复现证据（trace）/ Evidence</a>
+  <a href="#current" >3 · 当前缓存架构 / Current design</a>
+  <a href="#current-diagram" class="sub">3.1 架构图 / Diagram</a>
+  <a href="#rootcause">4 · 根因 / Root cause</a>
+  <a href="#latency">5 · 打开慢 / Latency</a>
+  <a href="#tension" class="sub">5.1 新鲜度 vs 延迟 / Tension</a>
+  <a href="#peers">6 · 同类产品 / Peers</a>
+  <a href="#proposed">7 · 建议策略 / Proposed</a>
+  <a href="#proposed-diagram" class="sub">7.1 新架构图 / Diagram</a>
+  <a href="#options">8 · 方案对比 / Options</a>
+  <a href="#decision">9 · 待你决策 / Decision</a>
+  <a href="#metadata">10 · 元数据 / Metadata</a>
+</nav>
+
+<main>
+  <div class="lang-bar">
+    <span class="mono-small">语言 / Language:</span>
+    <span class="lang-btn active" data-lang="zh" onclick="setLang('zh')">简体中文</span>
+    <span class="lang-btn" data-lang="en" onclick="setLang('en')">English</span>
+  </div>
+
+  <header class="doc-head">
+    <h1>Git Diff 缓存陈旧 &amp; 打开慢 —— 根因分析与缓存策略选型</h1>
+    <p class="subtitle">
+      <span class="lang-zh">数据来源：用户诊断包（perf trace + 遥测 + 应用状态）+ 代码走读 + 对抗式复核 + 同类产品调研。缓存策略属于敏感改动，本文只做分析与方案对比，<b>不含任何已落地的代码改动</b>，等你拍板。</span>
+      <span class="lang-en">Sources: the user's diagnostic bundle (perf trace + telemetry + app state) + code walk-through + adversarial verification + peer research. Cache strategy is a sensitive change, so this document is analysis + options only — <b>no code has been changed</b>; awaiting your decision.</span>
+    </p>
+  </header>
+
+  <div class="callout accent">
+    <span class="tag">TL;DR</span>
+    <p class="lang-zh" style="margin:4px 0"><b>陈旧内容（症状 A）</b>不是"缓存从不失效"，而是<b>新鲜度授权只有一条链路且会漏</b>：所有缓存层都<b>只用路径做 key</b>（不带 mtime/内容哈希），能自动失效的信号<b>只有</b>文件监听器（FS watcher → git-state-mirror → 失效）。这条链路一旦漏掉一次编辑（Windows EDR 下监听事件被丢弃/合并/worker 降级），30 分钟 TTL 的请求缓存就把上一次的快照当成命中返回，直到你手动强制刷新。<br><b>打开慢（症状 B）</b>：这个仓库的 <code>git status</code> 本身就要 <b>2.6 秒（中位）、最高 10.6 秒</b>，所以设计上完全靠缓存来"显得快"——而这个缓存正是返回陈旧内容的那个。二者<b>相互制约</b>：粗暴地多失效 = 更多冷启动 = 更慢。</p>
+    <p class="lang-en" style="margin:4px 0"><b>Stale content (symptom A)</b> is not "the cache never invalidates" — it is a <b>single, miss-prone freshness authority</b>: every cache layer is <b>keyed by path only</b> (no mtime / content hash), and the <b>only</b> automatic invalidation signal is the FS watcher (FS watcher → git-state-mirror → invalidate). When that chain misses one edit (a watcher event dropped/coalesced, or degraded worker health under Windows EDR), the 30-minute-TTL request cache returns the previous snapshot as a hit until you manually force-refresh.<br><b>Slow open (symptom B)</b>: <code>git status</code> on this repo itself takes <b>2.6 s (median), up to 10.6 s</b>, so the design leans entirely on caching to "feel fast" — and that cache is exactly what serves stale. The two are <b>in direct tension</b>: naively invalidating more = more cold opens = slower.</p>
+  </div>
+
+  <!-- ============ 1 OVERVIEW ============ -->
+  <h2 id="overview">1 · 概述 / Overview</h2>
+  <div class="grid2">
+    <div class="card">
+      <b>症状 A — 陈旧内容 / Stale content</b>
+      <p class="lang-zh">改了本地文件，第一次看 git diff 是对的；再改几轮后重新打开，看到的还是<b>上一版</b>内容，不是最新的。</p>
+      <p class="lang-en">After editing a local file, the first git-diff view is correct; after a few more edits, re-opening still shows the <b>previous version</b>, not the latest.</p>
+      <div><span class="pill bad">freshness-authority hole</span><span class="pill warn">30-min TTL</span><span class="pill warn">path-only key</span></div>
+    </div>
+    <div class="card">
+      <b>症状 B — 打开慢 / Slow open</b>
+      <p class="lang-zh">点进 git diff 延迟高，加载内容慢；强制刷新后要等约 <b>15 秒</b>才出新内容。</p>
+      <p class="lang-en">Clicking into git-diff is laggy; after a force-refresh it takes ~<b>15 s</b> for fresh content to appear.</p>
+      <div><span class="pill bad">status ≈ 2.6s median</span><span class="pill warn">cat-file spawns</span><span class="pill warn">EDR process tax</span></div>
+    </div>
+  </div>
+  <div class="callout good">
+    <span class="tag">已用数据确证 / Data-confirmed</span>
+    <p class="lang-zh" style="margin:4px 0">根因经三路独立印证一致：<b>trace 取证</b>（命中年龄 + 无失效事件）、<b>代码走读</b>（TTL 与 key 定义）、<b>对抗式复核</b>（否定了更简单的解释，把"陈旧层"从渲染层内存修正为主进程请求缓存）。置信度：<b>高</b>。用户构建为 <code>4ff8cf7</code>（v2.1.0-daily.20260629.1）；与当前 <code>master</code> 相比，缓存逻辑<b>未变</b> —— 当前代码同样有此问题。</p>
+    <p class="lang-en" style="margin:4px 0">Root cause corroborated by three independent angles: <b>trace forensics</b> (hit ages + absent invalidations), <b>code reading</b> (TTL &amp; key definitions), and <b>adversarial verification</b> (which refuted simpler explanations and corrected the "stale layer" from renderer-memory to the main request cache). Confidence: <b>high</b>. The user's build is <code>4ff8cf7</code> (v2.1.0-daily.20260629.1); versus current <code>master</code> the cache logic is <b>unchanged</b> — the bug is present in current code too.</p>
+  </div>
+
+  <!-- ============ 2 EVIDENCE ============ -->
+  <h2 id="evidence">2 · 复现证据（trace 时间线）/ Evidence (trace timeline)</h2>
+  <p class="lang-zh">同一个文件 <code>kae-0.36/.claude/skills/kae_compiler/SKILL.md</code>（仓库 <code>E:/RTOS-stablity/winWatchRTOS-Build</code>）。对比"健康窗口"与"故障窗口"，差别只有一件事：<b>监听器有没有捕捉到这次编辑</b>。</p>
+  <p class="lang-en">Same file <code>kae-0.36/.claude/skills/kae_compiler/SKILL.md</code> (repo <code>E:/RTOS-stablity/winWatchRTOS-Build</code>). The healthy window vs the buggy window differ in exactly one thing: <b>whether the watcher caught the edit</b>.</p>
+
+  <h3>健康窗口 / Healthy window (03:26)</h3>
+  <ul class="timeline">
+    <li class="good"><span class="dot"></span><span class="t">03:26:14.8</span><span class="ev">watcher-fire kind=update</span><div class="note"><span class="lang-zh">编辑被监听器捕捉到</span><span class="lang-en">edit seen by watcher</span></div></li>
+    <li class="good"><span class="dot"></span><span class="t">03:26:17.9</span><span class="ev">cache-invalidate reason=mirror entriesCleared=2</span><div class="note"><span class="lang-zh">请求缓存被正确清空</span><span class="lang-en">request cache correctly cleared</span></div></li>
+    <li class="good"><span class="dot"></span><span class="t">03:26:31.5</span><span class="ev">cache-hit ageMs=118 (FRESH)</span><div class="note"><span class="lang-zh">重开重新计算 → 用户看到最新改动</span><span class="lang-en">re-open recomputes → user sees the change</span></div></li>
+  </ul>
+
+  <h3>故障窗口 / Buggy window (04:19)</h3>
+  <ul class="timeline">
+    <li><span class="dot"></span><span class="t">04:18:58.6</span><span class="ev">telemetry: 打开 git-diff（第 1 次）</span><div class="note"><span class="lang-zh">用户打开 git-diff</span><span class="lang-en">user opens git-diff (click #1)</span></div></li>
+    <li class="good"><span class="dot"></span><span class="t">04:19:05.2</span><span class="ev">cache-hit ageMs=110 (FRESH)</span><div class="note"><span class="lang-zh">首次打开是新鲜的 → 显示了改动</span><span class="lang-en">first open FRESH → shows the change</span></div></li>
+    <li class="warn"><span class="dot"></span><span class="t">≈04:19:05–14</span><span class="ev">[用户再次编辑文件 · 无 watcher-fire · 无 invalidate]</span><div class="note"><span class="lang-zh">第 2 次编辑的 FS 事件<b>从未到达</b> worker</span><span class="lang-en">edit #2's FS event <b>never reached</b> the worker</span></div></li>
+    <li><span class="dot"></span><span class="t">04:19:14.6</span><span class="ev">telemetry: 重开 git-diff（第 2 次）</span><div class="note"><span class="lang-zh">用户重开 git-diff</span><span class="lang-en">user re-opens git-diff (click #2)</span></div></li>
+    <li class="bad"><span class="dot"></span><span class="t">04:19:14.6</span><span class="ev">cache-hit ageMs=9568 (STALE)</span><div class="note"><span class="lang-zh"><b>陈旧命中</b>：返回 9.57 秒前的旧快照，其间无任何失效</span><span class="lang-en"><b>STALE HIT</b>: returns the 9.57 s-old snapshot; no invalidate since</span></div></li>
+    <li class="bad"><span class="dot"></span><span class="t">04:19:14.7</span><span class="ev">content-cache.hit (stale body rides on top)</span><div class="note"><span class="lang-zh">内容缓存叠在上面，同样是旧的</span><span class="lang-en">content cache serves stale body on top</span></div></li>
+    <li class="warn"><span class="dot"></span><span class="t">04:19:23.9</span><span class="ev">cache-invalidate reason=FORCE</span><div class="note"><span class="lang-zh">用户放弃，手动强制刷新（迟了约 9 秒）</span><span class="lang-en">user gives up, manual force-refresh (~9 s too late)</span></div></li>
+    <li class="warn"><span class="dot"></span><span class="t">04:19:39.4</span><span class="ev">content-cache.hit (fresh, ~15.5s later)</span><div class="note"><span class="lang-zh">强制刷新后约 15.5 秒才拿到新内容 = 症状 B</span><span class="lang-en">fresh content ~15.5 s after force = symptom B</span></div></li>
+  </ul>
+  <div class="callout bad">
+    <span class="tag">决定性观察 / The decisive observation</span>
+    <p class="lang-zh" style="margin:4px 0">在"新鲜打开(age 110ms)"与"陈旧重开(age 9568ms)"之间，整个 trace 里<b>没有任何一条失效事件，也没有任何一条 watcher-fire</b>。第一条失效是 9 秒后用户手动触发的 <code>reason=force</code>。也就是说：第 2 次编辑的文件系统事件根本没送到 worker，唯一能清掉 30 分钟缓存的信号没触发。<span class="fileref">证据：main:git.diff.cache-hit ageMs=9568/9682；git-utils.ts:442；git-diff-request-cache.ts:84</span></p>
+    <p class="lang-en" style="margin:4px 0">Between the fresh open (age 110 ms) and the stale re-open (age 9568 ms), the whole trace shows <b>zero invalidation events and zero watcher-fires</b>. The first invalidate is the user's manual <code>reason=force</code> 9 s later. So edit #2's FS event never reached the worker; the only signal that could clear the 30-min cache never fired. <span class="fileref">Evidence: main:git.diff.cache-hit ageMs=9568/9682; git-utils.ts:442; git-diff-request-cache.ts:84</span></p>
+  </div>
+
+  <!-- ============ 3 CURRENT ============ -->
+  <h2 id="current">3 · 当前缓存架构 / Current cache design</h2>
+  <p class="lang-zh">Git diff 有 4 层缓存。关键事实：<b>4 层里有 3 层只用路径做 key</b>（不带内容指纹），新鲜度<b>完全依赖外部失效信号</b>。</p>
+  <p class="lang-en">Git diff has 4 cache layers. Key fact: <b>3 of the 4 are keyed by path only</b> (no content fingerprint), and freshness depends <b>entirely on an external invalidation signal</b>.</p>
+  <table>
+    <thead><tr><th>层 / Layer</th><th>Key</th><th>TTL / 新鲜度</th><th>陈旧风险 / Stale risk</th></tr></thead>
+    <tbody>
+      <tr class="rec-row"><td><b>L1 请求缓存（文件列表）</b><br><span class="fileref">git-utils.ts:1749 / :442</span></td><td><code>resolve(repoRoot)::scope</code><br><span class="pill bad">仅路径 path-only</span></td><td><b>30 分钟</b> TTL</td><td><span class="lang-zh"><b>就是它服务了本次陈旧命中。</b>漏一次失效 → 陈旧列表最长存活 30 分钟（旧"Bug 2"是 3 秒，现放大 600×）。</span><span class="lang-en"><b>This is the layer that served the stale hit.</b> One missed invalidate → stale for up to 30 min (old "Bug 2" was 3 s — now 600× wider).</span></td></tr>
+      <tr><td>L2 单仓 diff 缓存<br><span class="fileref">git-utils.ts:1954</span></td><td><code>...::fingerprint</code><br><span class="pill good">含工作区 stat</span></td><td>指纹自失效</td><td><span class="lang-zh">低——但它在 L1 后面，L1 命中时根本到不了这层。</span><span class="lang-en">Low — but it sits behind L1; on an L1 hit it is never reached.</span></td></tr>
+      <tr><td>L3 主进程内容缓存（文件正文）<br><span class="fileref">git-diff-content-cache-state.ts:85</span></td><td><code>changeType::status::orig::filename</code><br><span class="pill bad">仅路径 path-only</span></td><td>无 TTL；旁边存了 mtime staleToken 但<b>不在 key 里</b></td><td><span class="lang-zh">mtime 只在 <code>revalidateProject</code> 里查，而它<b>只在 mirror 失效时才跑</b>。监听漏了 → 不校验 → 返回旧正文。</span><span class="lang-en">mtime is checked only inside <code>revalidateProject</code>, which runs <b>only on a mirror invalidation</b>. Watcher missed → no check → stale body.</span></td></tr>
+      <tr><td>L4 渲染层内存正文<br><span class="fileref">GitDiffViewer.tsx:3599</span></td><td><code>repoRoot::changeType::...::filename</code><br><span class="pill bad">仅路径 path-only</span></td><td>纯 push 失效（staleFileContentKeysRef）</td><td><span class="lang-zh">早退直接返回缓存正文、<b>零 IPC</b>；若 key 没被标脏就一直返回旧的。（本次 trace 未命中此层。）</span><span class="lang-en">Early-return serves cached body with <b>zero IPC</b>; if the key was never marked stale it serves stale forever. (Not the culprit in this trace.)</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn">
+    <span class="tag">被移除的安全网 / The removed safety net (RC-2)</span>
+    <p class="lang-zh" style="margin:4px 0"><code>git-utils.ts:438-441</code> 的注释还写着"打开子页会额外触发一次后台强制复验（stale-while-revalidate），漏掉的监听事件会在下次打开时自愈"——但 <code>GitDiffViewer.tsx:3198-3216</code> 里实际是 <code>loadDiff(force:false)</code>，并明确注释说这个强制复验<b>被删掉了</b>：因为强制会走 <code>invalidateContentCacheForProject</code> 把整个预热缓存清空，在 EDR Windows 上导致第一次点击冷启动（这就是 RC-2）。<b>结论：为了保住延迟，把新鲜度的安全网拆了，于是新鲜度 100% 依赖那个会漏的监听器。注释在骗人。</b></p>
+    <p class="lang-en" style="margin:4px 0">The comment at <code>git-utils.ts:438-441</code> still claims "subpage entry additionally fires a background force-revalidate (stale-while-revalidate) so a missed watcher event self-heals on the next open" — but <code>GitDiffViewer.tsx:3198-3216</code> actually calls <code>loadDiff(force:false)</code> and explicitly documents that this force-revalidate was <b>removed</b>: forcing routes through <code>invalidateContentCacheForProject</code>, which wipes the whole prewarm cache and cold-misses the first click on EDR Windows (that is bug "RC-2"). <b>So: to protect latency, the freshness safety net was removed, making freshness 100% dependent on the miss-prone watcher. The comment is stale.</b></p>
+  </div>
+
+  <h3 id="current-diagram">3.1 当前架构图 / Current design diagram</h3>
+  <div class="diagram">
+    <svg viewBox="0 0 860 300" font-family="var(--mono)" font-size="12.5">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8a8f9c"/></marker>
+        <marker id="arRed" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ef4444"/></marker>
+      </defs>
+      <!-- edit -->
+      <rect x="12" y="120" width="120" height="48" rx="8" fill="#1c1f28" stroke="#2a2e3a"/>
+      <text x="72" y="141" fill="#c9ccd6" text-anchor="middle">文件编辑</text>
+      <text x="72" y="157" fill="#8a8f9c" text-anchor="middle">edit on disk</text>
+      <!-- watcher chain (the ONLY authority) -->
+      <rect x="180" y="20" width="470" height="70" rx="8" fill="#160f0f" stroke="#5a2b2b"/>
+      <text x="415" y="40" fill="#f5a524" text-anchor="middle">唯一的新鲜度授权链（会漏）/ the ONLY freshness authority (miss-prone)</text>
+      <text x="415" y="62" fill="#c9ccd6" text-anchor="middle" font-size="11.5">FS watcher → worker recompute → mtime-fingerprint delta → mirror-update → invalidate</text>
+      <text x="415" y="80" fill="#8a8f9c" text-anchor="middle" font-size="11">Windows EDR 下会被丢弃/合并/worker 降级 · dropped/coalesced/degraded under EDR</text>
+      <path d="M132,132 C160,120 160,95 180,72" fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arRed)"/>
+      <text x="150" y="108" fill="#ef4444" font-size="10.5">漏! miss</text>
+      <!-- caches -->
+      <rect x="180" y="120" width="220" height="48" rx="8" fill="#1c1f28" stroke="#5a2b2b"/>
+      <text x="290" y="139" fill="#eef0f6" text-anchor="middle">L1 请求缓存 request cache</text>
+      <text x="290" y="156" fill="#ef4444" text-anchor="middle" font-size="11">key=path · TTL=30min</text>
+      <rect x="180" y="182" width="220" height="46" rx="8" fill="#1c1f28" stroke="#5a2b2b"/>
+      <text x="290" y="200" fill="#eef0f6" text-anchor="middle">L3 内容缓存 content cache</text>
+      <text x="290" y="216" fill="#ef4444" text-anchor="middle" font-size="11">key=path · no TTL</text>
+      <path d="M650,66 C690,90 690,120 400,140" fill="none" stroke="#8a8f9c" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="560" y="112" fill="#8a8f9c" font-size="10.5">invalidate（若触发）</text>
+      <!-- open -->
+      <rect x="470" y="150" width="180" height="48" rx="8" fill="#101a10" stroke="#2d5a2d"/>
+      <text x="560" y="170" fill="#c9ccd6" text-anchor="middle">打开 git diff</text>
+      <text x="560" y="186" fill="#8a8f9c" text-anchor="middle">open (force:false)</text>
+      <path d="M470,174 L400,160" fill="none" stroke="#8a8f9c" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="690" y="150" width="150" height="48" rx="8" fill="#160f0f" stroke="#5a2b2b"/>
+      <text x="765" y="170" fill="#ef4444" text-anchor="middle">陈旧内容</text>
+      <text x="765" y="186" fill="#8a8f9c" text-anchor="middle">stale shown</text>
+      <path d="M650,174 L690,174" fill="none" stroke="#ef4444" stroke-width="2" marker-end="url(#arRed)"/>
+    </svg>
+  </div>
+
+  <!-- ============ 4 ROOT CAUSE ============ -->
+  <h2 id="rootcause">4 · 根因 / Root cause</h2>
+  <div class="callout bad">
+    <span class="tag">根因（对抗式复核后的定论）/ Root cause (post-adversarial)</span>
+    <p class="lang-zh" style="margin:4px 0"><b>请求缓存（L1）以 30 分钟 TTL、仅路径 key 命中，而它唯一的亚-TTL 新鲜度授权（FS 监听 → mirror 失效链）没有为第二次编辑触发。</b>打开路径故意用 <code>force:false</code>（<span class="fileref">GitDiffViewer.tsx:3216</span>），且注释承诺的"下次打开自愈"实际已被移除（RC-2）。于是监听一漏，30 分钟内逐字返回旧快照。<br><span class="mono-small">注：代码走读最初把"陈旧层"指向渲染层内存早退（3599），被 trace 否定——trace 里没有 renderer-memory-hit，陈旧内容是经真实 IPC 由 main-content-cache 返回的。层级归属已修正为 L1 请求缓存 + L3 内容缓存。更宽的论断（仅路径 key + 单一会漏的授权 + 长 TTL）不变。</span></p>
+    <p class="lang-en" style="margin:4px 0"><b>The request cache (L1) returns a hit under a 30-minute TTL on a path-only key, while its only sub-TTL freshness authority (FS watcher → mirror invalidate chain) never fired for the second edit.</b> The open path deliberately uses <code>force:false</code> (<span class="fileref">GitDiffViewer.tsx:3216</span>) and the "self-heal on next open" the comment promises was removed (RC-2). So when the watcher misses, the previous snapshot is returned verbatim for up to 30 minutes.<br><span class="mono-small">Note: the code walk-through first blamed the renderer-memory early-return (3599); the trace refuted it — there are no renderer-memory-hit events, and the stale content came via a real IPC served by main-content-cache. The layer attribution was corrected to L1 request cache + L3 content cache. The broader thesis (path-only keys + a single miss-prone authority + long TTL) stands.</span></p>
+  </div>
+  <p class="lang-zh"><b>为什么"第一次对、后面错"</b>：干净→改动会改变 <code>git status</code> 的文本输出（一个不会漏的粗信号），所以第一次能刷新；但同一状态下的<b>再次编辑</b>（都是 "modified/unstaged"）只能靠 mtime 指纹这个<b>脆弱信号</b>——它一漏，就一直陈旧。</p>
+  <p class="lang-en"><b>Why "first view right, later views wrong"</b>: clean→modified changes the <code>git status</code> text (a coarse, unmissable signal), so the first view refreshes; but a <b>subsequent same-status re-edit</b> (still "modified/unstaged") relies solely on the fragile mtime fingerprint — miss it once and it stays stale.</p>
+
+  <!-- ============ 5 LATENCY ============ -->
+  <h2 id="latency">5 · 打开慢 / Latency</h2>
+  <div class="metrics">
+    <div class="metric"><div class="v warn">2.6s</div><div class="k">git status 重算 · 中位 / median</div></div>
+    <div class="metric"><div class="v warn">5.1s</div><div class="k">p95</div></div>
+    <div class="metric"><div class="v bad">10.6s</div><div class="k">最大 / max</div></div>
+    <div class="metric"><div class="v bad">~15.5s</div><div class="k">强刷恢复 / force-refresh recovery</div></div>
+  </div>
+  <p class="lang-zh">这个仓库（<code>E:\RTOS-stablity\winWatchRTOS-Build</code>，含大量文件、在 E: 盘、受 Windows EDR 进程创建税拖累）<code>git status</code> 本身就是<b>秒级</b>。冷启动时每个文件的正文要走 <code>cat-file</code>（EDR 下每次进程创建约 1.3 秒），这段耗时被藏在 <code>click-phase-ipc</code> span 里，所以用户感觉"点进去很慢"。<span class="mono-small">（注：本次 trace 里没有渲染层各阶段耗时打点——该构建未采集，所以延迟是从代码结构 + status 重算 span 推断，不是逐阶段量出。）</span></p>
+  <p class="lang-en">On this repo (<code>E:\RTOS-stablity\winWatchRTOS-Build</code> — many files, on the E: drive, taxed by Windows EDR process-creation), <code>git status</code> itself is <b>O(seconds)</b>. On a cold open each file's body goes through <code>cat-file</code> (~1.3 s per spawn under EDR); that cost is hidden inside the <code>click-phase-ipc</code> span, which is why "clicking in is slow." <span class="mono-small">(Note: this build did not capture renderer per-phase spans, so latency is inferred from code structure + the status-recompute spans, not measured per phase.)</span></p>
+
+  <h3 id="tension">5.1 新鲜度 vs 延迟：核心矛盾 / The freshness-vs-latency tension</h3>
+  <div class="callout accent">
+    <span class="tag">为什么不能"简单粗暴地多失效" / Why "just invalidate more" is wrong</span>
+    <p class="lang-zh" style="margin:4px 0">因为 status 是秒级，设计上靠缓存 + 预热来"显得快"。任何"每次事件就整片清缓存 / 缩短 TTL / 每次打开强刷"的做法，都会把下一次打开从<b>微秒级命中</b>变成<b>秒级冷启动（cat-file 进程）</b>——这正是当初 RC-2 的由来。所以正确方向是<b>精准失效</b>（只失效真正变了的那一项），而不是把失效做粗。</p>
+    <p class="lang-en" style="margin:4px 0">Because status is O(seconds), the design leans on cache + prewarm to feel fast. Any "wipe the whole cache on every event / shorten the TTL / force on every open" turns the next open from a <b>microsecond hit</b> into a <b>second-scale cold recompute (cat-file spawns)</b> — which is exactly what caused RC-2. So the correct direction is <b>surgical invalidation</b> (evict only the entry that actually changed), not blunter invalidation.</p>
+  </div>
+
+  <!-- ============ 6 PEERS ============ -->
+  <h2 id="peers">6 · 同类产品怎么做 / How peers solve it</h2>
+  <table>
+    <thead><tr><th>产品 / Product</th><th>做法 / Approach</th></tr></thead>
+    <tbody>
+      <tr class="rec-row"><td><b>VS Code</b><br>SCM Quick Diff<br><span class="mono-small">最接近的对标</span></td><td><span class="lang-zh"><b>结构上就不会陈旧。</b>"当前侧"= 编辑器活缓冲（不是缓存拷贝），永远最新、内容一变就重算 diff；"原始(git)侧"用 ref 拼成的 URI 做 key，新鲜度由平台文件服务的 <b>mtime</b> 把关——每次变更都 bump mtime，强制重读 git blob。<b>diff 结果从不以"路径 + 长 TTL"缓存。</b></span><span class="lang-en"><b>Structurally cannot go stale.</b> The "current" side is the live editor buffer (not a cached copy) — always fresh, re-diffs on change; the "original (git)" side is keyed by a ref-embedded URI and gated by a platform-owned <b>mtime</b> bumped on every change, forcing a re-read of the git blob. <b>The diff result is never cached under path + long TTL.</b></span><br><a href="https://github.com/microsoft/vscode/blob/main/extensions/git/src/fileSystemProvider.ts">vscode/extensions/git/src/fileSystemProvider.ts</a></td></tr>
+      <tr><td><b>GitLens</b> (GitKraken)</td><td><span class="lang-zh">按 <b>ref 可变性</b>分级 TTL：不可变的完整 SHA 内容缓存约 5 分钟（内容永不变），可变/符号 ref（HEAD、工作区）只给约 60 秒兜底 + 事件失效。<b>教训：只对内容寻址、不可变的东西长缓存；工作区/符号 ref 永远不给长 TTL。</b></span><span class="lang-en">Tiers TTL by <b>ref mutability</b>: an immutable full SHA's content is cached ~5 min (its content can never change), while mutable/symbolic refs (HEAD, working tree) get only a ~60 s failsafe + event invalidation. <b>Lesson: cache long only what is content-addressed and immutable; never give a working-tree/symbolic ref a long TTL.</b></span><br><a href="https://help.gitkraken.com/gitlens/gitlens-release-notes-current/">gitlens release notes</a></td></tr>
+      <tr><td><b>GitKraken Desktop</b> / <b>Sublime Merge</b></td><td><span class="lang-zh">打开的 diff <b>不</b>靠监听器自动刷；重新选中文件（或按刷新）时<b>从磁盘重读</b>。等于用"选中即重取"绕开了"缓存 + 监听失效"的竞态。</span><span class="lang-en">The open diff does <b>not</b> rely on a watcher to auto-refresh; on re-selecting the file (or pressing refresh) it <b>re-reads from disk</b>. This sidesteps the "cache + watcher-invalidate" race with "re-fetch on (re)select."</span><br><a href="https://feedback.gitkraken.com/suggestions/197334/refresh-button-when-looking-at-the-diff-view-of-a-file">gitkraken feedback</a> · <a href="https://github.com/sublimehq/sublime_merge/issues/1905">sublime_merge #1905</a></td></tr>
+    </tbody>
+  </table>
+  <div class="callout good">
+    <span class="tag">同类共识 / Peer consensus</span>
+    <p class="lang-zh" style="margin:4px 0"><b>工作区那一侧永远按需/按 mtime 校验，绝不放进"仅路径 + 长 TTL"的缓存里靠一个可能漏的监听事件来保新鲜。</b>不可变的 git 对象（oid 寻址）才可以长缓存。</p>
+    <p class="lang-en" style="margin:4px 0"><b>The working-tree side is always validated on read (by mtime) or re-read on demand — never parked in a "path-only + long-TTL" cache whose freshness hinges on a watcher event that can be missed.</b> Only immutable git objects (oid-addressed) may be cached long.</p>
+  </div>
+
+  <!-- ============ 7 PROPOSED ============ -->
+  <h2 id="proposed">7 · 建议策略 / Proposed strategy</h2>
+  <div class="callout accent">
+    <span class="tag">推荐 / Recommended · 读时 stat 校验 + 按 ref 可变性分级</span>
+    <p class="lang-zh" style="margin:4px 0"><b>保留现有的快速路径命中，但在每次命中"工作区侧"时做一次极廉价的 <code>fs.stat</code>（mtime+size）</b>，与缓存条目里存的戳比对：一致才用缓存，不一致就只重取这一项。"原始(git)侧"用 HEAD/index 的 oid 做 key、可以长缓存（仅在 index/HEAD 移动时失效）。<b>这样监听器降级为"预热/加速"的手段，而不再是唯一的正确性来源。</b></p>
+    <p class="lang-en" style="margin:4px 0"><b>Keep the fast path-keyed lookup, but on every hit for the working-tree side do one very cheap <code>fs.stat</code> (mtime+size)</b> and compare it to a stamp stored on the cache entry: serve cached only if the stamp matches, otherwise re-fetch just that entry. The "original (git)" side is keyed by the HEAD/index oid and may stay cached long (invalidated only on an index/HEAD move). <b>This demotes the watcher to a prewarm/latency optimization instead of the sole correctness authority.</b></p>
+  </div>
+  <div class="grid2">
+    <div class="card"><b class="lang-zh">为什么能修好陈旧</b><b class="lang-en">Why it fixes staleness</b>
+      <p class="lang-zh"><code>fs.stat</code> 直接问磁盘真相，<b>不依赖监听器</b>。监听漏了也没关系——下次打开一 stat 就发现文件变了，强制重取。确定性地关掉陈旧窗口。</p>
+      <p class="lang-en"><code>fs.stat</code> asks disk ground-truth, <b>independent of the watcher</b>. Even if the watcher missed the event, the next open stats the file, sees it changed, and re-fetches. Deterministically closes the stale window.</p>
+    </div>
+    <div class="card"><b class="lang-zh">为什么不拖慢打开</b><b class="lang-en">Why it doesn't slow opens</b>
+      <p class="lang-zh"><code>fs.stat</code> 是微秒级、<b>不创建进程</b>（不吃 EDR 进程税）。文件没变 → 照样瞬时命中，预热缓存原样保留，<b>不会重演 RC-2</b>。只有真的变了才付一次重取。</p>
+      <p class="lang-en"><code>fs.stat</code> is microseconds and <b>spawns no process</b> (no EDR tax). Unchanged file → still an instant hit, prewarm cache preserved, <b>no RC-2 regression</b>. Only a genuinely changed file pays one re-fetch.</p>
+    </div>
+  </div>
+
+  <h3 id="proposed-diagram">7.1 建议架构图 / Proposed design diagram</h3>
+  <div class="diagram">
+    <svg viewBox="0 0 860 250" font-family="var(--mono)" font-size="12.5">
+      <defs>
+        <marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8a8f9c"/></marker>
+        <marker id="arGreen" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#3ddc84"/></marker>
+      </defs>
+      <rect x="12" y="100" width="150" height="50" rx="8" fill="#101a10" stroke="#2d5a2d"/>
+      <text x="87" y="120" fill="#c9ccd6" text-anchor="middle">打开 git diff</text>
+      <text x="87" y="137" fill="#8a8f9c" text-anchor="middle">open / re-select</text>
+      <!-- cache hit -->
+      <rect x="210" y="100" width="180" height="50" rx="8" fill="#1c1f28" stroke="#2a2e3a"/>
+      <text x="300" y="120" fill="#eef0f6" text-anchor="middle">缓存命中 cache hit</text>
+      <text x="300" y="137" fill="#8a8f9c" text-anchor="middle">key=path (fast)</text>
+      <path d="M162,125 L210,125" stroke="#8a8f9c" stroke-width="1.5" marker-end="url(#ar2)"/>
+      <!-- stat gate -->
+      <rect x="440" y="95" width="180" height="60" rx="8" fill="#101720" stroke="#2f4a6a"/>
+      <text x="530" y="118" fill="#6ea8fe" text-anchor="middle">fs.stat 校验</text>
+      <text x="530" y="135" fill="#8a8f9c" text-anchor="middle" font-size="11">mtime+size == 戳?</text>
+      <text x="530" y="150" fill="#8a8f9c" text-anchor="middle" font-size="10.5">微秒级 · 无进程</text>
+      <path d="M390,125 L440,125" stroke="#8a8f9c" stroke-width="1.5" marker-end="url(#ar2)"/>
+      <!-- match -> serve -->
+      <rect x="680" y="40" width="168" height="50" rx="8" fill="#101a10" stroke="#2d5a2d"/>
+      <text x="764" y="60" fill="#3ddc84" text-anchor="middle">一致 → 用缓存</text>
+      <text x="764" y="77" fill="#8a8f9c" text-anchor="middle">match → serve (instant)</text>
+      <path d="M620,110 C650,95 655,80 680,68" stroke="#3ddc84" stroke-width="2" marker-end="url(#arGreen)"/>
+      <!-- mismatch -> refetch -->
+      <rect x="680" y="160" width="168" height="50" rx="8" fill="#161206" stroke="#5a4a1a"/>
+      <text x="764" y="180" fill="#f5a524" text-anchor="middle">不一致 → 重取一项</text>
+      <text x="764" y="197" fill="#8a8f9c" text-anchor="middle">changed → re-fetch (fresh)</text>
+      <path d="M620,140 C650,155 655,170 680,182" stroke="#f5a524" stroke-width="2" marker-end="url(#ar2)"/>
+      <text x="300" y="205" fill="#8a8f9c" text-anchor="middle" font-size="11">watcher 仍在，但只作预热/加速，不再是唯一正确性来源 · watcher = prewarm only, not the sole authority</text>
+    </svg>
+  </div>
+
+  <!-- ============ 8 OPTIONS ============ -->
+  <h2 id="options">8 · 方案对比与取舍 / Options &amp; trade-offs</h2>
+  <table>
+    <thead><tr><th>方案 / Option</th><th>做法 / What</th><th>修陈旧?</th><th>影响延迟?</th><th>工作量</th></tr></thead>
+    <tbody>
+      <tr class="rec-row"><td><b>A · 读时 stat 校验 + ref 分级</b><br><span class="pill good">推荐 recommended</span></td><td><span class="lang-zh">命中时对工作区侧 <code>fs.stat</code> 比对戳；原始侧按 oid 长缓存。监听降级为预热。</span><span class="lang-en">stat-validate working-tree side on hit; original side cached by oid; watcher = prewarm.</span></td><td><span class="pill good">是·确定性</span></td><td><span class="pill good">几乎无（stat 微秒）</span></td><td>中 / medium</td></tr>
+      <tr><td>B · 打开时后台复验（有界）</td><td><span class="lang-zh">恢复"打开自愈"，但按单文件精准复验，避开 RC-2 的整片清空。</span><span class="lang-en">restore per-open revalidate, scoped per-file to avoid the RC-2 whole-cache wipe.</span></td><td><span class="pill warn">部分（当次仍可能先看到旧的）</span></td><td><span class="pill good">小</span></td><td>中 / medium</td></tr>
+      <tr><td>C · 缩短 TTL / 激进失效</td><td><span class="lang-zh">30 分钟 → 数秒，或每次事件整片清。</span><span class="lang-en">30 min → seconds, or wipe on every event.</span></td><td><span class="pill warn">部分</span></td><td><span class="pill bad">变差（更多冷启动）</span></td><td>小 / small</td></tr>
+      <tr><td>D · 选中即重取（GitKraken 式）</td><td><span class="lang-zh">每次(重)选中文件都重取工作区侧，不信缓存。</span><span class="lang-en">re-fetch working-tree side on every (re)select.</span></td><td><span class="pill good">是</span></td><td><span class="pill bad">每次选中都付 git 读</span></td><td>小 / small</td></tr>
+    </tbody>
+  </table>
+  <p class="lang-zh"><b>为什么推荐 A：</b>它是唯一"修好陈旧、又不牺牲延迟"的方案，且与最接近的对标（VS Code）一致。B 是 A 的弱化子集（当次仍可能先看到旧的）。C/D 都以延迟换新鲜，在这个秒级 status 的仓库上代价明显，同类产品的经验也明确反对长 TTL 缓存工作区侧。</p>
+  <p class="lang-en"><b>Why A:</b> it is the only option that fixes staleness <i>without</i> sacrificing latency, and it matches the closest peer (VS Code). B is a weaker subset of A (you may still see stale once on the immediate reopen). C/D trade latency for freshness — costly on this O(seconds)-status repo, and the peer consensus is explicitly against long-TTL caching of the working-tree side.</p>
+
+  <div class="callout warn">
+    <span class="tag">互补项（非本次决策）/ Complementary (not this decision)</span>
+    <p class="lang-zh" style="margin:4px 0"><b>为什么第二次编辑的监听事件会漏？</b>值得单独查（原子保存的临时文件过滤、rename 识别、EDR 下 worker 健康/reconcile 退避）。但按稳健设计原则，监听器<b>不该</b>是唯一的正确性来源——所以无论监听多可靠，A 的 stat 兜底都应该做。<b>症状 B（打开慢）</b>大部分是这个仓库 status 本身秒级 + EDR 进程税的固有成本；A 不会让它变差，但要显著提速是另一件更大的工作，可另行评估。</p>
+    <p class="lang-en" style="margin:4px 0"><b>Why did edit #2's watcher event get missed?</b> Worth a separate look (atomic-save temp-file filtering, rename detection, EDR worker health / reconcile backoff). But by robust-design principle the watcher <b>should not</b> be the sole correctness authority — so regardless of watcher reliability, A's stat backstop should exist. <b>Symptom B (slow open)</b> is largely inherent (this repo's O(seconds) status + EDR process tax); A does not worsen it, but making it materially faster is a separate, larger effort to scope on its own.</p>
+  </div>
+
+  <!-- ============ 9 DECISION ============ -->
+  <h2 id="decision">9 · 待你决策 / Decision needed</h2>
+  <div class="callout accent">
+    <p class="lang-zh" style="margin:4px 0">按项目规则，缓存/新鲜度授权属于敏感策略，改动前必须你确认。请选择上面的<b>方案 A / B / C / D</b>（我建议 A），或提出调整。确认后我才会写代码，并配套：单元测试（stat 戳比对的纯逻辑）+ autotest（用<b>绕过 IPC-save 的真实工作区写入</b>复现"监听漏了仍能刷新"这条现有测试没覆盖的路径）+ perf 埋点。<b>在你确认前，我不会改任何缓存代码。</b></p>
+    <p class="lang-en" style="margin:4px 0">Per project rules, cache / freshness-authority is a sensitive strategy that needs your sign-off before any change. Please pick <b>Option A / B / C / D</b> above (I recommend A) or propose an adjustment. Once you confirm, I will implement it plus: a unit test (the pure stat-stamp comparison) + an autotest that reproduces the watcher-miss path via a <b>raw working-tree write that bypasses IPC-save</b> (the gap the current staleness suite never exercises) + perf instrumentation. <b>I will not touch cache code until you confirm.</b></p>
+  </div>
+
+  <!-- ============ 10 METADATA ============ -->
+  <footer class="meta" id="metadata">
+    <h2 style="border:none;margin-bottom:8px">10 · 文档元数据 / Document metadata</h2>
+    <table>
+      <tbody>
+        <tr><th>生成分支 / Branch</th><td><code>master</code></td></tr>
+        <tr><th>反映的构建 / Reflects build</th><td>用户构建 <code>v2.1.0-daily.20260629.1</code> = commit <code>4ff8cf7</code>；当前 <code>master</code> = <code>2ae6dde</code>（缓存逻辑未变）</td></tr>
+        <tr><th>数据来源 / Data source</th><td>诊断包 <code>onward-diagnostic-2026-07-03_12-19-55</code>（perf trace 8 块 / 遥测 / app-state）</td></tr>
+        <tr><th>文档版本 / Doc version</th><td>1.0</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin-top:16px">更新历史（追加式）/ Update history (append-only)</h3>
+    <table>
+      <thead><tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要 / Summary</th></tr></thead>
+      <tbody>
+        <tr><td>1.0</td><td>2026-07-03</td><td>master</td><td><span class="lang-zh">首版：根因（新鲜度授权漏洞：仅路径 key + 30 分钟 TTL + 单一会漏的监听授权 + 被移除的 RC-2 自愈）、trace 证据、延迟分析、同类产品调研、建议策略（读时 stat 校验 + ref 分级）与方案 A–D 对比。等待用户选型。</span><span class="lang-en">Initial: root cause (freshness-authority hole: path-only keys + 30-min TTL + single miss-prone watcher authority + removed RC-2 self-heal), trace evidence, latency analysis, peer research, proposed strategy (stat-validate-on-read + ref tiering) and options A–D. Awaiting user's choice.</span></td></tr>
+        <tr><td>1.1</td><td>2026-07-03</td><td>master</td><td><span class="lang-zh">用户选定方案 A 并已实现：内容缓存（L3）命中路径新增 fs.stat 读时校验（`git-diff-content-cache-state.ts` 的 `decideContentCacheReadFreshness`）+ `getEntry` 暴露 staleToken + 新 miss 原因 `invalidated-stat-revalidate`（4 处联合类型 + 中英文调试标签同步）+ 新埋点 `main:git.diff.content-cache.stat-revalidate-stale`。验证：单测 85/85、autotest GDS-47 绿（freshCount 5/5、viaStatRevalidate 5/5，证明是读时 stat 校验而非 watcher 命中）、reentry 组无回归、trace 自检绿。改动未提交，待用户提交决定。L1 列表缓存 / L4 渲染层内存 / watcher 可靠性 / 症状 B 提速列为后续。</span><span class="lang-en">User chose Option A; implemented: fs.stat validation on the L3 content-cache hit path (`decideContentCacheReadFreshness` in `git-diff-content-cache-state.ts`) + `getEntry` exposing the staleToken + new miss reason `invalidated-stat-revalidate` (synced across 4 union copies + bilingual debug label) + new trace event `main:git.diff.content-cache.stat-revalidate-stale`. Verified: unit 85/85, autotest GDS-47 green (freshCount 5/5, viaStatRevalidate 5/5 — proves the read-path stat compare, not a watcher hit, surfaced it), reentry group no regression, trace self-check green. Uncommitted, pending user commit. L1 list cache / L4 renderer memory / watcher reliability / symptom-B speedup filed as follow-ups.</span></td></tr>
+      </tbody>
+    </table>
+  </footer>
+</main>
+
+<script>
+  // Language toggle (default zh)
+  function setLang(l){
+    document.body.classList.toggle('en', l === 'en');
+    document.querySelectorAll('.lang-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.lang === l); });
+  }
+  // TOC scrollspy — highlight current section (no smooth scroll; jumps are instant per CSS scroll-behavior:auto)
+  (function(){
+    var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+    var map = {};
+    links.forEach(function(a){ var id = a.getAttribute('href').slice(1); var el = document.getElementById(id); if(el) map[id] = a; });
+    var ids = Object.keys(map);
+    function onScroll(){
+      var y = window.scrollY + 120; var current = ids[0];
+      for (var i=0;i<ids.length;i++){ var el = document.getElementById(ids[i]); if (el && el.offsetTop <= y) current = ids[i]; }
+      links.forEach(function(a){ a.classList.remove('active'); });
+      if (map[current]) map[current].classList.add('active');
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+</body>
+</html>

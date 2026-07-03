@@ -20,6 +20,9 @@ export type GitDiffContentCacheMissReason =
   | 'invalidated-watch'
   | 'invalidated-mirror'
   | 'invalidated-refresh'
+  // Read-path stat revalidation proved the working-tree file changed since it was
+  // cached (the watcher/mirror never fired for it) -> drop the hit and re-fetch.
+  | 'invalidated-stat-revalidate'
   | 'renderer-force-refresh'
   | 'project-queue-evicted'
   | 'single-file-too-large'
@@ -110,6 +113,34 @@ export function parseCacheKey(key: string): {
   }
 }
 
+/**
+ * Read-path freshness decision for a content-cache HIT (VS Code / GitLens model:
+ * validate the working-tree side on read instead of trusting a path-only key +
+ * a watcher that can miss an edit). `storedToken` is the working-tree stat token
+ * captured when the entry was cached; `currentToken` is a fresh stat taken now.
+ *
+ * Returns `'stale'` ONLY when we can positively prove the file changed — both
+ * tokens present and different. Everything else is `'fresh'` (serve the hit):
+ *   - `storedToken === undefined`  → index-backed/staged content (no worktree
+ *     token) or uncomputable at store time; its freshness rides the
+ *     index-generation / mirror path, not this check.
+ *   - `currentToken === undefined` → transient stat error (e.g. the atomic-save
+ *     temp→rename window on Windows) or a deleted file; do not punish the hit —
+ *     a real delete is a status change the mirror catches, and the next
+ *     successful stat catches a completed edit.
+ *
+ * Conservative-on-read by design: never evict an unvalidatable hit (preserves
+ * the "opens feel instant" latency), only re-fetch on a proven change (closes
+ * the stale window even when the watcher missed the event).
+ */
+export function decideContentCacheReadFreshness(
+  storedToken: string | undefined,
+  currentToken: string | undefined
+): 'fresh' | 'stale' {
+  if (storedToken === undefined || currentToken === undefined) return 'fresh'
+  return storedToken === currentToken ? 'fresh' : 'stale'
+}
+
 export interface FetchFileContentArgs {
   cwd: string
   file: ContentCacheFile
@@ -136,6 +167,14 @@ export interface FetchFileContentDeps<T extends CacheableFetchResult> {
   recordMiss?: (info: { project: string; filename: string; changeType: string; reason: GitDiffContentCacheMissReason; force: boolean }) => void
   recordSkipTooLarge?: (info: { project: string; filename: string; bytes: number }) => void
   recordSkipStaleGeneration?: (info: { project: string; filename: string; changeType: string }) => void
+  /**
+   * Emitted when a content-cache HIT is dropped by the read-path stat
+   * revalidation because the working-tree file's stat token no longer matches the
+   * token captured at store time (i.e. the file changed since it was cached, even
+   * though no watcher/mirror invalidation fired). Injected so this module stays
+   * fs-free and unit-testable.
+   */
+  recordStatRevalidateStale?: (info: { project: string; filename: string; changeType: string }) => void
 }
 
 function withCacheInfo<T extends CacheableFetchResult>(result: T, info: GitDiffContentCacheInfo): T {
@@ -202,22 +241,56 @@ export function createFetchFileContentWithCache<T extends CacheableFetchResult>(
     const hadProjectBeforeLookup = deps.cache.hasProject(project)
     const generationAtFetchStart = deps.cache.getProjectGeneration(project)
 
-    const cached = force ? null : deps.cache.get(project, key)
-    if (cached) {
-      deps.recordHit?.({
+    let readRevalidateStale = false
+    const cachedEntry = force ? null : deps.cache.getEntry(project, key)
+    if (cachedEntry) {
+      // Stat-validate the working-tree side ON READ (not only on a watcher/mirror
+      // invalidation). The cache key is path-only, so a same-status re-edit maps to
+      // the SAME key; the FS-watcher is the only automatic invalidation and it can
+      // MISS an edit (dropped/coalesced under Windows EDR, or degraded worker
+      // health). Re-stat the file now and compare to the token captured at store
+      // time — using the SAME computeStaleToken fn as the store path, so the tokens
+      // are comparable by construction. fs.stat is async (libuv threadpool) and
+      // spawns no process, so an UNCHANGED file still hits in ~sub-ms (no RC-2
+      // prewarm wipe, no git spawn); a CHANGED file is caught even when the watcher
+      // never fired. Staged/index-backed content has no worktree token
+      // (computeStaleToken -> undefined) and is served as-is (VS Code / GitLens
+      // ref-tiering: only the working-tree side is validated on read).
+      let currentToken: string | undefined
+      try {
+        currentToken = deps.computeStaleToken ? await deps.computeStaleToken(project, args.file) : undefined
+      } catch {
+        currentToken = undefined
+      }
+      if (decideContentCacheReadFreshness(cachedEntry.staleToken, currentToken) === 'fresh') {
+        deps.recordHit?.({
+          project,
+          filename: args.file.filename,
+          changeType: args.file.changeType
+        })
+        return withCacheInfo(cachedEntry.value, {
+          state: 'hit',
+          source: 'main-content-cache',
+          project,
+          key
+        })
+      }
+      // Proven stale: fall through to a fresh worker re-fetch below, whose put()
+      // overwrites this entry (and its staleToken) in place. Do NOT invalidateEntry
+      // here — that bumps the project generation, which would make the re-fetch's
+      // store be skipped (isProjectGenerationCurrent === false), serving the fresh
+      // body but never caching it. put() already replaces the same key.
+      readRevalidateStale = true
+      deps.recordStatRevalidateStale?.({
         project,
         filename: args.file.filename,
         changeType: args.file.changeType
       })
-      return withCacheInfo(cached, {
-        state: 'hit',
-        source: 'main-content-cache',
-        project,
-        key
-      })
     }
 
-    const missReason = resolveMissReason(project, hadProjectBeforeLookup, args.options?.missReason, deps)
+    const missReason = readRevalidateStale
+      ? 'invalidated-stat-revalidate'
+      : resolveMissReason(project, hadProjectBeforeLookup, args.options?.missReason, deps)
     deps.recordMiss?.({
       project,
       filename: args.file.filename,

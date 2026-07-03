@@ -1062,6 +1062,54 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-17-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
+  // ───── GDS-47: read-path stat revalidation surfaces a WATCHER-MISSED edit ─────
+  // The content-cache key is path-only, so a same-status re-edit maps to the SAME
+  // key. Every other GDS case mutates via saveFileContent (deterministic IPC-save
+  // invalidation) OR external-write-then-wait-for-the-watcher; NEITHER exercises the
+  // real user bug: the FS watcher MISSES the edit, yet the very next read must still
+  // be fresh. This case does exactly that — prime the content cache, do a RAW
+  // external write (debug.writeExternalFile: no IPC-save invalidation), then re-read
+  // getFileContent IMMEDIATELY, BEFORE the async parcel-watcher/mirror chain can
+  // invalidate. Only the read-path fs.stat compare can make that read fresh, so a
+  // fresh result isolates the fix; cacheInfo.missReason === 'invalidated-stat-
+  // revalidate' proves the stat path (not a coincidental watcher win) surfaced it.
+  // Timing-sensitive (statistical) → aggregate N=5 and assert on the aggregate.
+  if (!cancelled() && runGroup('reentry')) {
+    await restoreBaseline()
+    // parentFile is a plain modified (unstaged) tracked file — not a rename — so the
+    // getFileContent descriptor is fixed. Cast to the exact param type so the `status`
+    // literal is accepted as a GitStatusCode without importing the union here.
+    const fileDesc = {
+      filename: parentFile,
+      status: 'M',
+      changeType: 'unstaged',
+      isSubmoduleEntry: false
+    } as Parameters<typeof window.electronAPI.git.getFileContent>[1]
+    const N = 5
+    let freshCount = 0
+    let viaStatRevalidate = 0
+    for (let i = 0; i < N && !cancelled(); i += 1) {
+      const primeContent = `parent source line\nGDS-47 prime ${i}\n`
+      const editContent = `parent source line\nGDS-47 external edit ${i} must surface\n`
+      // Establish + CACHE the prime content (saveFileContent invalidates; the read re-warms it).
+      await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, primeContent)
+      await window.electronAPI.git.getFileContent(cleanRoot, fileDesc, cleanRoot, { force: false })
+      // RAW external write — bypasses GIT_SAVE_FILE_CONTENT invalidation; bumps mtime.
+      await window.electronAPI.debug.writeExternalFile({ root: cleanRoot, relPath: parentFile, content: editContent })
+      // IMMEDIATE re-read: no delay, so the async watcher cannot have invalidated yet;
+      // only the read-path stat revalidation can surface the change here.
+      const after = await window.electronAPI.git.getFileContent(cleanRoot, fileDesc, cleanRoot, { force: false })
+      if (after?.modifiedContent === editContent) freshCount += 1
+      if (after?.cacheInfo?.missReason === 'invalidated-stat-revalidate') viaStatRevalidate += 1
+    }
+    record('GDS-47-read-path-stat-revalidation-surfaces-watcher-missed-edit', freshCount === N && viaStatRevalidate >= 1, {
+      freshCount,
+      viaStatRevalidate,
+      N,
+      note: 'freshCount===N: the immediate re-read after an external edit is fresh (the regression fails here); viaStatRevalidate>=1: the read-path fs.stat compare (not the watcher) surfaced it'
+    })
+  }
+
   // ─────────────── GDS-18: re-entry latency trend is recorded ───────────────
   // The flip-side of GDS-17: same-cwd re-entry with no intervening mutation
   // should normally hit warm caches. This row records the timing as trend
