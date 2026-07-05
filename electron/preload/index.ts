@@ -1244,6 +1244,9 @@ export interface DebugAPI {
   getGitDiffDebugStats: () => Promise<GitDiffDebugStats>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
+  perfTraceDiagnostic: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
+  reloadWindow: () => Promise<{ success: boolean; error?: string }>
+  gitStateMirrorDebugInspect: () => Promise<Record<string, unknown>>
   getApiServerPort: () => Promise<number>
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
@@ -2225,6 +2228,23 @@ const debugAPI: DebugAPI = {
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => {
     if (!perfTraceEnabled) return
     ipcRenderer.send(IPC.DEBUG_PERF_TRACE, { event, data, terminalId })
+  },
+  // Diagnostic-tier renderer trace: low-frequency, user-action-scale
+  // breadcrumbs (page opens, open-phase spans) that MUST be present in a
+  // production diagnostic bundle. Rides the same default-on gate as
+  // traceIpc() (`ONWARD_PERF_TRACE !== '0'`), NOT the opt-in
+  // `ONWARD_PERF_TRACE === '1'` gate that keeps high-frequency component
+  // tracing off in prod. Never route per-frame / per-keystroke / per-PTY
+  // events through this channel.
+  perfTraceDiagnostic: (event: string, data?: Record<string, unknown>, terminalId?: string) => {
+    if (!preloadPerfTraceEnabled) return
+    ipcRenderer.send(IPC.DEBUG_PERF_TRACE, { event, data, terminalId })
+  },
+  reloadWindow: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_RELOAD_WINDOW)
+  },
+  gitStateMirrorDebugInspect: () => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_DEBUG_INSPECT)
   },
   getApiServerPort: () => {
     return ipcRenderer.invoke('debug:get-api-server-port') as Promise<number>

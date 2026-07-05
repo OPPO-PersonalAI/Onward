@@ -72,7 +72,8 @@ import { resolveDiffInlineGate, resolveGitDiffSplitViewMode, type GitDiffSplitVi
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
-import { perfTrace } from '../../utils/perf-trace'
+import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
+import { buildOpenSkeletonEntries } from './openSkeletonEntries'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { raceWithTimeout } from '../../utils/race-with-timeout'
 import { isWatchdogTimeoutError, makeWatchdogTimeoutError } from './watchdogTimeoutError'
@@ -1442,6 +1443,25 @@ export function GitDiffViewer({
   // panel is closed. Closed-window mutations must still invalidate renderer
   // body caches before a same-cwd re-entry.
   const { snapshot: mirrorSnapshot } = useGitStateMirror(activeCwd || null)
+  // G4 diagnostic: record (once per open) that the loading shell painted
+  // REAL file rows from the mirror snapshot while getDiff was still
+  // running — the "user is not staring at an anonymous spinner" proof a
+  // slow-open bug report needs. Reset when the real list lands.
+  const openSkeletonTracedRef = useRef(false)
+  useEffect(() => {
+    if (diffResult) {
+      openSkeletonTracedRef.current = false
+      return
+    }
+    if (openSkeletonTracedRef.current) return
+    const count = mirrorSnapshot?.files?.length ?? 0
+    if (count === 0) return
+    openSkeletonTracedRef.current = true
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_OPEN_SKELETON_RENDERED, {
+      cwd: activeCwd || '',
+      fileCount: count
+    })
+  }, [diffResult, mirrorSnapshot, activeCwd])
   const getFileKey = useCallback((file: GitFileStatus, repoRoot = activeCwd || '') => {
     return buildGitDiffFileKey(file.repoRoot || repoRoot, file)
   }, [activeCwd])
@@ -2978,6 +2998,16 @@ export function GitDiffViewer({
       silent: Boolean(options?.silent),
       force: Boolean(options?.force)
     })
+    // Page-OPEN phase chain (diagnostic channel, default-on in prod). Only a
+    // reset load is a page open; silent refreshes / queued reloads stay off
+    // this chain so the spans always mean "the user watched a spinner".
+    const isPageOpen = Boolean(options?.reset)
+    if (isPageOpen) {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_OPEN_PHASE_REQUEST, {
+        cwd,
+        force: Boolean(options?.force)
+      })
+    }
     try {
       const stagedLoad = Boolean(options?.reset)
       const initialScope = stagedLoad ? 'root-only' : 'full'
@@ -3009,6 +3039,30 @@ export function GitDiffViewer({
         fileCount: initialResult.files?.length ?? 0,
         durationMs: Math.round(performance.now() - start)
       })
+      if (isPageOpen) {
+        // durationMs auto-routes this to a ph='X' span (resolvePhase); the
+        // span is exactly the time the open spinner covered the list load.
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_OPEN_PHASE_LIST_APPLIED, {
+          cwd: initialResult.cwd || cwd,
+          stage: initialScope,
+          ok: initialResult.success,
+          fileCount: initialResult.files?.length ?? 0,
+          durationMs: +(performance.now() - start).toFixed(1)
+        })
+        // First-paint = two rAFs after the list state landed: React has
+        // committed and the browser has presented a frame — the moment the
+        // user actually stops seeing the spinner.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (loadTokenRef.current !== currentToken) return
+            perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_OPEN_PHASE_FIRST_PAINT, {
+              cwd: initialResult.cwd || cwd,
+              fileCount: initialResult.files?.length ?? 0,
+              durationMs: +(performance.now() - start).toFixed(1)
+            })
+          })
+        })
+      }
 
       // Second stage: the root-only pass reported submodules still resolving →
       // fetch the full recursive diff and merge it in-place (root-only files
@@ -3036,6 +3090,18 @@ export function GitDiffViewer({
       }
     } catch (error) {
       if (loadTokenRef.current !== currentToken) return
+      if (isPageOpen) {
+        // The open never produced a list — the diagnostically critical
+        // branch: a user bundle must show whether the spinner ended in a
+        // watchdog abort or a hard load failure, and after how long.
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_OPEN_PHASE_LIST_APPLIED, {
+          cwd: cwd || '',
+          ok: false,
+          watchdogTimeout: isWatchdogTimeoutError(error),
+          fileCount: 0,
+          durationMs: +(performance.now() - start).toFixed(1)
+        })
+      }
       // A renderer-side watchdog abort means the getDiff invoke never settled
       // (the worker is still churning behind an EDR-throttled concurrency-1 lane,
       // or its reply was lost and the lane only frees at the worker's own 90s
@@ -6677,6 +6743,14 @@ export function GitDiffViewer({
       .filter((repo) => repo.isSubmodule || repo.loading)
       .sort(sortRepoContexts)
 
+    // G4: paint REAL file rows from the mirror snapshot while getDiff runs.
+    // The snapshot already carries every changed path + status; only the
+    // +/- counts are unknown (they keep the shimmer bar). Empty when the
+    // mirror has no data yet (cold subscribe) — the anonymous shimmer rows
+    // below cover that case exactly as before.
+    const skeletonEntries = buildOpenSkeletonEntries(mirrorSnapshot?.files)
+    const headerCount = skeletonEntries.length
+
     return (
       <div className="git-diff-main git-diff-main-loading">
         <div className="git-diff-file-list" style={{ width: fileListWidth }}>
@@ -6699,19 +6773,33 @@ export function GitDiffViewer({
             </div>
           )}
           <div className="git-diff-file-list-header">
-            {t('gitDiff.fileList', { count: 0 })}
+            {t('gitDiff.fileList', { count: headerCount })}
           </div>
           <div className="git-diff-file-list-content git-diff-file-list-content-loading">
-            {Array.from({ length: 6 }).map((_, index) => (
-              <div
-                key={`git-diff-skeleton-${index}`}
-                className={`git-diff-file-skeleton${index % 3 === 0 ? ' short' : index % 3 === 1 ? ' medium' : ''}`}
-              >
-                <span className="git-diff-file-skeleton-status" />
-                <span className="git-diff-file-skeleton-line" />
-                <span className="git-diff-file-skeleton-stats" />
-              </div>
-            ))}
+            {skeletonEntries.length > 0
+              ? skeletonEntries.map((entry) => (
+                <div
+                  key={entry.key}
+                  className="git-diff-file-skeleton git-diff-file-skeleton-known"
+                  title={entry.filename}
+                >
+                  <span className={`git-diff-file-skeleton-status known status-${entry.status.toLowerCase()}`}>
+                    {entry.status}
+                  </span>
+                  <span className="git-diff-file-skeleton-name">{entry.filename}</span>
+                  <span className="git-diff-file-skeleton-stats" />
+                </div>
+              ))
+              : Array.from({ length: 6 }).map((_, index) => (
+                <div
+                  key={`git-diff-skeleton-${index}`}
+                  className={`git-diff-file-skeleton${index % 3 === 0 ? ' short' : index % 3 === 1 ? ' medium' : ''}`}
+                >
+                  <span className="git-diff-file-skeleton-status" />
+                  <span className="git-diff-file-skeleton-line" />
+                  <span className="git-diff-file-skeleton-stats" />
+                </div>
+              ))}
           </div>
           <div className="git-diff-resizer" />
         </div>
@@ -6719,7 +6807,11 @@ export function GitDiffViewer({
         <div className="git-diff-detail git-diff-detail-loading">
           <div className="git-diff-loading">
             <div className="git-diff-loading-dots" aria-hidden="true"><span /><span /><span /></div>
-            <span>{message}</span>
+            <span>
+              {skeletonEntries.length > 0
+                ? t('gitDiff.loadingKnownChanges', { count: headerCount })
+                : message}
+            </span>
           </div>
         </div>
       </div>

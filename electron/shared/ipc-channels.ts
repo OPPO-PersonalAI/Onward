@@ -85,6 +85,11 @@ export const IPC = {
   DEBUG_PERF_TRACE: 'debug:perf-trace',
   DEBUG_QUIT: 'debug:quit',
   DEBUG_READ_TELEMETRY_LOG: 'debug:read-telemetry-log',
+  // Autotest-only (ONWARD_AUTOTEST=1): reload the main window's
+  // webContents. The subscription-leak suite uses a real renderer reload
+  // to prove pre-reload mirror subscriptions are purged (Electron never
+  // fires 'destroyed' on reload, so reload is its own leak class).
+  DEBUG_RELOAD_WINDOW: 'debug:reload-window',
   DEBUG_RESET_PERF_TRACE_METRICS: 'debug:reset-perf-trace-metrics',
   DIALOG_OPEN_DIRECTORY: 'dialog:openDirectory',
   DIALOG_OPEN_TEXT_FILE: 'dialog:openTextFile',
@@ -132,6 +137,10 @@ export const IPC = {
   GIT_STATE_MIRROR_REQUEST_FILE_BODY: 'git-state-mirror:request-file-body',
   GIT_STATE_MIRROR_FILE_BODY_UPDATE: 'git-state-mirror:file-body-update',
   GIT_STATE_PUSH_CWD: 'git-state-mirror:push-cwd',
+  // Autotest-only (ONWARD_AUTOTEST=1): read-only dump of the router's
+  // subscription tables (refCounts / internalRefCounts / per-renderer),
+  // used by the subscription-leak suite to prove watchers are released.
+  GIT_STATE_MIRROR_DEBUG_INSPECT: 'git-state-mirror:debug-inspect',
   // Main → renderer: emitted when `pushTerminalCwd` rejects a raw cwd
   // (path does not exist, fails normalization, etc.). Renderer uses this
   // to roll back any speculative `oscDetectedCwds` entry it dispatched

@@ -142,6 +142,15 @@ class GitStateMirrorRouter {
   private subs = new Map<number, Map<string, number>>()
   /** cwd → subscriber count (>0 iff worker has attached its watcher). */
   private refCounts = new Map<string, number>()
+  /**
+   * cwd → main-process (internalSubscribe) share of `refCounts`.
+   * Diagnostic bookkeeping only — `refCounts` stays authoritative. Lets
+   * `inspect()` attribute a live watcher to "main bridge" vs "renderer
+   * wc N", which is what the dead-repo-churn leak hunt needs (the
+   * 2026-07-04 bundle showed 3 of 5 mirrored repos with no live
+   * terminal, ~950 recomputes each).
+   */
+  private internalRefCounts = new Map<string, number>()
   /** cwd → latest known snapshot, served immediately on new subscription. */
   private latest = new Map<string, MirrorState>()
   /** cwd → latest watcher supervisor health, exposed to renderers/autotests. */
@@ -229,6 +238,7 @@ class GitStateMirrorRouter {
   private clearLocalState(): void {
     this.subs.clear()
     this.refCounts.clear()
+    this.internalRefCounts.clear()
     this.latest.clear()
     this.watcherStatuses.clear()
     this.terminalCwds.clear()
@@ -583,6 +593,17 @@ class GitStateMirrorRouter {
       this.internalForceRecompute(rawCwd)
       return true
     })
+
+    // Autotest-only observability: the subscription-leak suite reads the
+    // router's tables to prove every open/close/reload path releases its
+    // watcher. Gated inside the handler (registration is unconditional so
+    // an accidental production call gets a typed error, not a hang).
+    ipcMain.handle(IPC.GIT_STATE_MIRROR_DEBUG_INSPECT, () => {
+      if (process.env.ONWARD_AUTOTEST !== '1') {
+        return { success: false, error: 'git-state-mirror:debug-inspect requires ONWARD_AUTOTEST=1' }
+      }
+      return { success: true, ...this.inspect() }
+    })
   }
 
   private requestFileBody(cwd: string, fileKey: string, force: boolean): Promise<MirrorFileBody | null> {
@@ -698,22 +719,53 @@ class GitStateMirrorRouter {
   }
 
   /**
-   * Drop subscriptions belonging to a webContents that has been destroyed
-   * (renderer reload, window close, terminal-tab close). Without this every
-   * crash-and-reload would leak a watcher in the worker.
+   * Drain every subscription a renderer holds. Shared by the two renderer
+   * end-of-life signals below; also the G5 fix's core (2026-07-04 bundle:
+   * 3 of 5 mirrored repos with no live terminal, ~950 recomputes each).
+   */
+  private drainRendererSubscriptions(wcId: number, reason: 'destroyed' | 'navigation'): void {
+    const perRenderer = this.subs.get(wcId)
+    if (!perRenderer || perRenderer.size === 0) return
+    const cwdCount = perRenderer.size
+    // Iterate a snapshot of (cwd, count) so we can fully drain each
+    // canonical's per-renderer refCount in one pass — renderer teardown
+    // must release the watcher even if the renderer held N raw-form
+    // subscriptions for the same canonical.
+    for (const [cwd, count] of Array.from(perRenderer)) {
+      for (let i = 0; i < count; i += 1) this.dropSubscription(wcId, cwd)
+    }
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_RENDERER_SUBS_PURGED, {
+      wcId,
+      cwdCount,
+      reason
+    })
+  }
+
+  /**
+   * Drop subscriptions belonging to a webContents whose renderer world
+   * ended. TWO signals are required:
+   *   - 'destroyed'            — window close / webContents teardown.
+   *   - 'did-start-navigation' — RELOAD and real navigations. Electron
+   *     never fires 'destroyed' on reload: the WebContents object (and its
+   *     wc.id) survives while the renderer world — including every React
+   *     unmount cleanup that would have called unsubscribeMirror — is
+   *     wiped. Pre-fix, pre-reload subscriptions therefore parked in
+   *     `subs` forever; after the post-reload renderer re-subscribed and
+   *     later unsubscribed once, the count sat at 1 with no live owner,
+   *     pinning the worker's watcher + reconcile heartbeat until app quit
+   *     (the dead-repo churn: SL-02/SL-03 reproduce it).
    */
   private registerWebContentsCleanup(): void {
     const handle = (wc: Electron.WebContents) => {
       wc.on('destroyed', () => {
-        const perRenderer = this.subs.get(wc.id)
-        if (!perRenderer) return
-        // Iterate a snapshot of (cwd, count) so we can fully drain each
-        // canonical's per-renderer refCount in one pass — renderer
-        // destruction must release the watcher even if the renderer
-        // held N raw-form subscriptions for the same canonical.
-        for (const [cwd, count] of Array.from(perRenderer)) {
-          for (let i = 0; i < count; i += 1) this.dropSubscription(wc.id, cwd)
-        }
+        this.drainRendererSubscriptions(wc.id, 'destroyed')
+      })
+      wc.on('did-start-navigation', (details) => {
+        // Only a main-frame, cross-document navigation tears down the
+        // renderer world. In-page (hash / history.pushState) navigations
+        // keep every live subscription — do not touch those.
+        if (!details.isMainFrame || details.isSameDocument) return
+        this.drainRendererSubscriptions(wc.id, 'navigation')
       })
     }
     // Hook every existing + future webContents.
@@ -723,16 +775,33 @@ class GitStateMirrorRouter {
   }
 
   /** Test hook for autotest — read-only. */
-  inspect(): { workerReady: boolean; subscribers: number; cwds: string[]; watcherStatuses: MirrorWatcherStatus[] } {
+  inspect(): {
+    workerReady: boolean
+    subscribers: number
+    cwds: string[]
+    watcherStatuses: MirrorWatcherStatus[]
+    refCounts: Record<string, number>
+    internalRefCounts: Record<string, number>
+    perRenderer: Array<{ wcId: number; entries: Record<string, number> }>
+  } {
     let subscribers = 0
-    for (const perRenderer of this.subs.values()) {
-      for (const count of perRenderer.values()) subscribers += count
+    const perRenderer: Array<{ wcId: number; entries: Record<string, number> }> = []
+    for (const [wcId, entries] of this.subs) {
+      const table: Record<string, number> = {}
+      for (const [cwd, count] of entries) {
+        subscribers += count
+        table[cwd] = count
+      }
+      perRenderer.push({ wcId, entries: table })
     }
     return {
       workerReady: this.workerReady,
       subscribers,
       cwds: Array.from(this.refCounts.keys()),
-      watcherStatuses: Array.from(this.watcherStatuses.values())
+      watcherStatuses: Array.from(this.watcherStatuses.values()),
+      refCounts: Object.fromEntries(this.refCounts),
+      internalRefCounts: Object.fromEntries(this.internalRefCounts),
+      perRenderer
     }
   }
 
@@ -752,6 +821,7 @@ class GitStateMirrorRouter {
     const cwd = canonicalise(rawCwd)
     const next = (this.refCounts.get(cwd) ?? 0) + 1
     this.refCounts.set(cwd, next)
+    this.internalRefCounts.set(cwd, (this.internalRefCounts.get(cwd) ?? 0) + 1)
     if (next === 1) this.postToWorker({ kind: 'attach-watch', cwd })
     return this.latest.get(cwd) ?? null
   }
@@ -760,6 +830,9 @@ class GitStateMirrorRouter {
   internalUnsubscribe(rawCwd: string): void {
     if (!rawCwd) return
     const cwd = canonicalise(rawCwd)
+    const internalNext = (this.internalRefCounts.get(cwd) ?? 1) - 1
+    if (internalNext <= 0) this.internalRefCounts.delete(cwd)
+    else this.internalRefCounts.set(cwd, internalNext)
     const next = (this.refCounts.get(cwd) ?? 1) - 1
     if (next <= 0) {
       this.refCounts.delete(cwd)
@@ -790,6 +863,20 @@ class GitStateMirrorRouter {
   setReconcileFocus(rawCwd: string | null): void {
     const cwd = rawCwd ? canonicalise(rawCwd) : null
     this.postToWorker({ kind: 'reconcile-focus', cwd })
+  }
+
+  /**
+   * G3 foreground yield: a user-visible getDiff for `cwd` started
+   * (busy=true) or settled (busy=false). Forwarded to the worker so the
+   * repo's background recomputes defer instead of competing for the
+   * EDR-taxed process-creation lane. repoRoot rides along (when the mirror
+   * already knows it) so subdir/root forms of the same repo match.
+   */
+  setForegroundBusy(rawCwd: string, busy: boolean): void {
+    if (!rawCwd) return
+    const cwd = canonicalise(rawCwd)
+    const repoRoot = this.latest.get(cwd)?.repoRoot ?? null
+    this.postToWorker({ kind: 'foreground-yield', cwd, repoRoot, busy })
   }
 
   /** Read-only access to the last-pushed cwd for a terminal (for bridge cold-start). */

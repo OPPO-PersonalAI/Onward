@@ -1080,6 +1080,9 @@ export interface DebugAPI {
   getGitDiffDebugStats: () => Promise<GitDiffDebugStats>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
+  perfTraceDiagnostic: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
+  reloadWindow: () => Promise<{ success: boolean; error?: string }>
+  gitStateMirrorDebugInspect: () => Promise<Record<string, unknown>>
   getApiServerPort: () => Promise<number>
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>

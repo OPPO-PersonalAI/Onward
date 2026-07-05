@@ -61,6 +61,7 @@ import { buildGitStatusPorcelainArgs } from './git-status-args'
 import { gitignoreToWatchIgnoreGlobs } from './git-gitignore-watch-globs'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { MirrorRecomputeGovernor, type RecomputeAdmitKind } from './git-state-mirror-recompute-governor'
 
 import type {
   MainToMirrorMessage,
@@ -82,6 +83,33 @@ const execFileAsync = promisify(execFile)
 // many files at once). Coalesces inside this window — recompute happens
 // once at the trailing edge, not per-event. This is debounce, not polling.
 const DEBOUNCE_MS = 80
+
+// G3 load governance: admission control over background recomputes —
+// cross-repo concurrency budget (ONWARD_GSM_MAX_CONCURRENT_RECOMPUTES,
+// default 2), foreground-yield while a user-visible getDiff runs, and the
+// adaptive watcher duty-cycle floor (next watcher recompute no sooner than
+// the previous one's duration after it ended; fast hosts unaffected).
+const recomputeGovernor = new MirrorRecomputeGovernor({
+  maxConcurrent: Math.max(1, Number(process.env.ONWARD_GSM_MAX_CONCURRENT_RECOMPUTES || '2') || 2)
+})
+// cwd → pending governor-retry timer. One retry chain per entry; the chain
+// re-runs runRecompute which re-consults the governor.
+const governorRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function admitKindForReason(
+  reason: 'attach' | 'watcher' | 'polling' | 'focus-resync' | 'osc-switch' | 'reconcile'
+): RecomputeAdmitKind {
+  switch (reason) {
+    case 'watcher':
+    case 'polling':
+      return 'watcher'
+    case 'reconcile':
+      return 'reconcile'
+    default:
+      // attach / focus-resync / osc-switch are user-driven — never governed.
+      return 'user'
+  }
+}
 // The native-quiesce barrier + its constants (NATIVE_WATCHER_SETTLE_MS, the
 // deadline) live in the pure leaf `git-state-mirror-teardown.ts` so the
 // unsubscribe-settled -> drain -> close ordering is unit-tested without an
@@ -480,8 +508,33 @@ async function runRecompute(
     }
     return false
   }
+
+  // G3 admission control. A deferred recompute schedules ONE retry chain per
+  // entry; the retry re-enters here and re-consults the governor (foreground
+  // may still be busy, the budget may still be full, the duty-cycle floor
+  // shrinks as time passes). User-driven reasons are never deferred.
+  const decision = recomputeGovernor.admit(entry.cwd, admitKindForReason(reason), Date.now())
+  if (!decision.admit) {
+    if (!governorRetryTimers.has(entry.cwd)) {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECOMPUTE_DEFERRED, {
+        cwd: entry.cwd,
+        reason: decision.reason,
+        retryInMs: decision.retryInMs,
+        trigger: reason
+      })
+      const timer = setTimeout(() => {
+        governorRetryTimers.delete(entry.cwd)
+        if (!shuttingDown && !entry.detachRequested) void runRecompute(entry, reason, options)
+      }, decision.retryInMs ?? 250)
+      timer.unref?.()
+      governorRetryTimers.set(entry.cwd, timer)
+    }
+    return false
+  }
+
   entry.recomputeInFlight = true
   const startedAt = Date.now()
+  recomputeGovernor.onStart(entry.cwd)
   const generation = beginMirrorRecompute(entry)
   let next: MirrorState
   try {
@@ -491,6 +544,7 @@ async function runRecompute(
       cwd: entry.cwd,
       error: error instanceof Error ? error.message : String(error)
     })
+    recomputeGovernor.onEnd(entry.cwd, Date.now(), Date.now() - startedAt)
     entry.recomputeInFlight = false
     if (entry.recomputeQueued && !entry.detachRequested && !shuttingDown) {
       entry.recomputeQueued = false
@@ -499,6 +553,7 @@ async function runRecompute(
     return false
   }
   const delta = finishMirrorRecomputeIfCurrent(entry, generation, next)
+  recomputeGovernor.onEnd(entry.cwd, Date.now(), Date.now() - startedAt)
   performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE, {
     cwd: entry.cwd,
     repoRoot: next.repoRoot,
@@ -1227,6 +1282,14 @@ async function handleDetachWatch(cwd: string): Promise<void> {
   const result = await requestMirrorDetach(entry)
   if (result === 'detached' || result === 'idle') {
     entries.delete(cwd)
+    // Drop governor bookkeeping + any pending governed retry so a detached
+    // repo cannot re-enter runRecompute from a stale timer.
+    recomputeGovernor.removeRepo(cwd)
+    const retry = governorRetryTimers.get(cwd)
+    if (retry) {
+      clearTimeout(retry)
+      governorRetryTimers.delete(cwd)
+    }
   }
 }
 
@@ -1429,6 +1492,27 @@ parentPort.on('message', (msg: MainToMirrorMessage) => {
       focusedRepoRootKey = resolveFocusedRepoRootKey(msg.cwd)
       if (focusedRepoRootKey) reconcileScheduler.markDirty(focusedRepoRootKey, 'activate')
       return
+    case 'foreground-yield': {
+      // G3: mark every entry belonging to the foreground repo busy/free.
+      // Matched by exact cwd AND by the entries' known repoRoot so a subdir
+      // terminal / root open cover each other.
+      const now = Date.now()
+      let matched = 0
+      for (const entry of entries.values()) {
+        const entryRepoRoot = entry.state?.repoRoot ?? null
+        if (entry.cwd === msg.cwd || (msg.repoRoot && entryRepoRoot === msg.repoRoot)) {
+          recomputeGovernor.setForegroundBusy(entry.cwd, msg.busy, now)
+          matched += 1
+        }
+      }
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_FOREGROUND_YIELD, {
+        cwd: msg.cwd,
+        repoRoot: msg.repoRoot,
+        action: msg.busy ? 'start' : 'end',
+        matchedEntries: matched
+      })
+      return
+    }
     case 'shutdown':
       void shutdownWorker().catch((error) => {
         log('error', 'shutdown failed', {

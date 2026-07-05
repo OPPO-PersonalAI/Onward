@@ -1281,6 +1281,46 @@ body.git-diff-resizing * {
   flex-shrink: 0;
 }
 
+/* G4 open skeleton — REAL file rows painted from the mirror snapshot while
+   getDiff still runs: real path + status chip, shimmer only on the unknown
+   +/- stats. */
+.git-diff-file-skeleton.git-diff-file-skeleton-known {
+  opacity: 1;
+}
+
+.git-diff-file-skeleton-status.known {
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-3) 14%, transparent);
+  color: var(--text-2);
+  animation: none;
+}
+
+.git-diff-file-skeleton-status.known.status-m { color: #d4a72c; }
+.git-diff-file-skeleton-status.known.status-a,
+.git-diff-file-skeleton-status.known.status-\? { color: #57ab5a; }
+.git-diff-file-skeleton-status.known.status-d { color: #e5534b; }
+.git-diff-file-skeleton-status.known.status-r,
+.git-diff-file-skeleton-status.known.status-c { color: #6cb6ff; }
+
+.git-diff-file-skeleton-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Tail-truncate: the filename tail is the discriminating part. */
+  direction: rtl;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
 .git-diff-loading-dots {
   display: flex;
   gap: 6px;

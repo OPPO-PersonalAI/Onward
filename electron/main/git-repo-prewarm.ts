@@ -39,7 +39,19 @@
 // import; esbuild / electron-vite bundle it the same as any extensionless import.
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names.ts'
 
-export type RepoPrewarmReason = 'attach' | 'cwd-change' | 'branch-change' | 'renderer-fallback'
+export type RepoPrewarmReason =
+  | 'attach'
+  | 'cwd-change'
+  | 'branch-change'
+  | 'renderer-fallback'
+  // G1 (2026-07-04 spinner analysis): re-warm after a mirror invalidation
+  // wiped the caches for a live-subscribed cwd. The dedup lifetime bug —
+  // once-per-session dedup vs minute-lived caches — made agent-churned
+  // repos permanently cold at click time.
+  | 'rewarm'
+  // Q1: the git-ipc worker respawned with empty in-memory caches while the
+  // dedup said "already warmed"; the coordinator resets and re-warms.
+  | 'worker-respawn'
 
 export interface RepoPrewarmRequest {
   /** Canonicalised cwd the bridge resolved. Doubles as the dedup + content-cache project key. */
@@ -64,8 +76,37 @@ export interface RepoPrewarmRequest {
 }
 
 export interface RepoPrewarmDeps {
-  /** Warm the Diff LIST caches (both `root-only` + `full` scopes) in the worker's low lane. */
-  warmDiffList: (cwd: string) => Promise<{ success: boolean }>
+  /**
+   * Warm the Diff LIST caches (both `root-only` + `full` scopes) in the
+   * worker's low lane. `statusPayload` is an OPAQUE pass-through (the
+   * mirror's fresh parent status, G2 C-i) the production wiring forwards
+   * to `gitIpcWorkerClient.warmDiffCache` so the warm can skip its own
+   * `git status` spawn; the coordinator never inspects it.
+   */
+  warmDiffList: (cwd: string, statusPayload?: unknown) => Promise<{ success: boolean }>
+  /**
+   * Fetch the opaque warm-status payload for a cwd (production: the
+   * router's latest MirrorState files + capturedAt). Optional; when absent
+   * the warm spawns its own status exactly as before.
+   */
+  getWarmStatusPayload?: (cwd: string) => unknown | null
+  /**
+   * True when at least one live terminal currently subscribes `cwd`.
+   * Gates invalidation-driven re-warms so abandoned repos never re-warm.
+   */
+  hasLiveSubscriber?: (cwd: string) => boolean
+  /**
+   * Quiet window between the LAST invalidation for a cwd and its re-warm
+   * (each new invalidation restarts the timer). Default 0 = fire on the
+   * next timer tick (tests). Production injects ~8000 ms.
+   */
+  rewarmQuietWindowMs?: number
+  /**
+   * Ceiling on how long continuous churn may keep postponing a pending
+   * re-warm; once exceeded the next invalidation fires it immediately.
+   * Default 0 disables the ceiling (tests). Production injects ~30000 ms.
+   */
+  rewarmMaxWaitMs?: number
   /** Kick the per-file content precompute burst for the given content-cache project key. */
   kickContentPrecompute: (project: string) => void
   /**
@@ -108,7 +149,10 @@ export interface RepoPrewarmDeps {
 }
 
 export class RepoPrewarmCoordinator {
-  // Diff dedup: one warm per cwd per session (decision ⑥).
+  // Diff dedup: one warm per cwd per INVALIDATION GENERATION (decision ⑥ as
+  // amended by G1): membership means "the caches this warm filled are still
+  // standing". A mirror invalidation for a live cwd evicts the member via
+  // the re-warm path; a worker respawn clears the whole set.
   private readonly diffPrewarmedCwds = new Set<string>()
   // History dedup: one warm per (cwd, branchOid) — a new commit moves branchOid
   // and re-warms (decision ⑦).
@@ -117,16 +161,22 @@ export class RepoPrewarmCoordinator {
   private readonly attachDelayMs: number
   private readonly sleep: (ms: number) => Promise<void>
   private readonly detachGraceMs: number
+  private readonly rewarmQuietWindowMs: number
+  private readonly rewarmMaxWaitMs: number
   private readonly setGraceTimer: (fn: () => void, ms: number) => unknown
   private readonly clearGraceTimer: (handle: unknown) => void
   // cwd -> grace-timer handle for an abandoned cwd awaiting precompute cancel.
   private readonly pendingDetach = new Map<string, unknown>()
+  // cwd -> pending invalidation-driven re-warm (quiet-window debounce state).
+  private readonly pendingRewarm = new Map<string, { handle: unknown; firstAt: number }>()
 
   // NB: explicit field assignment, NOT a TS parameter property — the
   // `node --experimental-strip-types` unit-test loader rejects parameter
   // properties (`constructor(private deps)`) in strip-only mode.
   constructor(deps: RepoPrewarmDeps) {
     this.deps = deps
+    this.rewarmQuietWindowMs = deps.rewarmQuietWindowMs ?? 0
+    this.rewarmMaxWaitMs = deps.rewarmMaxWaitMs ?? 0
     this.attachDelayMs = deps.attachDelayMs ?? 0
     this.sleep = deps.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)))
     this.detachGraceMs = deps.detachGraceMs ?? 0
@@ -148,25 +198,118 @@ export class RepoPrewarmCoordinator {
     this.cancelPendingDetach(cwd)
 
     if (this.diffPrewarmedCwds.has(cwd)) {
-      // Dedup hit — this cwd's diff was already warmed this session. Recorded so
+      // Dedup hit — this cwd's warm generation is still standing. Recorded so
       // a "why didn't my repo re-warm after I cd'd back?" trace shows the skip.
       this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REPO_SKIPPED_DEDUP, { cwd, reason })
     } else {
       this.diffPrewarmedCwds.add(cwd)
       this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REPO_TRIGGERED, { cwd, repoRoot, reason })
       // Yield to any foreground open racing the attach (see attachDelayMs).
-      if (this.attachDelayMs > 0) await this.sleep(this.attachDelayMs)
-      // 1. Diff list (both scopes) → low `::diff-precompute` lane.
-      const warm = await this.deps.warmDiffList(cwd).catch(() => ({ success: false }))
-      // 2. Per-file content burst → low `::precompute-burst` lane. Only when the
-      //    list warm succeeded (a non-repo / error cwd has nothing to precompute).
+      // Invalidation-driven re-warms are already debounced by the quiet
+      // window, so they skip the extra delay.
+      if (this.attachDelayMs > 0 && reason !== 'rewarm') await this.sleep(this.attachDelayMs)
+      // 1. Diff list (both scopes) → low `::diff-precompute` lane. Forward
+      //    the mirror's fresh status (opaque) so the warm can skip its own
+      //    `git status` spawn (G2 C-i, warm path only).
+      const statusPayload = this.deps.getWarmStatusPayload?.(cwd) ?? undefined
+      const warm = await this.deps.warmDiffList(cwd, statusPayload).catch(() => ({ success: false }))
       if (warm.success) {
+        // 2. Per-file content burst → low `::precompute-burst` lane. Only when
+        //    the list warm succeeded (a non-repo / error cwd has nothing to
+        //    precompute).
         this.deps.kickContentPrecompute(cwd)
+      } else {
+        // G1 fix (optimistic-dedup): a FAILED warm must not poison the dedup
+        // for the rest of the session — drop the member so the next attach /
+        // invalidation retries.
+        this.diffPrewarmedCwds.delete(cwd)
       }
     }
 
     // 3. History list + commit-diff set (deduped by cwd::branchOid).
     await this.warmHistory(req)
+  }
+
+  /**
+   * G1 (Option A): a cache invalidation landed for `cwd`. When a live
+   * terminal still subscribes it, schedule a quiet-window re-warm — each
+   * further invalidation restarts the window; continuous churn is bounded
+   * by `rewarmMaxWaitMs`. The re-warm drops the cwd's dedup member and
+   * re-runs the standard warm on the low lane. Abandoned cwds never
+   * re-warm (their detach path also cancels any pending timer).
+   */
+  onCwdInvalidated(cwd: string, invalidationReason: string): void {
+    if (!cwd) return
+    // Only content-churn invalidations re-warm; force/manual invalidations
+    // are followed by an explicit reload from their initiator.
+    if (invalidationReason !== 'mirror' && invalidationReason !== 'watcher') return
+    if (!(this.deps.hasLiveSubscriber?.(cwd) ?? false)) {
+      this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_SKIPPED, {
+        cwd,
+        reason: 'no-live-subscriber'
+      })
+      return
+    }
+
+    const existing = this.pendingRewarm.get(cwd)
+    const now = Date.now()
+    const firstAt = existing?.firstAt ?? now
+    if (existing) this.clearGraceTimer(existing.handle)
+
+    const waitedMs = now - firstAt
+    if (this.rewarmMaxWaitMs > 0 && waitedMs >= this.rewarmMaxWaitMs) {
+      // Continuous churn kept postponing the quiet window past the ceiling —
+      // fire now so the warm state cannot be starved indefinitely.
+      this.pendingRewarm.delete(cwd)
+      this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_RUN, { cwd, waitedMs, trigger: 'max-wait' })
+      void this.runRewarm(cwd)
+      return
+    }
+
+    const handle = this.setGraceTimer(() => {
+      this.pendingRewarm.delete(cwd)
+      this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_RUN, {
+        cwd,
+        waitedMs: Date.now() - firstAt,
+        trigger: 'quiet-window'
+      })
+      void this.runRewarm(cwd)
+    }, this.rewarmQuietWindowMs)
+    this.pendingRewarm.set(cwd, { handle, firstAt })
+    this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_SCHEDULED, {
+      cwd,
+      delayMs: this.rewarmQuietWindowMs,
+      sinceFirstMs: waitedMs
+    })
+  }
+
+  /**
+   * Q1: the git-ipc worker respawned — its in-memory caches (meta, request,
+   * snapshot, content) are empty, so every dedup member is a lie. Clear both
+   * dedup scopes; the caller re-warms live cwds explicitly.
+   */
+  resetDiffDedup(reason: string): void {
+    const dropped = this.diffPrewarmedCwds.size
+    this.diffPrewarmedCwds.clear()
+    this.historyPrewarmedKeys.clear()
+    this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_DEDUP_RESET_WORKER_RESPAWN, {
+      reason,
+      droppedCwds: dropped
+    })
+  }
+
+  private async runRewarm(cwd: string): Promise<void> {
+    // Re-check liveness at fire time — the terminal may have left during the
+    // quiet window (the detach path also cancels, this is the backstop).
+    if (!(this.deps.hasLiveSubscriber?.(cwd) ?? false)) {
+      this.deps.trace?.(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_SKIPPED, {
+        cwd,
+        reason: 'detached-before-fire'
+      })
+      return
+    }
+    this.diffPrewarmedCwds.delete(cwd)
+    await this.prewarm({ cwd, repoRoot: null, reason: 'rewarm' })
   }
 
   /**
@@ -226,6 +369,13 @@ export class RepoPrewarmCoordinator {
   private runDetachCancel(cwd: string): void {
     this.pendingDetach.delete(cwd)
     this.deps.cancelContentPrecompute?.(cwd)
+    // A pending invalidation-driven re-warm for an abandoned cwd is wasted
+    // spawns — cancel it with the burst.
+    const pendingRewarm = this.pendingRewarm.get(cwd)
+    if (pendingRewarm) {
+      this.clearGraceTimer(pendingRewarm.handle)
+      this.pendingRewarm.delete(cwd)
+    }
     // Drop the diff dedup so a later return to this cwd re-warms (the cancelled
     // burst left the content cache partial / cold).
     this.diffPrewarmedCwds.delete(cwd)

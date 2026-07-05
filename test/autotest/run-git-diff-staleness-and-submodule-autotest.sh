@@ -323,6 +323,24 @@ fi
 if group_has staleness; then
   expect_event "GDS-12a" "main:git-state-mirror.fanout"
   expect_event "GDS-12b" "renderer:subpage.freshness-check"
+  # GDS-48: page-open diagnostics (2026-07-04). The staleness cases open the
+  # Diff page fresh, so the open-phase chain fires; their external edits
+  # invalidate cached content, so the precompute scheduler emits its
+  # (previously unwired) schedule breadcrumb.
+  expect_event "GDS-48a" "renderer:git-diff.open-phase.request"
+  expect_event "GDS-48b" "renderer:git-diff.open-phase.list-applied"
+  expect_event "GDS-48c" "renderer:git-diff.open-phase.first-paint"
+  expect_event "GDS-48d" "main:git.diff.precompute.schedule"
+  # GDS-49: G1/G2 spinner fixes (2026-07-04). Same guarantee analysis as
+  # GDS-48: the staleness cases re-open after external edits (snapshot
+  # survives on its structural token — no ls-files respawn) and edit while a
+  # live terminal subscribes (quiet-window re-warm scheduled). The G4
+  # open-skeleton event is NOT gated here — it needs a fresh viewer mount
+  # racing a dirty-repo mirror snapshot, which this suite's flow does not
+  # guarantee (first open is on a clean fixture; re-opens keep the previous
+  # list). Locked instead by git-diff-open-skeleton-entries unit tests.
+  expect_event "GDS-49a" "main:git.diff.snapshot.revalidate-served"
+  expect_event "GDS-49b" "main:git.prewarm.rewarm-scheduled"
 fi
 if group_has reentry; then
   # GDS-15/17/18 issue diff loads + file-body loads (snapshot.capture +

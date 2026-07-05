@@ -498,3 +498,46 @@ test('isPrecomputeEligible: binary-ish extensions skipped, text/code warmed', ()
 test('isPrecomputeEligible: a submodule binary asset is still skipped (binary rule wins)', () => {
   assert.equal(isPrecomputeEligible(ef({ filename: 'sub/logo.png', isSubmoduleEntry: true })), false)
 })
+
+// ── trace hook (main:git.diff.precompute.schedule wiring) ──
+// The event name was registered in perf-trace-names.ts long before any
+// emitter existed; the 2026-07-04 "Git Diff spins 16 s" diagnostic bundle
+// showed 0 occurrences, which read as "precompute never ran" when it meant
+// "nothing emitted". These tests pin the injected-hook contract so the
+// event can never silently unwire again.
+
+test('trace hook fires once per onProjectInvalidated call, including collapsed re-schedules', () => {
+  const traced: Array<{ project: string; generation: number; debounceMs: number; pendingForMs: number }> = []
+  const { scheduler, fakeTimer } = makeScheduler({
+    trace: (payload) => { traced.push(payload) }
+  })
+
+  scheduler.onProjectInvalidated('/p')
+  scheduler.onProjectInvalidated('/p')
+  scheduler.onProjectInvalidated('/q')
+
+  // One schedule breadcrumb per call — the collapsed re-schedule for /p is
+  // observable (generation bumps), and /q gets its own chain.
+  assert.equal(traced.length, 3)
+  assert.deepEqual(traced.map((t) => t.project), ['/p', '/p', '/q'])
+  assert.deepEqual(traced.map((t) => t.generation), [1, 2, 1])
+  for (const t of traced) {
+    assert.equal(t.debounceMs, 100)
+    assert.equal(typeof t.pendingForMs, 'number')
+    assert.ok(t.pendingForMs >= 0)
+  }
+  // Still exactly one live timer per project (the trace hook must not
+  // change scheduling semantics).
+  const active = fakeTimer.scheduled.filter((h) => !h.cancelled)
+  assert.equal(active.length, 2)
+})
+
+test('trace hook is optional — scheduler runs identically without it', async () => {
+  const { scheduler, fakeTimer, fetched } = makeScheduler({
+    loadWorkingSet: async () => [file('a.ts', 1)]
+  })
+  scheduler.onProjectInvalidated('/p')
+  fakeTimer.flushAll()
+  await nextTick()
+  assert.deepEqual(fetched, [{ project: '/p', filename: 'a.ts' }])
+})

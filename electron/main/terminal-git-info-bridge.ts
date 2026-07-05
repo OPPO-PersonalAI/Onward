@@ -244,6 +244,26 @@ export class TerminalGitInfoBridge {
     return false
   }
 
+  /**
+   * Public liveness probe for the prewarm coordinator (G1): does any live
+   * terminal currently subscribe `cwd`? Canonicalises the input so the
+   * invalidator's `resolve()`-normalized form matches the bridge's
+   * realpath-canonical form on Windows.
+   */
+  hasSubscribedCwd(rawCwd: string): boolean {
+    if (!rawCwd) return false
+    return this.anyEntrySubscribed(gitStateMirrorRouter.canonicaliseCwd(rawCwd))
+  }
+
+  /** Distinct canonical cwds live terminals subscribe right now (Q1 re-warm). */
+  getSubscribedCwds(): string[] {
+    const cwds = new Set<string>()
+    for (const e of this.entries.values()) {
+      if (e.subscribedCwd) cwds.add(e.subscribedCwd)
+    }
+    return Array.from(cwds)
+  }
+
   private handleMirrorUpdate(cwd: string, state: MirrorState): void {
     if (this.disposed) return
     let matched = false

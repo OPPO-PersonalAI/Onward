@@ -2553,6 +2553,39 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
           'renderer:subpage.freshness-check'
         ]
       })
+      // GDS-48: page-OPEN diagnostics added after the 2026-07-04 "spinner for
+      // 16 s" bundle arrived with zero renderer-side open breadcrumbs and an
+      // unwired precompute.schedule name. The staleness cases open the Diff
+      // page fresh (open-phase chain) and edit files with content cached
+      // (invalidation → precompute schedule), so this group owns the markers.
+      record('GDS-48-trace-marker-open-phase-and-precompute-schedule-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'renderer:git-diff.open-phase.request',
+          'renderer:git-diff.open-phase.list-applied',
+          'renderer:git-diff.open-phase.first-paint',
+          'main:git.diff.precompute.schedule'
+        ]
+      })
+      // GDS-49: G1/G2 fixes of the same 2026-07-04 analysis. The staleness
+      // cases edit files externally while the snapshot is cached (→ mirror
+      // invalidation → spawn-free structural revalidation on the next open)
+      // and while a live terminal subscribes the repo (→ quiet-window
+      // re-warm scheduled). NB the G4 open-skeleton event is deliberately
+      // NOT gated here: it only fires when a FRESH viewer mount races a
+      // dirty-repo mirror snapshot, and this suite's first open happens on
+      // a clean fixture while re-opens keep the previous list (no loading
+      // shell) — nondeterministic in this flow. Its mapping is locked by
+      // test/unittest/git-diff-open-skeleton-entries.test.mts.
+      record('GDS-49-trace-marker-snapshot-rewarm-expected', Boolean(traceInfo?.logPath), {
+        tracePath: traceInfo?.logPath ?? null,
+        enabled: traceInfo?.enabled ?? null,
+        eventsToVerifyInRunner: [
+          'main:git.diff.snapshot.revalidate-served',
+          'main:git.prewarm.rewarm-scheduled'
+        ]
+      })
     }
 
     // ── reentry-group markers ──

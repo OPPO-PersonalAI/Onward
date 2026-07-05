@@ -30,6 +30,8 @@ import {
   gitRepositorySnapshotService,
   snapshotToLegacySubmoduleInfos
 } from './git-repository-snapshot-service'
+import { performanceTrace } from './performance-trace'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type GitIpcWorkerMethod =
   | 'checkInstalled'
@@ -148,9 +150,24 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
         // behaviour) left the `root-only` cache key cold, so the very first
         // paint still recomputed. Warm both so a subsequent open is a pure
         // cache hit on both phases.
+        //
+        // G2 C-i: main forwards the mirror's fresh parent status when it has
+        // one; getSingleRepoDiff age-gates it (15 s) and skips the root
+        // `git status` spawn on a hit. `background: true` marks both loads
+        // as warm-path so the presupplied status can never leak into a
+        // foreground open's path.
+        const presuppliedRootStatus = (payload as {
+          presuppliedRootStatus?: { files: GitFileStatus[]; capturedAt: number }
+        }).presuppliedRootStatus
+        if (!presuppliedRootStatus) {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_WARM_STATUS_REUSE, {
+            cwd,
+            result: 'unavailable'
+          })
+        }
         await Promise.all([
-          getGitDiff(cwd, { scope: 'root-only' }),
-          getGitDiff(cwd, { scope: 'full' })
+          getGitDiff(cwd, { scope: 'root-only', background: true, presuppliedRootStatus }),
+          getGitDiff(cwd, { scope: 'full', background: true, presuppliedRootStatus })
         ])
         return { success: true }
       } catch {

@@ -131,6 +131,11 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-state-mirror-latency-gsm17-autotest.sh",
     "test/autotest/run-git-state-mirror-latency-gsm18-autotest.sh",
     "test/autotest/run-git-state-mirror-latency-injection-autotest.sh",
+    # Subscription-leak suite (SL-*): a REAL renderer reload mid-run proves the
+    # router purges pre-reload mirror subscriptions (the dead-repo-churn class
+    # from the 2026-07-04 diagnostic bundle: 3 of 5 mirrored repos with no live
+    # terminal, ~950 background recomputes each).
+    "test/autotest/run-gsm-subscription-leak-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
     "test/autotest/run-repo-prewarm-autotest.sh",

@@ -90,6 +90,8 @@ const WORKER_REQUEST_TIMEOUT_MS = 90000
 
 class GitIpcWorkerClient {
   private worker: Worker | null = null
+  private hasSpawnedWorkerOnce = false
+  private respawnListeners = new Set<() => void>()
   // Quit latch (see git-state-mirror-router): no worker spawns after quit begins.
   private disposed = false
   private nextRequestId = 1
@@ -275,8 +277,11 @@ class GitIpcWorkerClient {
     })
   }
 
-  warmDiffCache(cwd: string): Promise<{ success: boolean }> {
-    return this.enqueueWorkerTask<{ success: boolean }>('warmDiffCache', { cwd }, {
+  warmDiffCache(
+    cwd: string,
+    presuppliedRootStatus?: { files: GitFileStatus[]; capturedAt: number }
+  ): Promise<{ success: boolean }> {
+    return this.enqueueWorkerTask<{ success: boolean }>('warmDiffCache', { cwd, presuppliedRootStatus }, {
       priority: 'low',
       // Separate background lane: the warm is slow (full recompute) and must not
       // hold the foreground enter's concurrency-1 slot for the same repo. Shares
@@ -359,12 +364,38 @@ class GitIpcWorkerClient {
     )
   }
 
+  /**
+   * Register a callback fired when the worker is RE-spawned after a
+   * previous instance exited. A fresh worker starts with empty in-memory
+   * caches (repo meta, request cache, structural snapshots) while
+   * main-side state — the prewarm coordinator's dedup above all — still
+   * says "already warmed". Q1 of the 2026-07-04 spinner analysis: a
+   * mid-session worker exit turned every later diff open permanently cold
+   * because nothing ever re-warmed. The prewarm coordinator subscribes
+   * here to reset its dedup and re-warm live cwds.
+   */
+  onWorkerRespawn(listener: () => void): () => void {
+    this.respawnListeners.add(listener)
+    return () => this.respawnListeners.delete(listener)
+  }
+
   private ensureWorker(): Worker {
     if (this.disposed) throw new Error('Git IPC worker client disposed (quit in progress)')
     if (this.worker) return this.worker
 
+    const isRespawn = this.hasSpawnedWorkerOnce
+    this.hasSpawnedWorkerOnce = true
     const workerPath = join(__dirname, 'git-ipc-worker-entry.js')
     this.worker = new Worker(workerPath)
+    if (isRespawn) {
+      for (const listener of this.respawnListeners) {
+        try {
+          listener()
+        } catch {
+          // A respawn listener must never break worker creation.
+        }
+      }
+    }
     this.worker.on('message', (message: WorkerResponse | unknown) => {
       // Trace events forwarded from the worker thread land on a dedicated
       // tid lane so Perfetto UI shows "git-ipc-worker" as its own row.

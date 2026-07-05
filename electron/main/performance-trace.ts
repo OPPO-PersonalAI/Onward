@@ -13,10 +13,10 @@
 // We lazy-require both `electron` and `./app-info` (which itself static-
 // imports `electron`) so this trace stack is safe in worker contexts.
 import { randomBytes, createHash } from 'crypto'
-import { performance } from 'perf_hooks'
 import { isMainThread, parentPort } from 'worker_threads'
 
 import { traceStore, TRACE_STORE_ENABLED, type TraceStoreEvent } from './trace-store'
+import { wallNowUs } from './trace-clock'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type ElectronApp = {
@@ -629,7 +629,12 @@ class PerformanceTrace {
   // ---------- Performance-trace lineage helpers (PII-safe path) ----------
 
   nowUs(): number {
-    return Math.round((performance.timeOrigin + performance.now()) * 1000)
+    // Wall-anchored on purpose. The previous
+    // `performance.timeOrigin + performance.now()` sum drifts from
+    // Date.now() on long uptimes (measured 5.011 s after ~4.2 days),
+    // splitting every recordComplete()/timeAsync() span away from the
+    // record() events of the same operation. See trace-clock.ts.
+    return wallNowUs()
   }
 
   createFlowId(prefix = 'flow'): string {

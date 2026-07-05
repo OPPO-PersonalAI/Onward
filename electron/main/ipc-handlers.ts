@@ -523,6 +523,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // window aborts the cancel, so rapid switching does not discard half-warmed
   // work; past it, the abandoned burst stops competing for EDR git spawns.
   const REPO_PREWARM_DETACH_GRACE_MS = 2500
+  // G1 re-warm cadence: after the LAST invalidation for a live cwd, wait for
+  // this quiet window before re-warming (each new invalidation restarts it);
+  // continuous agent churn is bounded by the max-wait ceiling so the warm
+  // state cannot be starved indefinitely.
+  const REPO_PREWARM_REWARM_QUIET_MS = 8000
+  const REPO_PREWARM_REWARM_MAX_WAIT_MS = 30000
   const repoPrewarmCoordinator = new RepoPrewarmCoordinator({
     // Yield-to-foreground delay: the moment a terminal attaches, an imminent
     // foreground Diff/History open must win the (EDR-taxed) worker and populate
@@ -532,7 +538,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     // cached its result and the prewarm is a cheap cache-hit / no-op.
     attachDelayMs: REPO_PREWARM_ATTACH_DELAY_MS,
     detachGraceMs: REPO_PREWARM_DETACH_GRACE_MS,
-    warmDiffList: (cwd) => gitIpcWorkerClient.warmDiffCache(cwd),
+    rewarmQuietWindowMs: REPO_PREWARM_REWARM_QUIET_MS,
+    rewarmMaxWaitMs: REPO_PREWARM_REWARM_MAX_WAIT_MS,
+    // Opaque pass-through of the mirror's fresh parent status (G2 C-i): the
+    // warm skips its own `git status` spawn when this is young enough (the
+    // worker age-gates at 15 s). Foreground opens never see this payload.
+    warmDiffList: (cwd, statusPayload) => gitIpcWorkerClient.warmDiffCache(
+      cwd,
+      statusPayload as { files: GitFileStatus[]; capturedAt: number } | undefined
+    ),
+    getWarmStatusPayload: (cwd) => {
+      const state = gitStateMirrorRouter.getLatest(cwd)
+      if (!state || !state.repoRoot || !Array.isArray(state.files)) return null
+      return { files: state.files, capturedAt: state.capturedAt }
+    },
+    hasLiveSubscriber: (cwd) => gitWatchManager?.hasSubscribedCwd(cwd) ?? false,
     kickContentPrecompute: (project) => gitDiffPrecomputeScheduler.onProjectInvalidated(project),
     // Abandoned-cwd cancel (burst lane only): cancelProject bumps the burst
     // generation so any in-flight precompute for the left cwd aborts; the
@@ -594,9 +614,28 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // on a worker whose cache is already empty.
   gitDiffCacheInvalidator.addListener((cwd, reason) => {
     gitIpcWorkerClient.invalidateDiffCache(cwd, reason)
+    // G1 (Option A): a content-churn invalidation for a live-subscribed cwd
+    // schedules a quiet-window re-warm so the next open reads warm caches
+    // again. The coordinator ignores non-churn reasons and abandoned cwds.
+    if (!repoPrewarmDisabled) {
+      repoPrewarmCoordinator.onCwdInvalidated(cwd, reason)
+    }
     if (mainWindow.isDestroyed()) return
     mainWindow.webContents.send(IPC.GIT_DIFF_CACHE_INVALIDATED, cwd, reason)
   })
+
+  // Q1: a git-ipc worker respawn starts with empty in-memory caches while
+  // the prewarm dedup still says "warmed". Reset the dedup and re-warm every
+  // cwd a live terminal subscribes so the session recovers instead of going
+  // permanently cold (the 2026-07-04 bundle's suspected meta-cache miss).
+  if (!repoPrewarmDisabled) {
+    gitIpcWorkerClient.onWorkerRespawn(() => {
+      repoPrewarmCoordinator.resetDiffDedup('worker-respawn')
+      for (const cwd of gitWatchManager?.getSubscribedCwds() ?? []) {
+        void repoPrewarmCoordinator.prewarm({ cwd, repoRoot: null, reason: 'worker-respawn' })
+      }
+    })
+  }
 
   // Content cache + precompute scheduler. Subscribes to the same invalidator
   // signal above so per-project file-body cache stays in sync with the
@@ -605,6 +644,20 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
     log('[RendererDebug]', payload?.message ?? '', payload?.data ?? '')
+  })
+  // Autotest-only: real renderer reload for lifecycle suites (the
+  // subscription-leak suite proves pre-reload mirror subscriptions are
+  // purged — Electron fires no 'destroyed' on reload). Gated inside the
+  // handler so a production call gets a typed error, never a reload.
+  ipcMain.handle(IPC.DEBUG_RELOAD_WINDOW, () => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:reload-window requires ONWARD_AUTOTEST=1' }
+    }
+    if (mainWindow.isDestroyed()) {
+      return { success: false, error: 'main window destroyed' }
+    }
+    mainWindow.webContents.reload()
+    return { success: true }
   })
   ipcMain.on(IPC.DEBUG_PERF_TRACE, (rawEvent, payload: { event?: string; data?: Record<string, unknown>; terminalId?: string }) => {
     if (!payload?.event) return
@@ -1827,7 +1880,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Get Git diff for a directory
   ipcMain.handle(IPC.GIT_GET_DIFF, async (_, cwd: string, options?: { scope?: 'root-only' | 'full'; force?: boolean }) => {
-    const result = await gitIpcWorkerClient.getDiff(cwd, options)
+    // G3 foreground yield: while this user-visible load runs, the mirror
+    // worker defers the same repo's background status recomputes so their
+    // git spawns stop competing for the EDR process-creation lane.
+    gitStateMirrorRouter.setForegroundBusy(cwd, true)
+    let result: Awaited<ReturnType<typeof gitIpcWorkerClient.getDiff>>
+    try {
+      result = await gitIpcWorkerClient.getDiff(cwd, options)
+    } finally {
+      gitStateMirrorRouter.setForegroundBusy(cwd, false)
+    }
     // Register the resolved repo root with the invalidation bus for debug
     // health / LRU visibility. No watcher starts here; the GitStateMirror
     // Worker is the only FS-event authority. `result.cwd` falls back to the
@@ -2438,6 +2500,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeAllListeners(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE)
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_GET)
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY)
+  ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_DEBUG_INSPECT)
   ipcMain.removeAllListeners(IPC.GIT_STATE_PUSH_CWD)
   ipcMain.removeHandler(IPC.APP_GET_INFO)
   ipcMain.removeHandler(IPC.FEEDBACK_LOAD)
@@ -2574,6 +2637,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler('performance-trace:get-status')
   ipcMain.removeHandler('performance-trace:flush')
   ipcMain.removeHandler(IPC.DEBUG_READ_TELEMETRY_LOG)
+  ipcMain.removeHandler(IPC.DEBUG_RELOAD_WINDOW)
   ipcMain.removeHandler(IPC.DEBUG_QUIT)
   ipcMain.removeAllListeners(IPC.DEBUG_LOG)
   ipcMain.removeAllListeners(IPC.DEBUG_PERF_TRACE)

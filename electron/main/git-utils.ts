@@ -276,6 +276,14 @@ export interface GitDiffLoadOptions {
   // a user-visible request. It runs in a separate low-priority per-repo lane so
   // it never queues ahead of (and blocks) a foreground enter for the same repo.
   background?: boolean
+  // G2 C-i, WARM PATH ONLY: the GitStateMirror worker's just-computed parent
+  // status (MirrorState.files + capturedAt), forwarded by the main-process
+  // warm caller so a background list warm can skip its own `git status`
+  // spawn (~4 s under EDR). Honored only when `background` is true AND the
+  // payload is younger than WARM_STATUS_REUSE_MAX_AGE_MS; foreground opens
+  // NEVER take this path — the request cache's freshness authority (the
+  // invalidation bus) is unchanged, this only narrows a warm's spawn count.
+  presuppliedRootStatus?: { files: GitFileStatus[]; capturedAt: number }
 }
 
 export interface GitCommitInfo {
@@ -493,11 +501,13 @@ export function invalidateGitDiffCache(cwd: string, reason: string): number {
     }
   }
   clearSingleRepoDiffCache(normalized)
-  // Also drop the structural snapshot. We do this AFTER the diff caches
-  // because if a future regression causes the snapshot service to throw,
-  // at least the request/file caches have already been cleared and the
-  // user gets a fresh git invocation on the next call.
-  gitRepositorySnapshotService.invalidate(normalized)
+  // Structural snapshot invalidation is reason-aware: content-churn
+  // reasons ('mirror'/'watcher') only arm the snapshot's revalidate flag —
+  // its per-get structural stat token owns freshness — so an agent-churned
+  // repo no longer pays a `git ls-files` respawn (~5 s under EDR) on every
+  // diff open. Force/manual/lru still drop outright. Ordered AFTER the
+  // diff caches so a throwing snapshot service can't leave those stale.
+  gitRepositorySnapshotService.invalidate(normalized, reason)
   performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
     cwd: normalized,
     reason,
@@ -1912,12 +1922,19 @@ async function getWorktreeAwareDiffFingerprint(
   return hash.digest('hex')
 }
 
+/** Max age at which a warm may reuse the mirror's presupplied status. */
+const WARM_STATUS_REUSE_MAX_AGE_MS = 15_000
+
 async function getSingleRepoDiff(
   repoRoot: string,
   gitExecutable: string,
   repoLabel: string,
   gitDirHint?: string | null,
-  options?: { force?: boolean }
+  options?: {
+    force?: boolean
+    priority?: 'high' | 'normal'
+    presuppliedRootStatus?: { files: GitFileStatus[]; capturedAt: number }
+  }
 ): Promise<{ files: GitFileStatus[]; error?: string }> {
   const normalizedRoot = resolve(repoRoot)
   let gitDir = gitDirHint ?? null
@@ -1938,19 +1955,49 @@ async function getSingleRepoDiff(
 
   const taskToken = Symbol(inFlightKey)
   const task = (async () => {
-    const diffMeta: GitTaskMeta = { repoKey: repoRoot, repoConcurrencyLimit: 1, priority: 'normal' }
+    const priority = options?.priority ?? 'normal'
+    const diffMeta: GitTaskMeta = { repoKey: repoRoot, repoConcurrencyLimit: 1, priority }
 
-    let statusOutput = ''
-    try {
-      statusOutput = await getGitStatusPorcelainV2(repoRoot, gitExecutable, diffMeta)
-    } catch (error) {
-      return {
-        files: [],
-        error: `Failed to run git status: ${formatGitError(error) || String(error)}`
+    // G2 C-i (warm path only): reuse the mirror's just-computed parent
+    // status instead of spawning our own, when it is young enough. The
+    // request cache's freshness stays owned by the invalidation bus exactly
+    // as with a spawned status — any change after the mirror capture fires
+    // the watcher → invalidate → re-warm, the same eventual-consistency
+    // window as today, so this trades no correctness for one fewer
+    // EDR-taxed spawn per warm.
+    let parsedFiles: GitFileStatus[] | null = null
+    const presupplied = options?.presuppliedRootStatus
+    if (presupplied) {
+      const ageMs = Date.now() - presupplied.capturedAt
+      if (ageMs >= 0 && ageMs <= WARM_STATUS_REUSE_MAX_AGE_MS) {
+        parsedFiles = presupplied.files
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_WARM_STATUS_REUSE, {
+          cwd: repoRoot,
+          result: 'hit',
+          ageMs,
+          fileCount: presupplied.files.length
+        })
+      } else {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_WARM_STATUS_REUSE, {
+          cwd: repoRoot,
+          result: 'stale',
+          ageMs
+        })
       }
     }
 
-    const parsedFiles = parseStatusPorcelainV2Z(statusOutput)
+    if (!parsedFiles) {
+      let statusOutput = ''
+      try {
+        statusOutput = await getGitStatusPorcelainV2(repoRoot, gitExecutable, diffMeta)
+      } catch (error) {
+        return {
+          files: [],
+          error: `Failed to run git status: ${formatGitError(error) || String(error)}`
+        }
+      }
+      parsedFiles = parseStatusPorcelainV2Z(statusOutput)
+    }
     const fingerprint = await getWorktreeAwareDiffFingerprint(gitDir, repoRoot, parsedFiles)
     const cacheKey = `${normalizedRoot}::${repoLabel}::${fingerprint}`
     const cached = singleRepoDiffCache.get(cacheKey)
@@ -1969,9 +2016,14 @@ async function getSingleRepoDiff(
     // one fewer EDR-taxed process on the hot path.
     const hasUnstaged = parsedFiles.some((file) => file.changeType === 'unstaged')
     const hasStaged = parsedFiles.some((file) => file.changeType === 'staged')
+    // The two numstat passes are independent read-only diffs (readonly env,
+    // no index writes) — let them overlap instead of serializing behind the
+    // repo-wide limit of 1. On an EDR host each spawn costs seconds, so the
+    // pair costs max(a,b) rather than a+b (G2-ii of the spinner analysis).
+    const numstatMeta: GitTaskMeta = { repoKey: repoRoot, repoConcurrencyLimit: 2, priority }
     const [unstagedNumstatResult, stagedNumstatResult] = await Promise.allSettled([
-      hasUnstaged ? getGitDiffNumstat(repoRoot, gitExecutable, false, diffMeta) : Promise.resolve(''),
-      hasStaged ? getGitDiffNumstat(repoRoot, gitExecutable, true, diffMeta) : Promise.resolve('')
+      hasUnstaged ? getGitDiffNumstat(repoRoot, gitExecutable, false, numstatMeta) : Promise.resolve(''),
+      hasStaged ? getGitDiffNumstat(repoRoot, gitExecutable, true, numstatMeta) : Promise.resolve('')
     ])
 
     if (unstagedNumstatResult.status === 'rejected') {
@@ -2129,8 +2181,21 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
     const reposToLoad = loadScope === 'full'
       ? allRepos
       : allRepos.filter((repo) => !repo.isSubmodule)
+    // Foreground opens (a user is watching the spinner) run their status /
+    // numstat spawns at HIGH priority inside the worker's scheduler so they
+    // win slots ahead of background warms ('normal') and precompute bursts
+    // ('low'). Background list loads keep 'normal' — unchanged behavior.
+    const spawnPriority: 'high' | 'normal' = options?.background ? 'normal' : 'high'
+    // presupplied mirror status applies to the ROOT repo only (the mirror's
+    // view is the parent with --ignore-submodules=dirty) and only on the
+    // warm path (background). Submodule repos always spawn their own status.
+    const presuppliedRootStatus = options?.background ? options?.presuppliedRootStatus : undefined
     const results = await Promise.allSettled(
-      reposToLoad.map((repo) => getSingleRepoDiff(repo.root, gitExecutable, repo.label, repo.gitDir, { force }))
+      reposToLoad.map((repo) => getSingleRepoDiff(repo.root, gitExecutable, repo.label, repo.gitDir, {
+        force,
+        priority: spawnPriority,
+        presuppliedRootStatus: repo.isSubmodule ? undefined : presuppliedRootStatus
+      }))
     )
     const resultByRepoRoot = new Map(reposToLoad.map((repo, index) => [repo.root, results[index]]))
 

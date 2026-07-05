@@ -73,6 +73,15 @@ export interface PrecomputeSchedulerOptions {
     setTimeout: (cb: () => void, ms: number) => unknown
     clearTimeout: (handle: unknown) => void
   }
+  /**
+   * Optional trace hook fired once per `onProjectInvalidated` call, at the
+   * moment a debounced burst is (re)scheduled. Injected — instead of
+   * importing performanceTrace — so the scheduler stays a pure,
+   * unit-testable leaf. `pendingForMs` is how long the project has already
+   * been waiting in the current debounce window (0 on the first schedule,
+   * grows across collapsed re-schedules).
+   */
+  trace?: (payload: { project: string; generation: number; debounceMs: number; pendingForMs: number }) => void
 }
 
 interface PendingProject {
@@ -185,8 +194,8 @@ export class GitDiffPrecomputeScheduler {
   private readonly pending = new Map<string, PendingProject>()
   private readonly inFlight = new Map<string, number>()
   private readonly perProjectMeta = new Map<string, PrecomputeProjectMeta>()
-  private readonly options: Required<Omit<PrecomputeSchedulerOptions, 'isEligible' | 'timer'>>
-    & Pick<PrecomputeSchedulerOptions, 'isEligible' | 'timer'>
+  private readonly options: Required<Omit<PrecomputeSchedulerOptions, 'isEligible' | 'timer' | 'trace'>>
+    & Pick<PrecomputeSchedulerOptions, 'isEligible' | 'timer' | 'trace'>
   private readonly timer: NonNullable<PrecomputeSchedulerOptions['timer']>
   private readonly stats: Omit<PrecomputeStats, 'pendingProjects' | 'inFlightProjects' | 'perProject'> = {
     totalBursts: 0,
@@ -203,6 +212,7 @@ export class GitDiffPrecomputeScheduler {
       viewportPriorityCount: options.viewportPriorityCount ?? DEFAULT_VIEWPORT_PRIORITY_COUNT,
       isEligible: options.isEligible,
       timer: options.timer,
+      trace: options.trace,
       fetchFile: options.fetchFile,
       loadWorkingSet: options.loadWorkingSet
     }
@@ -232,6 +242,16 @@ export class GitDiffPrecomputeScheduler {
       void this.runBurst(project, generation)
     }, this.options.debounceMs)
     this.pending.set(project, { project, debounceHandle: handle, generation })
+    // Diagnostic breadcrumb: a user-reported trace must show that an
+    // invalidation actually queued a precompute burst (or that it never
+    // did). Cadence is bounded by the invalidation rate — well within the
+    // trace budget.
+    this.options.trace?.({
+      project,
+      generation,
+      debounceMs: this.options.debounceMs,
+      pendingForMs: meta.pendingSince === null ? 0 : Math.max(0, Date.now() - meta.pendingSince)
+    })
   }
 
   /**

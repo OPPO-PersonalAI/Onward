@@ -259,3 +259,124 @@ test('reset() clears pending grace timers so none fire after teardown', () => {
   fireTimers()
   assert.deepEqual(calls.cancel, [], 'a cleared grace timer must not fire a cancel after reset')
 })
+
+// ---------------------------------------------------------------------------
+// G1 (2026-07-04 spinner analysis): re-warm after invalidation + dedup fixes
+// ---------------------------------------------------------------------------
+
+test('REPRO→FIX: a failed warm no longer poisons the dedup for the session', async () => {
+  let succeed = false
+  const { coordinator, calls } = makeCoordinator({
+    warmDiffList: async (cwd: string) => { calls.warm.push(cwd); return { success: succeed } }
+  })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  assert.equal(coordinator.hasPrewarmed('/repo'), false, 'failed warm must drop the dedup member')
+  succeed = true
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  assert.deepEqual(calls.warm, ['/repo', '/repo'], 'second attach must retry after a failed warm')
+  assert.equal(coordinator.hasPrewarmed('/repo'), true)
+})
+
+test('warm forwards the opaque mirror-status payload (G2 C-i pass-through)', async () => {
+  const payloads: unknown[] = []
+  const { coordinator } = makeCoordinator({
+    warmDiffList: async (_cwd: string, statusPayload?: unknown) => { payloads.push(statusPayload); return { success: true } },
+    getWarmStatusPayload: (cwd: string) => ({ files: [], capturedAt: 123, cwd })
+  })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  assert.equal(payloads.length, 1)
+  assert.deepEqual(payloads[0], { files: [], capturedAt: 123, cwd: '/repo' })
+})
+
+test('onCwdInvalidated schedules a quiet-window re-warm that re-runs the warm with reason=rewarm', async () => {
+  const { coordinator, calls, fireTimers } = makeCoordinator({
+    hasLiveSubscriber: () => true
+  })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  assert.deepEqual(calls.warm, ['/repo'])
+
+  coordinator.onCwdInvalidated('/repo', 'mirror')
+  const scheduled = calls.trace.filter((t) => t.event === PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_SCHEDULED)
+  assert.equal(scheduled.length, 1)
+  assert.equal(coordinator.hasPrewarmed('/repo'), true, 'dedup member survives until the re-warm fires')
+
+  fireTimers()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(calls.warm, ['/repo', '/repo'], 'quiet-window fire must re-run the warm')
+  const run = calls.trace.filter((t) => t.event === PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_RUN)
+  assert.equal(run.length, 1)
+  assert.equal(run[0].payload.trigger, 'quiet-window')
+  const rewarmTriggered = calls.trace.filter((t) =>
+    t.event === PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REPO_TRIGGERED && t.payload.reason === 'rewarm')
+  assert.equal(rewarmTriggered.length, 1)
+  assert.equal(coordinator.hasPrewarmed('/repo'), true, 'the re-warm restores the dedup member')
+})
+
+test('repeated invalidations restart the quiet window (previous timer cleared)', async () => {
+  const { coordinator, calls, timers } = makeCoordinator({ hasLiveSubscriber: () => true })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  coordinator.onCwdInvalidated('/repo', 'mirror')
+  coordinator.onCwdInvalidated('/repo', 'mirror')
+  assert.equal(timers.length, 2, 'each invalidation schedules a fresh timer')
+  assert.equal(timers[0].cleared, true, 'the earlier quiet-window timer must be cleared')
+  assert.equal(timers[1].cleared, false)
+  assert.equal(calls.warm.length, 1, 'no warm until the quiet window elapses')
+})
+
+test('continuous churn past rewarmMaxWaitMs fires the re-warm immediately (max-wait trigger)', async () => {
+  const { coordinator, calls } = makeCoordinator({
+    hasLiveSubscriber: () => true,
+    rewarmMaxWaitMs: 1
+  })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  coordinator.onCwdInvalidated('/repo', 'mirror')
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  coordinator.onCwdInvalidated('/repo', 'mirror')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const run = calls.trace.filter((t) => t.event === PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_RUN)
+  assert.equal(run.length, 1)
+  assert.equal(run[0].payload.trigger, 'max-wait')
+  assert.deepEqual(calls.warm, ['/repo', '/repo'])
+})
+
+test('invalidations for a cwd with no live subscriber are skipped (no timer, traced)', async () => {
+  const { coordinator, calls, timers } = makeCoordinator({ hasLiveSubscriber: () => false })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  coordinator.onCwdInvalidated('/repo', 'mirror')
+  assert.equal(timers.length, 0)
+  const skipped = calls.trace.filter((t) => t.event === PERF_TRACE_EVENT.MAIN_GIT_PREWARM_REWARM_SKIPPED)
+  assert.equal(skipped.length, 1)
+  assert.equal(skipped[0].payload.reason, 'no-live-subscriber')
+})
+
+test('non-churn invalidation reasons (force/manual/lru) never schedule a re-warm', async () => {
+  const { coordinator, timers } = makeCoordinator({ hasLiveSubscriber: () => true })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  coordinator.onCwdInvalidated('/repo', 'force')
+  coordinator.onCwdInvalidated('/repo', 'manual')
+  coordinator.onCwdInvalidated('/repo', 'lru')
+  assert.equal(timers.length, 0)
+})
+
+test('detach cancels a pending re-warm (abandoned repos never re-warm)', async () => {
+  const { coordinator, calls, fireTimers } = makeCoordinator({ hasLiveSubscriber: () => true })
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  coordinator.onCwdInvalidated('/repo', 'mirror')
+  // detachGraceMs defaults to 0 → the cancel runs synchronously and must
+  // clear the pending re-warm timer alongside the content burst.
+  coordinator.onCwdDetached('/repo')
+  fireTimers()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(calls.warm.length, 1, 'no re-warm may fire after detach')
+})
+
+test('resetDiffDedup (worker respawn) clears the dedup so live cwds re-warm', async () => {
+  const { coordinator, calls } = makeCoordinator()
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'attach' })
+  coordinator.resetDiffDedup('worker-respawn')
+  assert.equal(coordinator.hasPrewarmed('/repo'), false)
+  const reset = calls.trace.filter((t) => t.event === PERF_TRACE_EVENT.MAIN_GIT_PREWARM_DEDUP_RESET_WORKER_RESPAWN)
+  assert.equal(reset.length, 1)
+  await coordinator.prewarm({ cwd: '/repo', repoRoot: '/repo', reason: 'worker-respawn' })
+  assert.deepEqual(calls.warm, ['/repo', '/repo'])
+})

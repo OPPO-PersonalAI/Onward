@@ -37,6 +37,7 @@ import { testGitDiffClickLatency } from './test-git-diff-click-latency'
 import { testGitDiffIdenticalBlob } from './test-git-diff-identical-blob'
 import { testGitLargeFileConfirmation } from './test-git-large-file-confirmation'
 import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
+import { testGitStateMirrorSubscriptionLeak } from './test-git-state-mirror-subscription-leak'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
 import { testProjectEditorMultiTerminalScope } from './test-project-editor-multi-terminal-scope'
@@ -675,6 +676,17 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       collectSuiteResults('GitStateMirrorLatency', results)
       await ctx.reopenProjectEditor('phase5.495-cleanup')
       await sleep(500)
+    }
+
+    // NOTE: this suite RELOADS the window mid-run (phase 1 → phase 2 via
+    // sessionStorage). It must therefore run as a SINGLE-suite session
+    // (its runner sets ONWARD_AUTOTEST_SUITE accordingly); folding it into
+    // an 'all' run would restart every earlier suite after the reload.
+    if (!ctx.cancelled() && shouldRun('git-state-mirror-subscription-leak')) {
+      log('phase5.496:begin')
+      const results = await testGitStateMirrorSubscriptionLeak(ctx)
+      collectSuiteResults('GitStateMirrorSubscriptionLeak', results)
+      await sleep(300)
     }
 
     // Phase 5.5: Git Diff subdirectory tests

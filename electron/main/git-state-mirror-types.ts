@@ -167,6 +167,11 @@ export type MainToMirrorMessage =
   // Always-on reconcile heartbeat input: the focused terminal's cwd, so the
   // worker polls that repo at 1 s and the rest of the visible repos at 3 s.
   | { kind: 'reconcile-focus'; cwd: string | null }
+  // G3 foreground yield: a user-visible getDiff for this cwd/repoRoot is in
+  // flight (busy=true) or just finished (busy=false → grace window). The
+  // worker defers that repo's background recomputes so their git spawns stop
+  // competing with the foreground load on the EDR process-creation lane.
+  | { kind: 'foreground-yield'; cwd: string; repoRoot: string | null; busy: boolean }
   | { kind: 'shutdown' }
 
 export type MirrorToMainMessage =

@@ -687,7 +687,62 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_CLICK_PHASE_TOKENIZE_SETTLE: CLICK_PHASE_EVENT_NAMES.TOKENIZE_SETTLE,
   RENDERER_GIT_DIFF_CLICK_PHASE_COLD_MOUNT: CLICK_PHASE_EVENT_NAMES.COLD_MOUNT,
   RENDERER_GIT_DIFF_CLICK_PHASE_REVEAL_TIMEOUT: CLICK_PHASE_EVENT_NAMES.REVEAL_TIMEOUT,
-  RENDERER_GIT_DIFF_CLICK_TOTAL: CLICK_PHASE_EVENT_NAMES.TOTAL
+  RENDERER_GIT_DIFF_CLICK_TOTAL: CLICK_PHASE_EVENT_NAMES.TOTAL,
+
+  // ───────── Renderer — Git Diff PAGE-OPEN phase chain ─────────
+  // The click-phase chain above times a FILE click inside an already-open
+  // viewer; nothing timed the page open itself, so the 2026-07-04 "spinner
+  // for 16 s" diagnostic bundle contained a single opaque
+  // renderer:ipc.git.get-diff span and no renderer-side breadcrumbs at all
+  // (component perfTrace is opt-in via ONWARD_PERF_TRACE=1 and off in prod
+  // bundles). These three events ride the DIAGNOSTIC channel
+  // (perfTraceDiagnostic → default-on, opt-out via ONWARD_PERF_TRACE=0):
+  // they fire at user-click frequency, far under the trace budget.
+  //   request      — ph='i', loadDiff entered with reset=true (a page open)
+  //   list-applied — ph='X' via durationMs; the file list landed (ok=false
+  //                  on the error/watchdog path — the rejection branch is
+  //                  the diagnostically interesting one)
+  //   first-paint  — ph='X' via durationMs; double-rAF after the list
+  //                  applied, i.e. the spinner is actually gone
+  RENDERER_GIT_DIFF_OPEN_PHASE_REQUEST: 'renderer:git-diff.open-phase.request',
+  RENDERER_GIT_DIFF_OPEN_PHASE_LIST_APPLIED: 'renderer:git-diff.open-phase.list-applied',
+  RENDERER_GIT_DIFF_OPEN_PHASE_FIRST_PAINT: 'renderer:git-diff.open-phase.first-paint',
+
+  // ───────── 2026-07-04 G1-G5 spinner fixes (see docs/html/git-diff-cold-open-edr-spinner-analysis.html) ─────────
+  // G5 — router purges a renderer's mirror subscriptions when its
+  // webContents navigates (reload) or is destroyed. Reload never fires
+  // 'destroyed', so pre-reload subscriptions (e.g. Git Diff aux submodule
+  // roots) used to survive until app quit — the dead-repo churn.
+  MAIN_GIT_STATE_MIRROR_RENDERER_SUBS_PURGED: 'main:git-state-mirror.renderer-subs-purged',
+  // G1 — re-warm after invalidation (Option A): the prewarm coordinator's
+  // dedup is per-invalidation-generation, and a mirror invalidation for a
+  // live-subscribed cwd schedules a quiet-window re-warm on the low lane.
+  MAIN_GIT_PREWARM_REWARM_SCHEDULED: 'main:git.prewarm.rewarm-scheduled',
+  MAIN_GIT_PREWARM_REWARM_RUN: 'main:git.prewarm.rewarm-run',
+  MAIN_GIT_PREWARM_REWARM_SKIPPED: 'main:git.prewarm.rewarm-skipped',
+  // G2/Q1 — the git-ipc-worker respawned, so its in-memory caches (meta,
+  // request, snapshot) are empty while main-side prewarm dedup survives;
+  // the coordinator resets its dedup so live cwds re-warm.
+  MAIN_GIT_PREWARM_DEDUP_RESET_WORKER_RESPAWN: 'main:git.prewarm.dedup-reset-worker-respawn',
+  // G2 — structural snapshot survives a mirror invalidation and is served
+  // after a cheap stat revalidation (.git/index + .gitmodules mtimes)
+  // instead of respawning `git ls-files`; `stale` = mtimes moved, full
+  // recapture ran.
+  MAIN_GIT_DIFF_SNAPSHOT_REVALIDATE_SERVED: 'main:git.diff.snapshot.revalidate-served',
+  MAIN_GIT_DIFF_SNAPSHOT_REVALIDATE_STALE: 'main:git.diff.snapshot.revalidate-stale',
+  // G2 C-i (warm path only) — a background diff warm reused the mirror
+  // worker's porcelain status after fingerprint re-stat validation
+  // (result: 'hit' | 'stale' | 'unavailable'). Foreground getDiff never
+  // takes this path — it always spawns its own status.
+  MAIN_GIT_DIFF_WARM_STATUS_REUSE: 'main:git.diff.warm-status-reuse',
+  // G3 — mirror worker load governance: a recompute was deferred by the
+  // watcher duty-cycle floor / foreground-yield / cross-repo budget, and
+  // the foreground-yield lifecycle itself.
+  WORKER_GIT_STATE_MIRROR_RECOMPUTE_DEFERRED: 'worker:git-state-mirror.recompute-deferred',
+  WORKER_GIT_STATE_MIRROR_FOREGROUND_YIELD: 'worker:git-state-mirror.foreground-yield',
+  // G4 — the open skeleton painted from the mirror snapshot while the
+  // real list was still loading (diagnostic channel, default-on).
+  RENDERER_GIT_DIFF_OPEN_SKELETON_RENDERED: 'renderer:git-diff.open-skeleton-rendered'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

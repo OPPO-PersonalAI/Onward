@@ -267,6 +267,14 @@ export const gitDiffPrecomputeScheduler = new GitDiffPrecomputeScheduler({
   // bursts (re-scheduled on invalidation) or lazily on click.
   maxCandidatesPerBurst: 100,
   isEligible: isPrecomputeEligible,
+  trace: ({ project, generation, debounceMs, pendingForMs }) => {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_PRECOMPUTE_SCHEDULE, {
+      project,
+      generation,
+      debounceMs,
+      pendingForMs
+    })
+  },
   loadWorkingSet: async (project) => {
     // Background prewarm: run in the low-priority `::diff-precompute` lane so
     // this never blocks a foreground enter for the same repo. Do NOT pass

@@ -35,7 +35,7 @@ import type {
   SubpageNavigateEventDetail
 } from './types/subpage'
 import { requestOpenExternalHttpLink } from './utils/externalLink'
-import { perfTrace, perfTraceTask } from './utils/perf-trace'
+import { perfTrace, perfTraceDiagnostic, perfTraceTask } from './utils/perf-trace'
 import { PERF_TRACE_EVENT } from './utils/perf-trace-names'
 import { computeNextExecution } from './utils/schedule'
 import { resolveLayout, getEffectiveCount } from './utils/layout-mode'
@@ -2131,7 +2131,10 @@ function SettingsProviderWithHandler() {
       }
       case 'terminalGitDiff': {
         window.electronAPI.telemetry.track('dropdown/development', { action: 'gitDiff' })
-        perfTrace(PERF_TRACE_EVENT.RENDERER_GITDIFF_OPEN, { entry: 'dropdown' })
+        // Diagnostic channel (default-on in prod): the page-open intent must
+        // be visible in a user's diagnostic bundle — the 2026-07-04 spinner
+        // incident had no renderer breadcrumb for the open at all.
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GITDIFF_OPEN, { entry: 'dropdown' })
         dispatchTerminalAction('gitDiff')
         break
       }
@@ -2159,7 +2162,7 @@ function SettingsProviderWithHandler() {
       case 'viewGitDiff': {
         const terminalId = activeTab?.activeTerminalId || getLastFocusedTerminalId()
         if (terminalId) {
-          perfTrace(PERF_TRACE_EVENT.RENDERER_GITDIFF_OPEN, { entry: 'shortcut' })
+          perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GITDIFF_OPEN, { entry: 'shortcut' })
           window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
         }
         break

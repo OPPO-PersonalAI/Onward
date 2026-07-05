@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Git Diff 进入转圈 16 秒 · 根因定位报告 / Git Diff 16s Cold-Open Spinner · Root-Cause Report</title>
+<style>
+  /* No animated jumps: clicking a TOC link jumps instantly. */
+  html { scroll-behavior: auto; }
+  :root {
+    --bg: #0e0f13; --panel: #16181f; --panel-2: #1c1f28; --border: #2a2e3a;
+    --text: #c9ccd6; --text-dim: #8a8f9c; --text-strong: #eef0f6;
+    --accent: #6ea8fe; --accent-2: #a78bfa; --good: #3ddc84; --warn: #f5a524; --bad: #ef4444;
+    --code-bg: #0b0c10; --shadow-1: 0 6px 24px rgba(0,0,0,.35);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+    line-height: 1.7; font-size: 15px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; color: #dfe4ee; font-size: .88em; border: 1px solid var(--border); }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+  pre code { background: none; border: none; padding: 0; }
+
+  #toc {
+    position: fixed; top: 0; left: 0; width: 288px; height: 100vh; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--border); padding: 22px 16px 60px;
+  }
+  #toc .toc-title { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim); margin: 0 8px 12px; }
+  #toc a { display: block; color: var(--text-dim); padding: 6px 10px; border-radius: 7px; font-size: 13.5px; border-left: 2px solid transparent; }
+  #toc a:hover { color: var(--text-strong); background: var(--panel-2); text-decoration: none; }
+  #toc a.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-left-color: var(--accent); }
+  #toc a.lvl2 { padding-left: 24px; font-size: 12.5px; }
+
+  main { margin-left: 288px; max-width: 1020px; padding: 40px 48px 80px; }
+  @media (max-width: 1000px) {
+    #toc { display: none; }
+    main { margin-left: 0; padding: 24px 20px 60px; }
+  }
+
+  h1 { color: var(--text-strong); font-size: 26px; line-height: 1.35; margin: 0 0 6px; }
+  h2 { color: var(--text-strong); font-size: 20px; margin: 48px 0 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  h3 { color: var(--text-strong); font-size: 16px; margin: 26px 0 10px; }
+  .subtitle { color: var(--text-dim); font-size: 14px; margin-bottom: 18px; }
+
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
+  .pill { display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); }
+  .pill.red { border-color: color-mix(in srgb, var(--bad) 50%, transparent); color: #ff9d9d; background: color-mix(in srgb, var(--bad) 12%, transparent); }
+  .pill.amber { border-color: color-mix(in srgb, var(--warn) 50%, transparent); color: #ffd27d; background: color-mix(in srgb, var(--warn) 10%, transparent); }
+  .pill.green { border-color: color-mix(in srgb, var(--good) 45%, transparent); color: #8af0b8; background: color-mix(in srgb, var(--good) 10%, transparent); }
+  .pill.blue { border-color: color-mix(in srgb, var(--accent) 50%, transparent); color: #a8ccff; background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 14px 0; box-shadow: var(--shadow-1); }
+  .card h3 { margin-top: 0; }
+  .callout { border-left: 3px solid var(--accent); background: var(--panel-2); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.bad { border-left-color: var(--bad); }
+  .callout.good { border-left-color: var(--good); }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 16px 0; }
+  .stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat .num { font-size: 24px; font-weight: 700; color: var(--text-strong); font-family: var(--mono); }
+  .stat .num.red { color: #ff8a8a; } .stat .num.amber { color: #ffcf7d; } .stat .num.green { color: #7deca9; }
+  .stat .lbl { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; }
+
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--text-strong); white-space: nowrap; }
+  tr:nth-child(even) td { background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
+  .tblwrap { overflow-x: auto; }
+  td.num, th.num { text-align: right; font-family: var(--mono); }
+  .mono { font-family: var(--mono); font-size: .92em; }
+
+  .gap-card { border: 1px solid var(--border); border-radius: 12px; margin: 16px 0; overflow: hidden; }
+  .gap-card .gap-head { display: flex; align-items: center; gap: 10px; padding: 12px 18px; background: var(--panel-2); border-bottom: 1px solid var(--border); }
+  .gap-card .gap-id { font-family: var(--mono); font-weight: 700; color: var(--bad); }
+  .gap-card .gap-title { color: var(--text-strong); font-weight: 600; }
+  .gap-card .gap-body { padding: 14px 18px; background: var(--panel); }
+
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 18px 0; }
+  .flow-node { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; }
+  .flow-node .fn-t { color: var(--text-strong); font-weight: 600; font-size: 14px; }
+  .flow-node .fn-d { color: var(--text-dim); font-size: 13px; }
+  .flow-arrow { text-align: center; color: var(--text-dim); font-size: 16px; line-height: 1.4; padding: 2px 0; }
+
+  .lang-en { display: none; }
+  body.en .lang-en { display: inline; }
+  body.en .lang-zh { display: none; }
+  body.en div.lang-en, body.en p.lang-en, body.en li.lang-en { display: block; }
+  .lang-switch { position: fixed; top: 14px; right: 18px; z-index: 50; display: flex; gap: 6px; }
+  .lang-btn { background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border); border-radius: 7px; padding: 4px 12px; font-size: 12.5px; cursor: pointer; }
+  .lang-btn.active { color: var(--accent); border-color: var(--accent); }
+
+  footer { margin-top: 60px; border-top: 1px solid var(--border); padding-top: 18px; font-size: 13px; color: var(--text-dim); }
+  .svgwrap { overflow-x: auto; background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin: 14px 0; }
+</style>
+</head>
+<body>
+
+<div class="lang-switch">
+  <button class="lang-btn active" data-lang="zh" onclick="setLang('zh')">中文</button>
+  <button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+</div>
+
+<nav id="toc">
+  <p class="toc-title">目录 / Contents</p>
+  <a href="#tldr">1. 结论（TL;DR）</a>
+  <a href="#incident">2. 事件还原与证据链</a>
+  <a href="#gantt" class="lvl2">2.1 16 秒去哪了（时间轴）</a>
+  <a href="#session">3. 全会话统计</a>
+  <a href="#model">4. 分层根因模型</a>
+  <a href="#gaps">5. 五个代码级缺口</a>
+  <a href="#gap1" class="lvl2">G1 预热去重寿命错配</a>
+  <a href="#gap2" class="lvl2">G2 冷路径 4 串行 spawn</a>
+  <a href="#gap3" class="lvl2">G3 spawn 池互不知晓</a>
+  <a href="#gap4" class="lvl2">G4 全有全无的转圈 UI</a>
+  <a href="#gap5" class="lvl2">G5 死仓库订阅与打点缺口</a>
+  <a href="#history">6. 为什么前几轮没修好</a>
+  <a href="#options">7. 修复方向选项与权衡</a>
+  <a href="#open">8. 残留疑点</a>
+  <a href="#method">9. 数据与方法附录</a>
+  <a href="#meta">10. 文档元数据</a>
+</nav>
+
+<main>
+  <h1><span class="lang-zh">Git Diff 进入转圈 16 秒 —— 根因定位报告</span><span class="lang-en">Git Diff 16-second Cold-Open Spinner — Root-Cause Report</span></h1>
+  <p class="subtitle">
+    <span class="lang-zh">诊断包：<code>进入 git diff 转圈久-onward-diagnostic-2026-07-04_12-47-14.zip</code> · 用户构建 <code>v2.1.0-daily.20260629.1</code>（win32 x64，Electron 39.8.5）</span>
+    <span class="lang-en">Bundle: <code>onward-diagnostic-2026-07-04_12-47-14.zip</code> · user build <code>v2.1.0-daily.20260629.1</code> (win32 x64, Electron 39.8.5)</span>
+  </p>
+  <div class="badges">
+    <span class="pill red">转圈 15,967 ms / spinner 15,967 ms</span>
+    <span class="pill amber">已知问题类：7-03 报告的「症状 B」/ known class: Symptom B</span>
+    <span class="pill blue">本次完成代码级定位 / code-level RCA completed</span>
+    <span class="pill">EDR 主机 · Intune 管理 / EDR host, Intune-managed</span>
+  </div>
+
+  <h2 id="tldr"><span class="lang-zh">1. 结论（TL;DR）</span><span class="lang-en">1. Verdict (TL;DR)</span></h2>
+
+  <div class="callout bad">
+    <p style="margin:6px 0"><span class="lang-zh"><strong>直接原因</strong>：用户 12:46:42（本地）点击 Git Diff，renderer 的 <code>git:get-diff</code> IPC 往返耗时 <strong>15,967 ms</strong>——这就是转圈的全部时长。期间 git-ipc-worker 对 <code>E:\RTOS-stablity\winWatchRTOS-Build</code> 近似串行地跑了 4 个 git 子进程：<code>rev-parse</code> 4.9s → <code>ls-files</code> 5.1s → <code>status</code> 4.1s → <code>diff --numstat</code> 5.9s（合计 20.1s，部分重叠后墙钟 16s）。这台公司 EDR 管控机上<strong>每一次 git.exe 进程创建本身就要 3~6 秒</strong>（全会话 4,777 次后台 status 重算的 p50 = 3.0s 证实这是常态）。</span>
+    <span class="lang-en"><strong>Immediate cause</strong>: the user clicked Git Diff at 12:46:42 local; the renderer's <code>git:get-diff</code> IPC round-trip took <strong>15,967 ms</strong> — that IS the spinner. Inside it the git-ipc-worker ran 4 near-serial git subprocesses on the repo: <code>rev-parse</code> 4.9s → <code>ls-files</code> 5.1s → <code>status</code> 4.1s → <code>diff --numstat</code> 5.9s (sum 20.1s, ~16s wall). On this corporate EDR host <strong>every git.exe process creation costs 3–6 s by itself</strong> (chronic: p50 = 3.0s over 4,777 background status recomputes all session).</span></p>
+  </div>
+
+  <div class="callout warn">
+    <p style="margin:6px 0"><span class="lang-zh"><strong>是不是已知问题？——是已知问题类，但根因这次才定位完整。</strong>「打开慢」正是 2026-07-03 报告（<a href="git-diff-stale-cache-analysis.html">git-diff-stale-cache-analysis.html</a>）里被立案为后续跟进的<strong>症状 B</strong>；更早，2026-06-02 的 lessons 明确把「冷开（刚被失效）要现场重算」<strong>接受为例外</strong>。本次 trace 证明：在「agent 持续写文件」的工作流下，<strong>这个例外成了必然路径</strong>——预热去重的寿命是「整个会话（4.2 天）」，而缓存的寿命是「到下一次 mirror 失效（几分钟）」。列表缓存 4.5 小时只命中 3 次。</span>
+    <span class="lang-en"><strong>Known issue? — Known class, but the root cause is only now fully localized.</strong> "Slow open" is exactly <strong>Symptom B</strong> filed as follow-up in the 2026-07-03 report; earlier, the 2026-06-02 lessons explicitly <strong>accepted cold-open as the exception</strong>. This trace proves that with an agent continuously writing to the repo, <strong>the exception became the default path</strong> — prewarm dedup lives for the whole session (4.2 days) while the cache it fills lives minutes (until the next mirror invalidation). The list cache hit 3 times in 4.5 hours.</span></p>
+  </div>
+
+  <p><span class="lang-zh">五个代码级缺口（详见 <a href="#gaps">§5</a>）：<strong>G1</strong> 预热「一次性去重」与「分钟级失效」的寿命错配；<strong>G2</strong> 冷路径由 await 结构串行出 4 个 spawn，且完全不复用 mirror 3 秒前刚算好的 status；<strong>G3</strong> mirror worker 的 git spawn 无并发池，与用户操作的 spawn 池互不知晓（峰值可 11 个 git.exe 挤兑 EDR）；<strong>G4</strong> 转圈是 all-or-nothing 门，mirror 快照里现成的 53 个文件路径没有用来先画列表；<strong>G5</strong> 5 个被监控仓库中 3 个已无终端却全天重算（约 2,800 次无效 spawn），以及三处打点基建缺口。</span>
+  <span class="lang-en">Five code-level gaps (see <a href="#gaps">§5</a>): <strong>G1</strong> prewarm once-per-session dedup vs minute-lived caches; <strong>G2</strong> cold path serializes 4 spawns by its await structure and never reuses the mirror's seconds-fresh status; <strong>G3</strong> the mirror worker's spawns are unpooled and invisible to the user-facing pool (up to ~11 concurrent git.exe against the EDR filter); <strong>G4</strong> the spinner is an all-or-nothing gate — the mirror snapshot's ready-made 53 file paths are never used to paint a skeleton list; <strong>G5</strong> 3 of 5 mirrored repos have no live terminal yet recomputed all day (~2,800 wasted spawns), plus three instrumentation gaps.</span></p>
+
+  <h2 id="incident"><span class="lang-zh">2. 事件还原与证据链</span><span class="lang-en">2. Incident Reconstruction &amp; Evidence Chain</span></h2>
+
+  <p><span class="lang-zh">工作区形态（telemetry 心跳 + app-state 交叉确认）：全天 1 个 tab、2 个终端；活动终端 cwd = <code>E:\RTOS-stablity\winWatchRTOS-Build</code>（分支 <code>kae-feature</code>，53 个变更文件），里面的 coding agent 在持续编译/写文件（watcher 每隔几秒触发一次）。应用已连续运行约 4.2 天。</span>
+  <span class="lang-en">Workspace (telemetry heartbeats × app-state): 1 tab / 2 terminals all day; the active terminal's cwd is the repo above (branch <code>kae-feature</code>, 53 changed files) with a coding agent continuously compiling/writing (watcher fires every few seconds). App uptime ≈ 4.2 days.</span></p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>UTC</th><th><span class="lang-zh">相对点击</span><span class="lang-en">vs click</span></th><th><span class="lang-zh">事件</span><span class="lang-en">Event</span></th><th><span class="lang-zh">含义</span><span class="lang-en">Meaning</span></th></tr></thead>
+    <tbody>
+      <tr><td class="mono">04:33:19 / 04:43:58</td><td class="num">-13min / -3min</td><td><code>main:git.prewarm.repo-skipped-dedup</code> ×2（reason=attach）</td><td><span class="lang-zh">预热协调器两次<strong>跳过</strong>该仓库的再预热——去重集合里已有此 cwd</span><span class="lang-en">Prewarm coordinator <strong>skipped</strong> re-warming this repo twice — cwd already in the dedup set</span></td></tr>
+      <tr><td class="mono">04:46:33.252</td><td class="num">-9.7s</td><td><code>main:git.diff.cache-invalidate</code> reason=mirror, entriesCleared=0</td><td><span class="lang-zh">mirror 检出真实变更 → 整仓失效；<strong>cleared=0 说明缓存本来就是空的</strong>（上次失效后从未回填）</span><span class="lang-en">Mirror delta → whole-repo invalidation; <strong>cleared=0 means the cache was already empty</strong> (never repopulated since the previous invalidation)</span></td></tr>
+      <tr><td class="mono">04:46:42.985</td><td class="num">0</td><td>telemetry <code>dropdown/development action=gitDiff</code></td><td><span class="lang-zh"><strong>用户点击 Git Diff</strong></span><span class="lang-en"><strong>User clicks Git Diff</strong></span></td></tr>
+      <tr><td class="mono">04:46:42.995 → 47.939</td><td class="num">0 → +5.0s</td><td><code>main:git.exec rev-parse</code> 4,944 ms</td><td><span class="lang-zh">repo 元信息探测（<code>git-utils.ts:2041</code> 的硬 await 门）</span><span class="lang-en">Repo meta probe (hard await gate at <code>git-utils.ts:2041</code>)</span></td></tr>
+      <tr><td class="mono">04:46:43.8 → 48.934</td><td class="num">+0.9 → +6.0s</td><td><code>main:git.exec ls-files</code> 5,099 ms</td><td><span class="lang-zh">结构快照（gitlink 发现，<code>git-repository-snapshot-service.ts:301</code>）——上一步失效把快照也清了</span><span class="lang-en">Structural snapshot (gitlink discovery) — wiped by the invalidation 10 s earlier</span></td></tr>
+      <tr><td class="mono">04:46:48.9 → 53.060</td><td class="num">+6.0 → +10.1s</td><td><code>main:git.exec status</code> 4,117 ms</td><td><span class="lang-zh">porcelain v2 全量 status——尽管 mirror worker 12 秒前刚算过同一仓库的 status</span><span class="lang-en">Full porcelain-v2 status — although the mirror worker computed the same repo's status 12 s earlier</span></td></tr>
+      <tr><td class="mono">04:46:53.1 → 58.960</td><td class="num">+10.1 → +16.0s</td><td><code>main:git.exec diff --numstat</code> 5,899 ms</td><td><span class="lang-zh">行数统计（unstaged/staged 因 <code>repoConcurrencyLimit:1</code> 强制串行）</span><span class="lang-en">Line counts (unstaged/staged forcibly serialized by <code>repoConcurrencyLimit:1</code>)</span></td></tr>
+      <tr><td class="mono">04:46:58.962</td><td class="num">+15.977s</td><td><code>renderer:ipc.git.get-diff</code> dur=15,967 ms, ok=true</td><td><span class="lang-zh"><strong>列表终于返回，转圈结束</strong>；随后 1 秒内 53 个 <code>get-file-content</code>（内容缓存 hit 36 / miss 49）</span><span class="lang-en"><strong>List finally returns; spinner ends</strong>; 53 <code>get-file-content</code> calls follow within 1 s (content cache 36 hit / 49 miss)</span></td></tr>
+      <tr><td class="mono">04:47:14.823</td><td class="num">+31.8s</td><td><span class="lang-zh">诊断包生成</span><span class="lang-en">Diagnostic bundle generated</span></td><td><span class="lang-zh">用户当场提交反馈</span><span class="lang-en">User filed feedback on the spot</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout good">
+    <p style="margin:6px 0"><span class="lang-zh"><strong>排除项</strong>：窗口期内 <code>main:event-loop-stall</code> 与 <code>renderer:frame-stall</code> 均为 0——UI 线程完全健康，不是渲染卡顿、不是主进程阻塞；30 秒 IPC 看门狗（<code>DIFF_LOAD_IPC_TIMEOUT_MS=30000</code>）也未触发。这是一个纯粹的「数据迟到」问题。</span>
+    <span class="lang-en"><strong>Ruled out</strong>: zero <code>main:event-loop-stall</code> and zero <code>renderer:frame-stall</code> in the window — UI threads perfectly healthy; the 30 s IPC watchdog never fired. This is purely a "data arrived late" problem.</span></p>
+  </div>
+
+  <h3 id="gantt"><span class="lang-zh">2.1 这 16 秒去哪了（时间轴）</span><span class="lang-en">2.1 Where the 16 seconds went (timeline)</span></h3>
+
+  <div class="svgwrap">
+  <svg viewBox="0 0 900 240" width="900" height="240" xmlns="http://www.w3.org/2000/svg" font-family="Consolas,Menlo,monospace" font-size="11">
+    <!-- axis: 0..17s mapped to x=120..880 (44.7 px/s) -->
+    <g stroke="#2a2e3a" stroke-width="1">
+      <line x1="120" y1="20" x2="120" y2="205"/><line x1="209" y1="20" x2="209" y2="205"/>
+      <line x1="299" y1="20" x2="299" y2="205"/><line x1="388" y1="20" x2="388" y2="205"/>
+      <line x1="478" y1="20" x2="478" y2="205"/><line x1="567" y1="20" x2="567" y2="205"/>
+      <line x1="657" y1="20" x2="657" y2="205"/><line x1="746" y1="20" x2="746" y2="205"/><line x1="836" y1="20" x2="836" y2="205"/>
+    </g>
+    <g fill="#8a8f9c">
+      <text x="117" y="218">0s</text><text x="205" y="218">2s</text><text x="294" y="218">4s</text><text x="383" y="218">6s</text>
+      <text x="473" y="218">8s</text><text x="560" y="218">10s</text><text x="649" y="218">12s</text><text x="738" y="218">14s</text><text x="828" y="218">16s</text>
+    </g>
+    <!-- click marker -->
+    <line x1="120" y1="14" x2="120" y2="208" stroke="#f5a524" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="124" y="14" fill="#f5a524">click 04:46:42.985</text>
+    <!-- IPC round trip -->
+    <rect x="120" y="26" width="714" height="18" rx="4" fill="#6ea8fe" opacity="0.25" stroke="#6ea8fe"/>
+    <text x="20" y="39" fill="#c9ccd6">get-diff IPC</text>
+    <text x="400" y="39" fill="#a8ccff">renderer:ipc.git.get-diff — 15,967 ms</text>
+    <!-- rev-parse: 0.01..4.95 -->
+    <rect x="121" y="56" width="221" height="18" rx="4" fill="#ef4444" opacity="0.75"/>
+    <text x="20" y="69" fill="#c9ccd6">rev-parse</text><text x="130" y="69" fill="#fff">4,944 ms</text>
+    <!-- ls-files: 0.85..5.95 -->
+    <rect x="158" y="86" width="228" height="18" rx="4" fill="#f5a524" opacity="0.8"/>
+    <text x="20" y="99" fill="#c9ccd6">ls-files</text><text x="200" y="99" fill="#1b1400">5,099 ms</text>
+    <!-- status: 5.96..10.08 -->
+    <rect x="386" y="116" width="184" height="18" rx="4" fill="#a78bfa" opacity="0.85"/>
+    <text x="20" y="129" fill="#c9ccd6">status</text><text x="400" y="129" fill="#0e0a1c">4,117 ms</text>
+    <!-- diff numstat: 10.08..15.98 -->
+    <rect x="570" y="146" width="263" height="18" rx="4" fill="#3ddc84" opacity="0.8"/>
+    <text x="20" y="159" fill="#c9ccd6">diff --numstat</text><text x="600" y="159" fill="#04160c">5,899 ms</text>
+    <!-- content burst -->
+    <rect x="834" y="176" width="10" height="18" rx="3" fill="#6ea8fe"/>
+    <text x="20" y="189" fill="#c9ccd6">file bodies</text><text x="700" y="189" fill="#8a8f9c">53 × get-file-content (&lt;150 ms)</text>
+  </svg>
+  </div>
+  <p style="font-size:13px;color:var(--text-dim)"><span class="lang-zh">注：各 span 按「结束时间 − dur」回推起点；<code>main:git.exec</code> 的 dur 含 worker 内部排队等待，故 rev-parse 与 ls-files 有部分重叠。4 个 spawn 总 CPU 墙钟 20,059 ms，压缩到 15,977 ms 的关键在于代码的 await 结构（见 G2）。</span><span class="lang-en">Note: span starts are back-computed (end − dur); <code>main:git.exec</code> durations include worker-queue wait, hence the rev-parse/ls-files overlap. The 4 spawns sum to 20,059 ms, compressed to 15,977 ms wall by partial overlap; the serialization comes from the code's await structure (see G2).</span></p>
+
+  <h2 id="session"><span class="lang-zh">3. 全会话统计（trace 覆盖 00:15–04:47 UTC，约 4.5 小时）</span><span class="lang-en">3. Whole-Session Statistics (trace covers 00:15–04:47 UTC, ~4.5 h)</span></h2>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="num red">15,967 ms</div><div class="lbl"><span class="lang-zh">本次点击的 get-diff IPC 往返（全会话仅此 1 次打开）</span><span class="lang-en">This click's get-diff IPC round-trip (the only open in-trace)</span></div></div>
+    <div class="stat"><div class="num red">4,777</div><div class="lbl"><span class="lang-zh">后台 status 重算次数（5 仓库）；p50 3.0s · p95 6.1s · max 15.6s</span><span class="lang-en">Background status recomputes (5 repos); p50 3.0s · p95 6.1s · max 15.6s</span></div></div>
+    <div class="stat"><div class="num amber">3 / 32</div><div class="lbl"><span class="lang-zh">列表缓存命中 / 失效次数（失效全部 reason=mirror）</span><span class="lang-en">List-cache hits / invalidations (all reason=mirror)</span></div></div>
+    <div class="stat"><div class="num amber">2 / 2</div><div class="lbl"><span class="lang-zh">warmDiffCache 实跑次数（都给了另一个仓库）/ 事发仓库被去重跳过次数</span><span class="lang-en">warmDiffCache actual runs (both for the OTHER repo) / dedup-skips for the victim repo</span></div></div>
+    <div class="stat"><div class="num red">3 / 5</div><div class="lbl"><span class="lang-zh">被 mirror 全天重算、但没有任何活跃终端的仓库数（各约 950 次）</span><span class="lang-en">Mirrored repos recomputed all day with NO live terminal (~950 each)</span></div></div>
+    <div class="stat"><div class="num green">0 / 0</div><div class="lbl"><span class="lang-zh">窗口期 event-loop stall / frame stall（UI 无卡顿）</span><span class="lang-en">Event-loop / frame stalls in the window (UI healthy)</span></div></div>
+  </div>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th><span class="lang-zh">仓库（mirror 后台 status 重算）</span><span class="lang-en">Repo (mirror background status recomputes)</span></th><th class="num">n</th><th class="num">p50</th><th class="num">p95</th><th class="num">max</th><th><span class="lang-zh">有无活跃终端</span><span class="lang-en">Live terminal?</span></th></tr></thead>
+    <tbody>
+      <tr><td class="mono">E:/RTOS-stablity/winWatchRTOS-Build</td><td class="num">1,006</td><td class="num">3,060 ms</td><td class="num">6,039 ms</td><td class="num">14,070 ms</td><td><span class="lang-zh">有（事发仓库，agent 持续写）</span><span class="lang-en">Yes (victim repo, agent writing)</span></td></tr>
+      <tr><td class="mono">D:/…/Onward-Github-worktree_20260625-candidate-master</td><td class="num">966</td><td class="num">2,984 ms</td><td class="num">5,947 ms</td><td class="num">14,557 ms</td><td><span class="lang-zh"><strong>无</strong></span><span class="lang-en"><strong>No</strong></span></td></tr>
+      <tr><td class="mono">D:/…/Projects/super-efficient-animation-engine</td><td class="num">949</td><td class="num">3,063 ms</td><td class="num">6,059 ms</td><td class="num">13,042 ms</td><td><span class="lang-zh">有（第二个终端）</span><span class="lang-en">Yes (2nd terminal)</span></td></tr>
+      <tr><td class="mono">D:/…/Projects/BattleProject</td><td class="num">947</td><td class="num">3,070 ms</td><td class="num">6,091 ms</td><td class="num">15,420 ms</td><td><span class="lang-zh"><strong>无</strong>（fileCount=1 也要 3 秒）</span><span class="lang-en"><strong>No</strong> (3 s even at fileCount=1)</span></td></tr>
+      <tr><td class="mono">D:/…/OPPO-KAR/KAR-Game-Develop/kar-qemu</td><td class="num">909</td><td class="num">3,150 ms</td><td class="num">6,283 ms</td><td class="num">15,565 ms</td><td><span class="lang-zh"><strong>无</strong></span><span class="lang-en"><strong>No</strong></span></td></tr>
+    </tbody>
+  </table></div>
+
+  <p><span class="lang-zh">解读：<code>durationMs</code> 从 exec 开始计（不含排队，<code>git-state-mirror-worker-entry.ts:484,509</code>），每次重算 = 2 个 git spawn（rev-parse + status porcelain v2）。<strong>fileCount=0/1 的仓库 p50 也是 3 秒</strong> → 慢的不是 git 干活，而是进程创建本身（EDR 内核 minifilter 税）。这与 lessons 2026-06-15 的结论一致：「杠杆是更少的 spawn，不是更快的 git」。</span>
+  <span class="lang-en">Reading: <code>durationMs</code> is exec-start-based (no queue wait); each recompute = 2 git spawns (rev-parse + porcelain-v2 status). <strong>Repos at fileCount=0/1 still show p50 = 3 s</strong> → the cost is process creation itself (EDR kernel-minifilter tax), not git's work — matching the 2026-06-15 lesson: "the lever is fewer spawns, not faster git."</span></p>
+
+  <h2 id="model"><span class="lang-zh">4. 分层根因模型</span><span class="lang-en">4. Layered Root-Cause Model</span></h2>
+
+  <div class="flow">
+    <div class="flow-node"><div class="fn-t">L0 · <span class="lang-zh">环境（应用改不了）</span><span class="lang-en">Environment (not fixable by the app)</span></div><div class="fn-d"><span class="lang-zh">公司 Intune 管控 + Tamper Protection 的 EDR：每次进程创建被征税 1.3~12.9s；Defender 排除项本地连管理员都设不了（lessons 2026-06-23）。</span><span class="lang-en">Corporate Intune + Tamper-Protected EDR taxes every process creation 1.3–12.9 s; Defender exclusions cannot be set locally even by admin.</span></div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node"><div class="fn-t">L1 · <span class="lang-zh">工作负载</span><span class="lang-en">Workload</span></div><div class="fn-d"><span class="lang-zh">coding agent 在事发仓库持续写文件 → watcher 每隔几秒触发。这是产品的核心使用场景，不是边缘用法。</span><span class="lang-en">A coding agent continuously writes into the repo → watcher fires every few seconds. This is the product's core scenario, not an edge case.</span></div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node"><div class="fn-t">L2 · <span class="lang-zh">后台重算与 spawn 挤兑（G3、G5）</span><span class="lang-en">Background recompute &amp; spawn contention (G3, G5)</span></div><div class="fn-d"><span class="lang-zh">watcher 路径不受 backoff 约束 → 事发仓库背靠背 ~3s/轮；3 个死仓库陪跑；mirror worker 的 spawn 无池化，与前台池互不知晓。</span><span class="lang-en">The watcher path bypasses backoff → back-to-back ~3 s rounds on the victim repo; 3 dead repos churn alongside; mirror spawns unpooled, invisible to the foreground pool.</span></div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node"><div class="fn-t">L3 · <span class="lang-zh">失效风暴 × 预热缺口（G1）</span><span class="lang-en">Invalidation storm × prewarm gap (G1)</span></div><div class="fn-d"><span class="lang-zh">每个真实 delta → 整仓清缓存（双 scope + 单仓列表 + 结构快照）；而再预热被 once-per-session 去重挡住，失效后无人回填 → 点击时刻缓存恒为空（32 次失效中 cleared=0 占绝大多数）。</span><span class="lang-en">Every real delta wipes the whole repo's caches (both scopes + per-repo list + structural snapshot); re-warm is blocked by once-per-session dedup; nothing repopulates → the cache is always empty at click time (cleared=0 dominates all 32 invalidations).</span></div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node"><div class="fn-t">L4 · <span class="lang-zh">冷路径构造（G2）</span><span class="lang-en">Cold-path construction (G2)</span></div><div class="fn-d"><span class="lang-zh">getDiff 冷路径 = 4 个 await 串行 spawn，每个都交一遍 EDR 税；mirror 里 12 秒前的新鲜 status 完全没被复用 → 15,966 ms。</span><span class="lang-en">Cold getDiff = 4 await-serialized spawns, each paying the EDR tax; the mirror's 12-second-old fresh status is never reused → 15,966 ms.</span></div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node"><div class="fn-t">L5 · <span class="lang-zh">UI 呈现（G4）</span><span class="lang-en">UI presentation (G4)</span></div><div class="fn-d"><span class="lang-zh">列表未返回前只有全屏转圈：无 stale 列表兜托、无 mirror 骨架、无阶段进度 → 用户感知 = 16 秒无响应。</span><span class="lang-en">Until the list returns there is only a full-page spinner: no stale list, no mirror-based skeleton, no stage progress → perceived as 16 s of nothing.</span></div></div>
+  </div>
+
+  <h2 id="gaps"><span class="lang-zh">5. 五个代码级缺口</span><span class="lang-en">5. The Five Code-Level Gaps</span></h2>
+
+  <div class="gap-card" id="gap1">
+    <div class="gap-head"><span class="gap-id">G1</span><span class="gap-title"><span class="lang-zh">预热去重寿命错配：去重活一个会话，缓存活几分钟</span><span class="lang-en">Prewarm-dedup lifetime mismatch: dedup lives a session, the cache lives minutes</span></span></div>
+    <div class="gap-body">
+      <p><span class="lang-zh"><code>RepoPrewarmCoordinator.prewarm</code>（<code>git-repo-prewarm.ts:150-166</code>）以 <code>diffPrewarmedCwds</code> 做「每 cwd 每会话一次」去重，且是<strong>乐观置位</strong>（先 add 再执行，warm 失败也不回滚）；只有「终端离开该 cwd 超过宽限期」才清除（<code>:226-233</code>）。用户的终端在同一仓库停了 4.2 天 → 预热恰好只跑过一次。而 mirror 失效每隔几分钟就把它填的缓存全部清掉（<code>git-utils.ts:487-507</code>），失效路径<strong>不触发任何列表再预热</strong>——内容侧仅当「已缓存条目被驱逐 &gt;0」才间接触发 burst（<code>git-diff-content-cache-wiring.ts:396-402</code>），空桶不会再暖。trace 铁证：事发仓库两次 <code>repo-skipped-dedup</code>（04:33/04:43），同期 32 次失效。</span>
+      <span class="lang-en"><code>RepoPrewarmCoordinator.prewarm</code> dedups once per cwd per session via <code>diffPrewarmedCwds</code>, set <strong>optimistically</strong> (added before the warm runs; not rolled back on failure); it is only cleared when the terminal leaves the cwd past a grace window. The user's terminal sat in one repo for 4.2 days → exactly one warm ever ran. Mirror invalidations wipe everything it filled every few minutes, and the invalidation path <strong>never re-warms the list</strong> — the content side only indirectly triggers a burst when evicted&gt;0; an empty bucket never re-warms. Trace proof: two <code>repo-skipped-dedup</code> events for the victim repo vs 32 invalidations.</span></p>
+    </div>
+  </div>
+
+  <div class="gap-card" id="gap2">
+    <div class="gap-head"><span class="gap-id">G2</span><span class="gap-title"><span class="lang-zh">冷路径 = 4 个 await 串行 spawn；mirror 的新鲜 status 被无视</span><span class="lang-en">Cold path = 4 await-serialized spawns; the mirror's fresh status is ignored</span></span></div>
+    <div class="gap-body">
+      <pre><code>getGitDiff(cwd)                          // git-utils.ts:2026
+  ├─ await getGitRepoMeta(cwd)           // :2041  spawn① rev-parse（缓存查询之前的硬门）
+  ├─ requestCache.get(key)               // :2045  冷 → loadGitDiff
+  │    ├─ await Promise.all([
+  │    │    getSnapshot(repoRoot),       // :2111  spawn② ls-files -s -z（快照 10 秒前刚被失效清掉）
+  │    │    detectSuperproject(...)      //        rev-parse --show-superproject（与②并行）
+  │    │  ])
+  │    └─ getSingleRepoDiff(...)         // :2132  repoConcurrencyLimit:1
+  │         ├─ await statusPorcelainV2   // :1945  spawn③ status --porcelain=2
+  │         └─ await numstat ×2          // :1972  spawn④ diff --numstat（unstaged/staged 串行）</code></pre>
+      <p><span class="lang-zh">三点关键：(a) 串行来自 await 结构本身，4 次 EDR 税无法摊薄；(b) <code>status</code>/<code>numstat</code> 在 worker 里只有 <code>normal</code> 优先级（<code>:1941</code>），并不因用户在等而提升；(c) <strong>mirror worker 12 秒前刚为同一仓库算完 porcelain status（53 个文件），getDiff 完全不复用</strong>，自己再跑一遍 spawn①③。另注：spawn① 理论上应命中「永久 meta 缓存」，实际却发生了——见 §8 疑点 Q1。</span>
+      <span class="lang-en">Three key points: (a) the serialization is the await structure itself — four EDR taxes that cannot amortize; (b) <code>status</code>/<code>numstat</code> run at <code>normal</code> priority in the worker, never boosted although a user is waiting; (c) <strong>the mirror worker computed the same repo's porcelain status 12 s earlier (53 files) and getDiff never reuses it</strong>, re-spawning ① and ③. Also: spawn ① should have hit the permanent meta cache but didn't — open question Q1 in §8.</span></p>
+    </div>
+  </div>
+
+  <div class="gap-card" id="gap3">
+    <div class="gap-head"><span class="gap-id">G3</span><span class="gap-title"><span class="lang-zh">三个互不知晓的 spawn 域；mirror worker 无池化、watcher 路径无节流</span><span class="lang-en">Three mutually-blind spawn domains; mirror worker unpooled, watcher path unthrottled</span></span></div>
+    <div class="gap-body">
+      <p><span class="lang-zh"><code>gitRuntimeManager</code> 是模块级单例，但 worker 线程各自加载模块图 → 主进程、git-ipc-worker（maxInflight=6）、git-state-mirror worker <strong>各有一套互不知晓的调度</strong>；且 mirror worker 根本不用调度器，直接 <code>execFile</code>（<code>git-state-mirror-worker-entry.ts:79,309-332</code>），无并发上限、无优先级。峰值：6（ipc-worker）+ ~5（mirror 5 仓库并行）≈ <strong>11 个 git.exe 同时挤 EDR minifilter</strong>。前台高优 getDiff 无法抢占或让后台让路。另外 watcher 触发路径只有 80ms debounce，自适应 backoff 只管 heartbeat 不管 watcher（<code>git-reconcile-scheduler.ts:84-93</code> vs <code>worker-entry.ts:670-678</code>）→ agent 持续写 = 事发仓库背靠背重算。没有任何「这台机器 git 很慢」的全局降载机制（延迟指标只记录不反馈）。</span>
+      <span class="lang-en"><code>gitRuntimeManager</code> is a module-level singleton, but each worker thread loads its own module graph → main, git-ipc-worker (maxInflight=6) and the git-state-mirror worker have <strong>mutually-blind schedulers</strong> — and the mirror worker uses none at all, calling <code>execFile</code> raw with no cap or priority. Peak: 6 + ~5 ≈ <strong>11 concurrent git.exe against the EDR minifilter</strong>; a high-priority foreground getDiff cannot preempt or pause the background. The watcher path has only an 80 ms debounce — adaptive backoff governs the heartbeat only → back-to-back recomputes while the agent writes. No global "git is slow here" load-shedding exists (latency metrics are recorded, never fed back).</span></p>
+    </div>
+  </div>
+
+  <div class="gap-card" id="gap4">
+    <div class="gap-head"><span class="gap-id">G4</span><span class="gap-title"><span class="lang-zh">全有全无的转圈：现成的 mirror 文件列表没有被用来先画骨架</span><span class="lang-en">All-or-nothing spinner: the ready-made mirror file list never paints a skeleton</span></span></div>
+    <div class="gap-body">
+      <p><span class="lang-zh"><code>GitDiffViewer.renderContent()</code> 在 <code>!diffResult</code> 时整页转圈（<code>GitDiffViewer.tsx:6731</code>）；已有的渐进机制只覆盖「子模块合并」与「文件正文懒加载」，对无子模块仓库的首屏毫无帮助。而 <strong>mirror 快照里此刻就躺着 53 个文件的路径 + 状态分类</strong>（renderer 侧 <code>useGitStateMirror</code> 已经订阅，<code>GitDiffViewer.tsx:1444</code>）——足够立即画出文件列表骨架（缺的只是 +/- 行数）。30 秒看门狗只防「彻底卡死」，对 16 秒的「慢但活着」不提供任何降级 UI 或进度提示。</span>
+      <span class="lang-en"><code>GitDiffViewer.renderContent()</code> shows a full-page spinner whenever <code>!diffResult</code>; the existing progressive paths (submodule merge, lazy file bodies) don't help the first paint of a submodule-free repo. Yet <strong>the mirror snapshot already holds all 53 file paths + status classes</strong> (the renderer subscribes via <code>useGitStateMirror</code>) — enough to paint a skeleton list instantly (only the +/- counts are missing). The 30 s watchdog covers "wedged", offering nothing for 16 s of "slow but alive".</span></p>
+    </div>
+  </div>
+
+  <div class="gap-card" id="gap5">
+    <div class="gap-head"><span class="gap-id">G5</span><span class="gap-title"><span class="lang-zh">死仓库陪跑 + 三处打点基建缺口</span><span class="lang-en">Dead-repo churn + three instrumentation gaps</span></span></div>
+    <div class="gap-body">
+      <p><span class="lang-zh">(a) 全天 1 tab / 2 终端，但 5 个仓库被 mirror 重算——<strong>3 个无终端仓库合计约 2,850 次重算 ≈ 5,700 次无效 spawn</strong>，在 spawn 即税的机器上是纯浪费（订阅来源待查，见 §8 Q2）。(b) 打点缺口：<code>main:git.diff.precompute.schedule</code> 在注册表存在但<strong>代码中从未发射</strong>（本次「0 次」是假信号）；Git Diff 页面打开路径没有分相打点（click-phase 系列只测文件点击）；worker 侧 <code>git.runtime.task</code> 的时间戳与主进程漂移 5~21 秒（5 天 uptime 的 performance-origin 漂移），影响 Perfetto 对齐。</span>
+      <span class="lang-en">(a) 1 tab / 2 terminals all day, yet 5 repos mirrored — <strong>the 3 terminal-less repos burned ~2,850 recomputes ≈ 5,700 wasted spawns</strong> (subscription origin TBD, §8 Q2). (b) Instrumentation: <code>main:git.diff.precompute.schedule</code> is registered but <strong>never emitted anywhere</strong> (this session's "0" is a false signal); the page-open path has no phase breakdown (click-phase events only cover file clicks); worker-side <code>git.runtime.task</code> timestamps drift 5–21 s from main (performance-origin drift over 5 days uptime), breaking Perfetto alignment.</span></p>
+    </div>
+  </div>
+
+  <h2 id="history"><span class="lang-zh">6. 为什么前几轮修复没修好</span><span class="lang-en">6. Why the Previous Fixes Didn't Stick</span></h2>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th><span class="lang-zh">轮次</span><span class="lang-en">Round</span></th><th><span class="lang-zh">修了什么</span><span class="lang-en">What it fixed</span></th><th><span class="lang-zh">为什么本次场景仍失效</span><span class="lang-en">Why this scenario still fails</span></th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="lang-zh"><strong>2026-06-15</strong> <code>70d7cfa</code>（EDR spawn 削减：prewarm + backoff + 聚合）——已在用户构建中</span><span class="lang-en"><strong>2026-06-15</strong> <code>70d7cfa</code> (EDR spawn cuts: prewarm + backoff + aggregation) — IS in the user's build</span></td>
+        <td><span class="lang-zh">把「暖路径」做到了秒开：cwd 附着时预热列表+内容+历史；heartbeat 自适应退避；rev-parse 元信息永久缓存。</span><span class="lang-en">Made the warm path sub-second: prewarm on cwd attach; adaptive heartbeat backoff; permanent rev-parse meta cache.</span></td>
+        <td><span class="lang-zh">预热 once-per-session（G1）+ 失效不回填 → agent 活跃仓库<strong>常驻冷态</strong>；backoff 不管 watcher 路径（G3）；冷路径本身没动（G2）。「冷开是例外」的前提在 agent 工作流下不成立。</span><span class="lang-en">Once-per-session prewarm (G1) + no post-invalidation refill → agent-active repos are <strong>permanently cold</strong>; backoff never governed the watcher path (G3); the cold path itself was untouched (G2). "Cold open is the exception" doesn't hold under agent workloads.</span></td>
+      </tr>
+      <tr>
+        <td><span class="lang-zh"><strong>2026-07-03</strong> <code>be5ee2e</code>（stat 读时校验）——尚不在用户构建中</span><span class="lang-en"><strong>2026-07-03</strong> <code>be5ee2e</code> (stat-validate on read) — NOT yet in the user's build</span></td>
+        <td><span class="lang-zh">修的是<strong>症状 A（内容陈旧）</strong>：L3 内容缓存命中时做 fs.stat 新鲜度校验。</span><span class="lang-en">Fixed <strong>Symptom A (stale content)</strong>: fs.stat freshness check on the L3 content-cache hit path.</span></td>
+        <td><span class="lang-zh">当时的报告明确把<strong>症状 B（打开慢，约 15 秒）</strong>连同 L1 列表缓存问题列为后续跟进——即本报告的主题，尚未实施。</span><span class="lang-en">That report explicitly filed <strong>Symptom B (slow open, ~15 s)</strong> + the L1 list cache as follow-ups — this report's subject, not yet implemented.</span></td>
+      </tr>
+      <tr>
+        <td><span class="lang-zh"><strong>lessons 2026-06-02/03</strong>（EDR 秒开设计）</span><span class="lang-en"><strong>Lessons 2026-06-02/03</strong> (EDR sub-second design)</span></td>
+        <td><span class="lang-zh">确立「后台干活、前台读缓存」的架构；教训 §4 记录过「每次打开强刷会自毁预热」。</span><span class="lang-en">Established "background does the work, foreground reads cache"; lesson §4 recorded that force-refresh-on-open wipes the very prewarm.</span></td>
+        <td><span class="lang-zh">当时把「刚失效后的冷开」<strong>显式接受为例外</strong>。本 trace 证明该例外在核心场景下是常态——需要推翻这个假设本身。</span><span class="lang-en">Cold-open-after-invalidation was <strong>explicitly accepted as the exception</strong>. This trace proves the exception is the norm in the core scenario — the assumption itself must be overturned.</span></td>
+      </tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="options"><span class="lang-zh">7. 修复方向选项与权衡（待用户决策）</span><span class="lang-en">7. Fix Options &amp; Trade-offs (awaiting user decision)</span></h2>
+
+  <div class="callout good">
+    <p style="margin:6px 0"><span class="lang-zh"><strong>2026-07-04 更新：已全部实施。</strong>用户拍板：G1=方案 A（失效后再预热，每失效代际去重）、G2=全部子项（C-i 仅限后台预热路径，15 秒年龄门控）、G3=并发预算+前台避让+watcher 占空比上限（≤50%）、G4=mirror 骨架列表、G5=订阅泄漏修复。G5 的泄漏经真实 reload 复现（SL-02b：reload 后 refCount 残留 1；SL-03：一次退订后 watcher 钉死在 1——与诊断包死仓库机制完全一致），修复为 router 监听 <code>did-start-navigation</code>（主框架、跨文档）清空该 renderer 的订阅表——Electron 在 reload 时不触发 <code>destroyed</code>，而 React unmount 清理在 reload 时也不会执行，这正是泄漏根源。同行印证（调研引用）：VS Code 的 watcher 状态刷新有 1s 去抖 + 空闲/聚焦门 + 每次 status 后固定 5s 冷却（repository.ts <code>updateWhenIdleAndWait</code>）；GitHub Desktop 的后台仓库指示器扫描严格串行、间隔 15 分钟；<code>git status</code> 自身可用 <code>core.fsmonitor</code>+<code>untrackedCache</code> 在 Chromium 规模仓库上从 17.6s 降到 0.83s（GitHub 工程博客）——后者列为后续建议。</span>
+    <span class="lang-en"><strong>2026-07-04 update: ALL IMPLEMENTED.</strong> User decisions: G1=Option A (per-invalidation-generation dedup), G2=all sub-items (C-i warm-path-only, 15 s age gate), G3=budget+foreground-yield+watcher duty-cycle floor (≤50%), G4=mirror skeleton, G5=subscription-leak fix. The G5 leak was reproduced with a REAL reload (SL-02b: refCount 1 survives reload; SL-03: one unsubscribe parks the watcher at 1 — exactly the bundle's dead-repo mechanism); fixed by draining a renderer's subscription table on main-frame cross-document <code>did-start-navigation</code> (Electron fires no <code>destroyed</code> on reload, and React unmount cleanup never runs on reload — the root of the leak). Peer corroboration: VS Code debounces watcher status 1 s + idle/focus gates + a fixed 5 s post-status cool-down; GitHub Desktop sweeps background repo indicators strictly sequentially at 15-min intervals; git's own <code>core.fsmonitor</code>+<code>untrackedCache</code> cuts Chromium-scale status 17.6 s → 0.83 s (GitHub engineering blog) — filed as a follow-up recommendation.</span></p>
+  </div>
+
+  <div class="callout">
+    <p style="margin:6px 0"><span class="lang-zh">按项目规则，缓存策略属于<strong>必须先确认再实施</strong>的策略级决策。以下选项相互正交、可组合；每项标注预期收益与代价。</span>
+    <span class="lang-en">Per project rules, cache strategy is a <strong>confirm-before-implement</strong> decision. The options below are orthogonal and composable; each lists expected gain and cost.</span></p>
+  </div>
+
+  <div class="card">
+    <h3><span class="lang-zh">方案 A · 失效后自动再预热（治 G1）</span><span class="lang-en">Option A · Re-warm after invalidation (fixes G1)</span></h3>
+    <p><span class="lang-zh">把去重键从「每会话一次」改为「每失效代际一次」：对有活跃订阅者的仓库，mirror 失效后经过一段静默期（如 5–10s 无新失效）在低优先级 lane 自动重跑列表 warm。<br><strong>收益</strong>：点击命中率从「几乎必冷」回到「几乎必暖」，配合既有暖路径实现秒开。<strong>代价</strong>：agent 持续写 → 每静默窗口约 +2~4 个后台 spawn；须与 G3 的池化配合，避免加剧挤兑。<strong>风险</strong>：低——机制已存在，只改触发条件。</span>
+    <span class="lang-en">Change the dedup key from per-session to per-invalidation-generation: for repos with live subscribers, auto re-run the list warm on a low lane after a quiet window (5–10 s with no further invalidation). <strong>Gain</strong>: click hits go from almost-always-cold to almost-always-warm. <strong>Cost</strong>: ~2–4 extra background spawns per quiet window under agent churn; must pair with G3 pooling. <strong>Risk</strong>: low — the machinery exists, only the trigger changes.</span></p>
+  </div>
+
+  <div class="card">
+    <h3><span class="lang-zh">方案 B · 列表缓存 serve-stale-then-revalidate（治 G1/G4 的感知延迟）</span><span class="lang-en">Option B · Serve-stale-then-revalidate for the list cache (fixes perceived latency of G1/G4)</span></h3>
+    <p><span class="lang-zh">失效改为「标记 stale」而非删除；打开时立即返回 stale 列表（UI 明示「正在刷新」），后台重算完成后原位更新。与 7-03 的新鲜度权威设计一致：症状 A 的问题是「陈旧而不自知」，此方案是「陈旧但明示 + 主动刷新」。<br><strong>收益</strong>：打开感知 &lt;1s（显示几分钟前的列表）。<strong>代价</strong>：短暂展示旧数据；需要 UI 状态与既有失效通知联动。<strong>风险</strong>：中——须严防 lessons §4 的「强刷自毁预热」回归。</span>
+    <span class="lang-en">Invalidation marks entries stale instead of deleting; open serves the stale list immediately (UI shows "refreshing"), then patches in place when the recompute lands. Consistent with the 7-03 freshness-authority design: Symptom A was "stale unknowingly"; this is "stale, declared, and self-refreshing". <strong>Gain</strong>: perceived open &lt;1 s. <strong>Cost</strong>: briefly shows old data; UI wiring. <strong>Risk</strong>: medium — must not regress lesson §4 (force-refresh wiping prewarm).</span></p>
+  </div>
+
+  <div class="card">
+    <h3><span class="lang-zh">方案 C · 冷路径瘦身（治 G2；对所有冷场景生效）</span><span class="lang-en">Option C · Slim the cold path (fixes G2; helps every cold scenario)</span></h3>
+    <p><span class="lang-zh">(i) getDiff 复用 mirror 的新鲜 porcelain status（经 main 转发或直接查询 router 快照），省掉 spawn①③；(ii) unstaged/staged numstat 并行（放宽该对的 <code>repoConcurrencyLimit:1</code>）或合并为一次 spawn；(iii) 结构快照的 gitlink 结论按 refsDigest 缓存，不随每次 mirror 失效重跑 ls-files。<br><strong>收益</strong>:4 spawn → 1~2 spawn，冷开 16s → 约 5~8s;暖路径不受影响。<strong>代价</strong>：需要为「mirror status → getDiff 输入」定义新鲜度契约（防倒退回症状 A）。<strong>风险</strong>：中——动的是数据通路，须有严格的等价性测试。</span>
+    <span class="lang-en">(i) getDiff reuses the mirror's fresh porcelain status (forwarded via main or read from the router snapshot), removing spawns ① and ③; (ii) run unstaged/staged numstat in parallel or merge into one spawn; (iii) cache the snapshot's gitlink conclusion keyed by refsDigest so ls-files doesn't rerun per invalidation. <strong>Gain</strong>: 4 → 1–2 spawns; cold open 16 s → ~5–8 s. <strong>Cost</strong>: needs a freshness contract for "mirror status as getDiff input" (must not regress Symptom A). <strong>Risk</strong>: medium — data-path change, needs strict equivalence tests.</span></p>
+  </div>
+
+  <div class="card">
+    <h3><span class="lang-zh">方案 D · 渐进 UI：mirror 骨架列表 + 阶段进度（治 G4）</span><span class="lang-en">Option D · Progressive UI: mirror skeleton list + stage progress (fixes G4)</span></h3>
+    <p><span class="lang-zh">列表未返回时，先用 renderer 已订阅的 mirror 快照（53 个路径 + 状态分类）画出可点击的文件列表骨架（+/- 行数占位 shimmer），numstat 到达后原位补全；转圈替换为阶段文案。纯 renderer 层改动,不碰缓存策略。<br><strong>收益</strong>：感知延迟 16s → &lt;1s。<strong>代价</strong>：骨架期功能受限（无行数、正文按需仍慢）。<strong>风险</strong>：低。</span>
+    <span class="lang-en">Before the list returns, paint a clickable skeleton from the already-subscribed mirror snapshot (53 paths + status classes, shimmer for +/- counts), fill in when numstat lands; replace the spinner with stage text. Renderer-only, no cache-strategy change. <strong>Gain</strong>: perceived 16 s → &lt;1 s. <strong>Cost</strong>: limited function during skeleton. <strong>Risk</strong>: low.</span></p>
+  </div>
+
+  <div class="card">
+    <h3><span class="lang-zh">方案 E · spawn 全局治理（治 G3/G5）</span><span class="lang-en">Option E · Global spawn governance (fixes G3/G5)</span></h3>
+    <p><span class="lang-zh">(i) mirror worker 纳入并发预算（跨线程 semaphore 或经 main 令牌），前台 getDiff 在飞时暂停/降速该仓库的后台重算；(ii) 排查并修复 3 个无终端仓库的订阅来源；(iii) 建立机器级「git 慢」信号（如滚动 p50 &gt; 1s 时收紧后台并发与 heartbeat）。<br><strong>收益</strong>：减少挤兑让每个 spawn 更快，全局背景负载 -50% 以上。<strong>代价</strong>：跨线程协调复杂度。<strong>风险</strong>：中。</span>
+    <span class="lang-en">(i) Bring the mirror worker under a shared spawn budget (cross-thread semaphore or main-issued tokens), pausing/slowing that repo's background recomputes while a foreground getDiff is in flight; (ii) find and fix the dead-repo subscriptions; (iii) add a machine-level "git is slow" signal (e.g. rolling p50 &gt; 1 s tightens background concurrency and heartbeat). <strong>Gain</strong>: less contention → every spawn faster; &gt;50% background load cut. <strong>Cost</strong>: cross-thread coordination. <strong>Risk</strong>: medium.</span></p>
+  </div>
+
+  <div class="callout good">
+    <p style="margin:6px 0"><span class="lang-zh"><strong>建议的组合与顺序</strong>（供决策参考）：第一阶段 <strong>D + A</strong>（感知秒开 + 命中率回升，风险最低、见效最快）；第二阶段 <strong>C(i)(ii)</strong>（冷路径本质提速，惠及首次打开/重启后等 A 覆盖不到的场景）；第三阶段 <strong>E</strong>（结构性治理）。B 与 A 二选一即可（同为「点击即有列表」，A 走预热、B 走 stale 兜托；A 更简单、B 更彻底）。G5 的打点缺口（precompute.schedule 接线、页面打开分相、worker 时钟）建议随第一阶段一并补上——本次分析被这三个缺口拖慢了不少。</span>
+    <span class="lang-en"><strong>Suggested combo &amp; order</strong>: Phase 1 <strong>D + A</strong> (perceived instant open + hit-rate recovery; lowest risk, fastest payoff); Phase 2 <strong>C(i)(ii)</strong> (true cold-path speedup, covering first-open/post-restart cases A can't); Phase 3 <strong>E</strong> (structural governance). Choose A or B, not both (A via prewarm, B via stale-serve; A simpler, B more thorough). Fix the G5 instrumentation gaps alongside Phase 1 — they measurably slowed this very investigation.</span></p>
+  </div>
+
+  <h2 id="open"><span class="lang-zh">8. 残留疑点（修复阶段需验证）</span><span class="lang-en">8. Open Questions (verify during fix work)</span></h2>
+  <ul>
+    <li><span class="lang-zh"><strong>Q1 — 点击时的 rev-parse 为何未命中永久 meta 缓存？</strong>worker 已运行数天、该 cwd 理应早已缓存。候选解释：(a) git-ipc-worker 曾崩溃/重启，清空了 worker 内存缓存，而主进程侧的预热去重集合仍然「记得已预热」（与 G1 叠加成永久冷）；(b) 点击路径传入的 cwd 与预热时的规范化形态不一致（Windows 大小写/短路径），meta 缓存按字符串精确匹配落空。验证方法：给 worker 启动与 meta 缓存 hit/miss 加打点。</span>
+    <span class="lang-en"><strong>Q1 — Why did the click-time rev-parse miss the permanent meta cache?</strong> Candidates: (a) a git-ipc-worker crash/restart wiped worker memory while the main-side dedup still "remembers" the warm (compounding G1 into permanent cold); (b) cwd canonicalization mismatch (Windows case/short-path) breaking the exact-string cache key. Verify by instrumenting worker start + meta cache hit/miss.</span></li>
+    <li><span class="lang-zh"><strong>Q2 — 3 个无终端仓库的 mirror 订阅从哪来？</strong>TerminalGrid 与 GitDiffViewer 的退订逻辑审查无恙;嫌疑：4.2 天前的某次引用计数泄漏固化、或其他订阅方（Project Editor / 历史页）。验证方法：给 <code>refCounts</code> 的增减加打点，或在诊断包里导出当前订阅表。</span>
+    <span class="lang-en"><strong>Q2 — Where do the 3 dead-repo mirror subscriptions come from?</strong> TerminalGrid/GitDiffViewer unsubscribe logic reads clean; suspects: a refcount leak days ago now frozen in, or another subscriber (Project Editor / History). Verify by tracing <code>refCounts</code> transitions or exporting the live subscription table into the bundle.</span></li>
+    <li><span class="lang-zh"><strong>Q3 — 04:33 / 04:43 两波「双仓库同时 re-attach」的来源</strong>（触发了 skipped-dedup）：窗口焦点恢复?renderer 重新订阅？与 Q1 的 worker 重启假设可能同源。</span>
+    <span class="lang-en"><strong>Q3 — What caused the two waves of simultaneous re-attach</strong> (04:33 / 04:43, producing the skipped-dedup events)? Window focus regain? Renderer resubscribe? Possibly the same origin as Q1's worker-restart hypothesis.</span></li>
+  </ul>
+
+  <h2 id="method"><span class="lang-zh">9. 数据与方法附录</span><span class="lang-en">9. Data &amp; Method Appendix</span></h2>
+  <ul>
+    <li><span class="lang-zh"><strong>数据源</strong>：诊断包 8 个 trace 分片（52 MB，204,193 个事件，0 解析失败）、telemetry-events.jsonl（9.7 MB）、app-state.json、system-info.txt。trace 覆盖 2026-07-04T00:15:11Z–04:47:48Z。</span>
+    <span class="lang-en"><strong>Sources</strong>: 8 trace chunks (52 MB, 204,193 events, 0 parse failures), telemetry-events.jsonl (9.7 MB), app-state.json, system-info.txt. Trace covers 2026-07-04T00:15:11Z–04:47:48Z.</span></li>
+    <li><span class="lang-zh"><strong>方法</strong>：先用 telemetry 锚定点击时刻（recipe「timeline → correlate → state-match」），再对全部分片做两遍聚合扫描（窗口事件时间线 / 全会话分布），最后由两个并行代码调查确认机制（getDiff 冷路径与 mirror 重算体系），三路证据互证。</span>
+    <span class="lang-en"><strong>Method</strong>: telemetry anchors the click; two aggregate passes over all chunks (incident-window timeline / whole-session distributions); two parallel code investigations (getDiff cold path; mirror recompute system); three evidence lines cross-checked.</span></li>
+    <li><span class="lang-zh"><strong>时钟注意</strong>：worker 侧 <code>git.runtime.task</code> 的 ts 与主进程事件存在 5~21 秒漂移（长 uptime 的 performance-origin 漂移），本报告一律以主进程/renderer 事件的 ts 为准，worker 事件只取 dur。</span>
+    <span class="lang-en"><strong>Clock caveat</strong>: worker-side <code>git.runtime.task</code> timestamps drift 5–21 s vs main (performance-origin drift over long uptime); this report anchors on main/renderer timestamps and uses worker events for durations only.</span></li>
+    <li><span class="lang-zh"><strong>关键代码位置</strong>：<code>git-utils.ts:2026-2134</code>（getDiff 链）、<code>:487-507</code>（整仓失效）、<code>:1749-1762</code>（30 分钟 TTL 列表缓存）；<code>git-repo-prewarm.ts:150-166</code>（去重）；<code>git-diff-content-cache-wiring.ts:396-402</code>（evicted&gt;0 才回暖）；<code>git-state-mirror-worker-entry.ts:368-452</code>（重算体）、<code>:79</code>（无池化 execFile）；<code>git-reconcile-scheduler.ts:84-93</code>（backoff 只管 heartbeat）；<code>GitDiffViewer.tsx:6731</code>（all-or-nothing 门）、<code>:154</code>（30s 看门狗）。</span>
+    <span class="lang-en"><strong>Key code</strong>: <code>git-utils.ts:2026-2134</code> (getDiff chain), <code>:487-507</code> (whole-repo invalidation), <code>:1749-1762</code> (30-min TTL list cache); <code>git-repo-prewarm.ts:150-166</code> (dedup); <code>git-diff-content-cache-wiring.ts:396-402</code> (re-warm only when evicted&gt;0); <code>git-state-mirror-worker-entry.ts:368-452</code> (recompute body), <code>:79</code> (unpooled execFile); <code>git-reconcile-scheduler.ts:84-93</code> (backoff governs heartbeat only); <code>GitDiffViewer.tsx:6731</code> (all-or-nothing gate), <code>:154</code> (30 s watchdog).</span></li>
+  </ul>
+
+  <footer id="meta">
+    <h2 style="border:none;margin-top:0"><span class="lang-zh">10. 文档元数据与更新历史</span><span class="lang-en">10. Document Metadata &amp; Update History</span></h2>
+    <table>
+      <tbody>
+        <tr><th><span class="lang-zh">生成分支</span><span class="lang-en">Branch</span></th><td>master</td>
+            <th><span class="lang-zh">代码基线</span><span class="lang-en">Code baseline</span></th><td class="mono">be5ee2e (HEAD)</td></tr>
+        <tr><th><span class="lang-zh">用户构建</span><span class="lang-en">User build</span></th><td class="mono">v2.1.0-daily.20260629.1（含 70d7cfa，不含 be5ee2e）</td>
+            <th><span class="lang-zh">文档版本</span><span class="lang-en">Doc version</span></th><td>1.0</td></tr>
+      </tbody>
+    </table>
+    <table>
+      <thead><tr><th>Ver</th><th><span class="lang-zh">日期</span><span class="lang-en">Date</span></th><th><span class="lang-zh">分支</span><span class="lang-en">Branch</span></th><th><span class="lang-zh">变更</span><span class="lang-en">Change</span></th></tr></thead>
+      <tbody>
+        <tr><td>1.0</td><td>2026-07-04</td><td>master</td><td><span class="lang-zh">初版：基于 2026-07-04_12-47-14 诊断包完成「进入 Git Diff 转圈 16 秒」的根因定位（症状 B 的完整现场取证 + 五个代码级缺口 G1–G5 + 修复选项 A–E），待用户对修复策略决策。</span><span class="lang-en">Initial: root-cause localization of the 16 s Git Diff cold-open spinner from the 2026-07-04 bundle (full Symptom-B forensics + gaps G1–G5 + options A–E), awaiting the user's strategy decision.</span></td></tr>
+        <tr><td>1.1</td><td>2026-07-04</td><td>master</td><td><span class="lang-zh">G1–G5 全部实施（用户拍板：A / C-i-仅预热 / 占空比上限 / 骨架 / 泄漏修复）。G5 泄漏以真实 reload 复现（SL-02b/SL-03 红）后修复（router 在主框架跨文档 <code>did-start-navigation</code> 时清空该 renderer 订阅表）转绿。新增：预热失效代际去重 + 静默窗口再预热（8s/上限 30s）+ warm 复用 mirror status（15s 门控）+ 快照结构 token（root+嵌套 .gitmodules/index stat）免 ls-files 重跑 + numstat 并行 + 前台 spawn high 优先 + worker 重生去重重置（Q1 修复）+ mirror 重算调控器（预算 2 / 前台避让 / ≤50% 占空比，ONWARD_GSM_MAX_CONCURRENT_RECOMPUTES）+ 打开骨架列表（en/zh 文案）。测试：单测 4 套新增/扩展全绿；autotest 新增 run-gsm-subscription-leak（SL-00..03）、GDS-48/49 标记扩展；同行调研引用（VS Code / GitHub Desktop / fsmonitor）。改动未提交，待用户提交决定。</span><span class="lang-en">G1–G5 all implemented per user decisions. G5 leak reproduced RED with a real reload (SL-02b/SL-03), then fixed (router drains a renderer's subscriptions on main-frame cross-document <code>did-start-navigation</code>) and GREEN. Added: per-invalidation-generation prewarm dedup + quiet-window re-warm (8 s, 30 s cap) + warm-path mirror-status reuse (15 s gate) + snapshot structural token (root+nested .gitmodules/index stats) eliminating ls-files respawns + parallel numstat + high-priority foreground spawns + worker-respawn dedup reset (Q1 fix) + mirror recompute governor (budget 2 / foreground yield / ≤50% duty, ONWARD_GSM_MAX_CONCURRENT_RECOMPUTES) + open skeleton list (en/zh copy). Tests: 4 unit suites added/extended green; new run-gsm-subscription-leak autotest (SL-00..03), GDS-48/49 marker extensions; peer research cited (VS Code / GitHub Desktop / fsmonitor). Changes uncommitted, pending the user's commit decision.</span></td></tr>
+      </tbody>
+    </table>
+  </footer>
+</main>
+
+<script>
+  function setLang(l){
+    document.body.classList.toggle('en', l === 'en');
+    document.querySelectorAll('.lang-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.lang === l); });
+  }
+  (function(){
+    var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+    var map = {};
+    links.forEach(function(a){ var id = a.getAttribute('href').slice(1); var el = document.getElementById(id); if(el) map[id] = a; });
+    var ids = Object.keys(map);
+    function onScroll(){
+      var y = window.scrollY + 120; var current = ids[0];
+      for (var i=0;i<ids.length;i++){ var el = document.getElementById(ids[i]); if (el && el.offsetTop <= y) current = ids[i]; }
+      links.forEach(function(a){ a.classList.remove('active'); });
+      if (map[current]) map[current].classList.add('active');
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+</body>
+</html>

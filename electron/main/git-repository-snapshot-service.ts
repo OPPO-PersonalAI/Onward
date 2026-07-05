@@ -78,9 +78,13 @@
  * deleted now that no caller remains.
  */
 
-import { stat } from 'fs/promises'
-import { join, resolve } from 'path'
+import { resolve } from 'path'
 import { isMainThread } from 'worker_threads'
+
+import {
+  collectStructuralTokenTargets,
+  readStructuralToken
+} from './git-snapshot-structural-token'
 
 import {
   collectSubmoduleSnapshotsFromDisk,
@@ -136,35 +140,49 @@ interface CacheEntry {
   /** Pre-computed cache key (= `resolve(cwd)`) for fast invalidation. */
   key: string
   /**
-   * `.gitmodules` validity token (`mtimeMs:size`, or `none`) captured at the
-   * same time as the snapshot. This replaces the old fixed TTL: the repo's
-   * *structure* (which submodules exist) only changes when `.gitmodules`
-   * changes, so re-stat-ing that one file (a single cheap `fs.stat`, zero
-   * process spawns) is a far more honest freshness signal than a clock. A
-   * fixed TTL was actively harmful here — on EDR-throttled Windows a single
-   * structural capture can take longer than the TTL, so the cache expired
-   * before it could ever be reused (12 captures observed for 5 diff opens).
-   * The watcher fan-out (`invalidate()`) remains the backstop for the rare
-   * nested-`.gitmodules` change the top-level token cannot see.
+   * Structural validity token captured with the snapshot: stat tokens
+   * (`mtimeMs:size`) over the CLOSED set of files a structural change must
+   * touch — root `.gitmodules`, root `.git/index` (gitlinks live in the
+   * index), and each known submodule's `.gitmodules` + index. Zero git
+   * spawns; checked on every `getSnapshot`. This replaces both the old
+   * fixed TTL (harmful on EDR — a capture could outlast it) and the old
+   * `.gitmodules`-only token + drop-on-watcher backstop: with the index
+   * and nested files in the token, a `reason='mirror'` invalidation no
+   * longer needs to drop the snapshot at all, which is what used to force
+   * a fresh `git ls-files` spawn (~5 s under EDR) on every diff open of an
+   * agent-churned repo (G2 of the 2026-07-04 spinner analysis).
    */
-  gitmodulesToken: string
+  structuralToken: string
+  /** Files whose stats compose {@link structuralToken}; resolved at capture. */
+  structuralTargets: string[]
+  /**
+   * Set when a mirror/watcher invalidation arrived since capture. Purely
+   * diagnostic: the next served hit emits `snapshot.revalidate-served` so a
+   * user trace shows the spawn-free survival explicitly.
+   */
+  revalidatePending: boolean
 }
 
 const SNAPSHOT_CACHE_MAX_ENTRIES = 32
 
-/**
- * Cheap structural-freshness token for a repo: the `.gitmodules` file's
- * `mtimeMs:size`, or `none` when it does not exist. Pure `fs.stat`, no git
- * process — safe to call on every `getSnapshot` even on EDR-throttled hosts.
- */
-async function readGitmodulesToken(repoRoot: string | null): Promise<string> {
-  if (!repoRoot) return 'no-repo'
-  try {
-    const info = await stat(join(repoRoot, '.gitmodules'))
-    return `${Math.floor(info.mtimeMs)}:${info.size}`
-  } catch {
-    return 'none'
+/** Reasons forwarded from `invalidateGitDiffCache`. Content-churn reasons
+ * (`mirror`, `watcher`) only ARM the diagnostic revalidate flag — the
+ * per-get structural token owns freshness. Everything else (force, manual,
+ * lru, watcher-error, unknown) drops the entry outright. */
+const SNAPSHOT_KEEP_ON_INVALIDATE_REASONS = new Set(['mirror', 'watcher'])
+
+/** Compute the structural targets + token for a snapshot. */
+async function buildStructuralValidity(
+  snapshot: GitRepositorySnapshot
+): Promise<{ targets: string[]; token: string }> {
+  if (!snapshot.resolvedRepoRoot) {
+    return { targets: [], token: 'no-repo' }
   }
+  const targets = await collectStructuralTokenTargets(
+    snapshot.resolvedRepoRoot,
+    snapshot.submodules.map((s) => s.absolutePath)
+  )
+  return { targets, token: await readStructuralToken(targets) }
 }
 
 class GitRepositorySnapshotServiceImpl {
@@ -187,17 +205,35 @@ class GitRepositorySnapshotServiceImpl {
     if (!force) {
       const cached = this.cache.get(key)
       if (cached) {
-        const token = await readGitmodulesToken(cached.snapshot.resolvedRepoRoot)
-        if (token === cached.gitmodulesToken) {
+        const token = await readStructuralToken(cached.structuralTargets)
+        if (token === cached.structuralToken) {
+          if (cached.revalidatePending) {
+            cached.revalidatePending = false
+            // The load-bearing G2 breadcrumb: a mirror/watcher invalidation
+            // arrived since capture, and the snapshot still survived on the
+            // stat token — i.e. NO `git ls-files` respawn for this open.
+            performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_SNAPSHOT_REVALIDATE_SERVED, {
+              cwd: key,
+              ageMs: Date.now() - cached.snapshot.capturedAt,
+              targetCount: cached.structuralTargets.length,
+              submoduleCount: cached.snapshot.submodules.length
+            })
+          }
           performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CACHE_HIT, {
             cwd: key,
             fingerprint: cached.snapshot.fingerprint,
             ageMs: Date.now() - cached.snapshot.capturedAt,
             submoduleCount: cached.snapshot.submodules.length,
-            validity: 'gitmodules-token'
+            validity: 'structural-token'
           })
           return cached.snapshot
         }
+        // Token moved — a real structural edit (or a deinit/init flip).
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_SNAPSHOT_REVALIDATE_STALE, {
+          cwd: key,
+          ageMs: Date.now() - cached.snapshot.capturedAt,
+          targetCount: cached.structuralTargets.length
+        })
       }
     }
 
@@ -214,16 +250,26 @@ class GitRepositorySnapshotServiceImpl {
   }
 
   /**
-   * Drop the cached snapshot for `cwd`. Called from
-   * `invalidateGitDiffCache` so a single watcher fan-out clears every
-   * read-side cache (request, single-repo, snapshot) at once.
+   * Invalidate the cached snapshot for `cwd`. Content-churn reasons
+   * (`mirror` / `watcher`) only ARM the diagnostic revalidate flag — the
+   * per-get structural token (root+nested `.gitmodules` and index stats)
+   * owns structural freshness, so ordinary working-tree edits no longer
+   * cost a `git ls-files` respawn on the next diff open. Every other
+   * reason (force, manual, lru, watcher-error, or a legacy call with no
+   * reason) drops the entry outright, exactly as before.
    */
-  invalidate(cwd: string): number {
+  invalidate(cwd: string, reason?: string): number {
     const key = resolve(cwd)
+    if (reason && SNAPSHOT_KEEP_ON_INVALIDATE_REASONS.has(reason)) {
+      const entry = this.cache.get(key)
+      if (entry) entry.revalidatePending = true
+      return 0
+    }
     const had = this.cache.delete(key)
     if (had) {
       performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_INVALIDATE, {
-        cwd: key
+        cwd: key,
+        reason: reason ?? 'unspecified'
       })
       return 1
     }
@@ -241,8 +287,14 @@ class GitRepositorySnapshotServiceImpl {
 
   private async captureAndStore(cwd: string, key: string): Promise<GitRepositorySnapshot> {
     const snapshot = await captureGitRepositorySnapshot(cwd)
-    const gitmodulesToken = await readGitmodulesToken(snapshot.resolvedRepoRoot)
-    this.cache.set(key, { snapshot, key, gitmodulesToken })
+    const { targets, token } = await buildStructuralValidity(snapshot)
+    this.cache.set(key, {
+      snapshot,
+      key,
+      structuralToken: token,
+      structuralTargets: targets,
+      revalidatePending: false
+    })
     this.evictLRU()
     performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CAPTURE, {
       cwd: key,

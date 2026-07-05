@@ -27,6 +27,24 @@ export function perfTrace(event: string, data?: TracePayload): void {
 }
 
 /**
+ * Diagnostic-tier trace emit — default-ON in production (opt-out via
+ * ONWARD_PERF_TRACE=0), unlike perfTrace() above which is opt-in
+ * (ONWARD_PERF_TRACE=1) because component-level tracing can flood the
+ * renderer. Reserve this for low-frequency, user-action-scale breadcrumbs
+ * (page opens, open-phase spans) that a user's production diagnostic
+ * bundle must contain: the 2026-07-04 "Git Diff spins 16 s" bundle had
+ * zero renderer-side git-diff events precisely because everything rode
+ * the opt-in channel. The preload side enforces the gate.
+ */
+export function perfTraceDiagnostic(event: string, data?: TracePayload): void {
+  try {
+    window.electronAPI?.debug?.perfTraceDiagnostic?.(event, data)
+  } catch {
+    // ignore
+  }
+}
+
+/**
  * Record a trace event on the per-Task virtual tid. Use this for every
  * hop in the PTY input/output data flow so the same `terminalId` lines
  * up on one Perfetto row across scheduler, xterm, and xterm-write
