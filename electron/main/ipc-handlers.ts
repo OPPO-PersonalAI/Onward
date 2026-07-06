@@ -861,6 +861,38 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       return { ok: false, error: String(error) }
     }
   })
+  // Autotest-only: `git init` (+ commit the current tree) in a directory, so a
+  // test can faithfully reproduce "a plain folder BECOMES a git repo mid-session"
+  // (the 2026-07-05 BattleProject bug) WITHOUT a PTY shell. The mirror still has
+  // to DISCOVER the transition on its own via the revalidate/reconcile path — no
+  // watcher exists on a non-git cwd, so a fresh detection is uniquely
+  // attributable to the fix. Gated strictly on ONWARD_AUTOTEST.
+  ipcMain.handle('debug:autotest-git-init', async (
+    _event,
+    payload?: { dir?: unknown }
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { ok: false, error: 'debug:autotest-git-init requires ONWARD_AUTOTEST=1' }
+    }
+    const dir = typeof payload?.dir === 'string' ? payload.dir : ''
+    if (!dir) return { ok: false, error: 'Missing dir.' }
+    try {
+      const { execFileSync } = await import('child_process')
+      const opts = { cwd: dir, stdio: 'ignore' as const, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
+      execFileSync('git', ['init', '-b', 'main'], opts)
+      // Pin line endings so a Windows global core.autocrlf cannot dirty the tree.
+      execFileSync('git', ['config', 'core.autocrlf', 'false'], opts)
+      execFileSync('git', ['add', '-A'], opts)
+      execFileSync('git', [
+        '-c', 'user.name=Onward AutoTest',
+        '-c', 'user.email=autotest@example.com',
+        'commit', '--allow-empty', '-m', 'autotest git init'
+      ], opts)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: String(error) }
+    }
+  })
   ipcMain.handle('performance-trace:record', (_event, payload) => {
     performanceTrace.recordRendererEvent(payload)
   })
@@ -2051,6 +2083,28 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     gitWatchManager?.notifyTerminalGitUpdate(terminalId)
     return { success: true }
   })
+  // Watcher-independent freshness (2026-07-05): a completed terminal git command
+  // that mutates state (commit/checkout/pull/init/…) reconciles the terminal's
+  // cwd even when the FS watcher dropped the `.git` write.
+  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_GIT_COMMAND, async (
+    _event,
+    payload: { terminalId: string; subcommand: string; createsRepo: boolean }
+  ) => {
+    if (!payload || typeof payload.terminalId !== 'string') return { success: false }
+    gitWatchManager?.notifyTerminalGitCommand(
+      payload.terminalId,
+      typeof payload.subcommand === 'string' ? payload.subcommand : '',
+      Boolean(payload.createsRepo)
+    )
+    return { success: true }
+  })
+  // Git Diff revalidate-on-open: re-check the cwd's mirror state (no generation
+  // bump) so a watcher-missed commit/edit self-heals when the panel opens.
+  ipcMain.handle(IPC.GIT_STATE_MIRROR_REVALIDATE, async (_event, cwd: string) => {
+    if (typeof cwd !== 'string' || !cwd) return { success: false }
+    gitStateMirrorRouter.revalidateCwd(cwd, 'diff-open')
+    return { success: true }
+  })
 
   // Background diff cache warming — pre-compute diff so opening the panel is instant
   ipcMain.handle(IPC.GIT_WARM_DIFF_CACHE, async (_, cwd: string) => {
@@ -2595,6 +2649,8 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_ACTIVITY)
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_FOCUS)
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE)
+  ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_COMMAND)
+  ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_REVALIDATE)
   ipcMain.removeHandler(IPC.PROJECT_LIST_DIRECTORY)
   ipcMain.removeHandler(IPC.PROJECT_BUILD_FILE_INDEX)
   ipcMain.removeHandler(IPC.PROJECT_SEARCH_FILENAMES)
@@ -2633,6 +2689,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler('debug:get-api-server-port')
   ipcMain.removeHandler('debug:post-api-terminal-write')
   ipcMain.removeHandler('debug:autotest-write-external-file')
+  ipcMain.removeHandler('debug:autotest-git-init')
   ipcMain.removeHandler('performance-trace:record')
   ipcMain.removeHandler('performance-trace:get-status')
   ipcMain.removeHandler('performance-trace:flush')

@@ -109,6 +109,23 @@ export function parseOsc633Cwd(data: string): string | null {
   return normalizeTerminalCwdCandidate(data.slice('P;Cwd='.length))
 }
 
+/**
+ * Extract the completed command line from an OSC 633 `E` payload
+ * (`E;<command-line>`), emitted by Onward shell integration ONLY when the last
+ * command's word is `git` (privacy: non-git command lines never leave the
+ * shell). Everything after the first `E;` is the command line verbatim — it may
+ * contain `;` (e.g. `git commit -m "a; b"`), so do NOT split on `;`. Returns
+ * null for a non-`E` payload or an empty line. Capped defensively; the shell
+ * already strips control chars.
+ */
+const MAX_OSC633_COMMAND_LENGTH = 2048
+export function parseOsc633Command(data: string): string | null {
+  if (!data.startsWith('E;')) return null
+  const cmd = data.slice('E;'.length)
+  if (!cmd || cmd.length > MAX_OSC633_COMMAND_LENGTH) return null
+  return cmd
+}
+
 export function parseOsc1337Cwd(data: string): string | null {
   if (!data.startsWith('CurrentDir=')) return null
   return normalizeTerminalCwdCandidate(data.slice('CurrentDir='.length))

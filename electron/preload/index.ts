@@ -795,6 +795,14 @@ export interface GitAPI {
   notifyTerminalActivity: (terminalId: string) => Promise<{ success: true }>
   notifyTerminalFocus: (terminalId: string) => Promise<{ success: true }>
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
+  // Watcher-independent freshness (2026-07-05): a completed terminal git command
+  // classified as state-mutating — reconcile the terminal's cwd even when the FS
+  // watcher dropped the `.git` write. The raw command line NEVER crosses IPC;
+  // the renderer classifies it and sends only the subcommand keyword + flags.
+  notifyTerminalGitCommand: (payload: { terminalId: string; subcommand: string; createsRepo: boolean }) => Promise<{ success: boolean }>
+  // Git Diff revalidate-on-open: re-check the cwd's mirror state (no generation
+  // bump) so a watcher-missed commit/edit self-heals when the panel opens.
+  revalidateMirror: (cwd: string) => Promise<{ success: boolean }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
   // Subscribe to backend cache invalidation events. Fires when an FS event
@@ -1250,6 +1258,7 @@ export interface DebugAPI {
   getApiServerPort: () => Promise<number>
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
+  gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
   flushPerfTrace: () => Promise<PerformanceTraceStatus>
@@ -1739,6 +1748,14 @@ const gitAPI: GitAPI = {
 
   notifyTerminalGitUpdate: (terminalId: string) => {
     return ipcRenderer.invoke(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE, terminalId)
+  },
+
+  notifyTerminalGitCommand: (payload: { terminalId: string; subcommand: string; createsRepo: boolean }) => {
+    return ipcRenderer.invoke(IPC.GIT_NOTIFY_TERMINAL_GIT_COMMAND, payload)
+  },
+
+  revalidateMirror: (cwd: string) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_REVALIDATE, cwd)
   },
 
   warmDiffCache: (cwd: string) => {
@@ -2254,6 +2271,9 @@ const debugAPI: DebugAPI = {
   },
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => {
     return ipcRenderer.invoke('debug:autotest-write-external-file', payload) as Promise<{ ok: boolean; error?: string }>
+  },
+  gitInitForAutotest: (payload: { dir: string }) => {
+    return ipcRenderer.invoke('debug:autotest-git-init', payload) as Promise<{ ok: boolean; error?: string }>
   },
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => {
     if (!perfTraceEnabled) return

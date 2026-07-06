@@ -829,6 +829,16 @@ export class TerminalSessionManager {
     // session, which we don't.
     installOscCwdAddon(terminal, {
       terminalId: id,
+      // Watcher-independent freshness (2026-07-05): a completed state-mutating
+      // git command in this terminal reconciles its cwd's mirror even when the
+      // FS watcher dropped the `.git` write. Only the classified subcommand
+      // crosses IPC — never the raw command line.
+      notifyGitCommand: (terminalId, subcommand, createsRepo) => {
+        try {
+          (window as unknown as { electronAPI?: { git?: { notifyTerminalGitCommand?: (p: { terminalId: string; subcommand: string; createsRepo: boolean }) => void } } })
+            .electronAPI?.git?.notifyTerminalGitCommand?.({ terminalId, subcommand, createsRepo })
+        } catch { /* ignore */ }
+      },
       pushCwd: (terminalId, cwd) => {
         try {
           (window as unknown as { electronAPI?: { git?: { pushCwd?: (id: string, cwd: string | null) => void } } })

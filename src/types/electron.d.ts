@@ -732,6 +732,8 @@ export interface GitAPI {
   notifyTerminalActivity: (terminalId: string) => Promise<{ success: true }>
   notifyTerminalFocus: (terminalId: string) => Promise<{ success: true }>
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
+  notifyTerminalGitCommand: (payload: { terminalId: string; subcommand: string; createsRepo: boolean }) => Promise<{ success: boolean }>
+  revalidateMirror: (cwd: string) => Promise<{ success: boolean }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
   onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
@@ -1086,6 +1088,7 @@ export interface DebugAPI {
   getApiServerPort: () => Promise<number>
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
+  gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
   flushPerfTrace: () => Promise<PerformanceTraceStatus>

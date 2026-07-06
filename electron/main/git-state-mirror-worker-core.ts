@@ -183,6 +183,35 @@ export function classifyEventPath(eventPath: string, watchedRoot: string): {
 }
 
 /**
+ * Decide whether a just-completed recompute revealed a non-git → git
+ * transition that needs the FS watcher (re)attached.
+ *
+ * WHY (2026-07-05 diagnostic bundle, "BattleProject not recognized"): a cwd
+ * that is not a git repo when a terminal first attaches gets NO watcher
+ * (`handleAttachWatch` skips it — there is nothing to watch). If the user then
+ * runs `git init` / `git clone` inside that same open directory, the FS watcher
+ * never existed to catch the `.git` creation, so the repo stays invisible until
+ * a focus-resync recompute happens to re-detect it — and even then the watcher
+ * is still missing, so the tab goes stale again on the next edit. A recompute
+ * that discovers a repoRoot where the entry has no watcher group must therefore
+ * trigger a watcher attach.
+ *
+ * Pure predicate so the transition table is unit-tested without a live worker:
+ *   attach a watcher IFF the entry now resolves a repoRoot, has no watcher group
+ *   yet, and is neither detaching nor already mid-attach.
+ */
+export function shouldReattachWatcherAfterRecompute(
+  entry: Pick<MirrorWorkerEntryCore, 'watcherGroupKey' | 'detachRequested' | 'attachInFlight'>,
+  nextRepoRoot: string | null
+): boolean {
+  if (!nextRepoRoot) return false
+  if (entry.watcherGroupKey) return false
+  if (entry.detachRequested) return false
+  if (entry.attachInFlight) return false
+  return true
+}
+
+/**
  * Harden the environment for the mirror's read-only git invocations.
  *
  * Every mirror git call (status / rev-parse / show) is strictly read-only, but

@@ -37,5 +37,24 @@ function global:Prompt {
     $bel = [char]0x07
     Write-Host -NoNewline ($esc + ']633;P;Cwd=' + $cwd + $bel)
     Write-Host -NoNewline ($esc + ']7;file://' + $hostName + '/' + $cwdForUri + $esc + '\')
+    # Watcher-independent git-state freshness (2026-07-05 spinner bundles):
+    # re-emit the last command via OSC 633;E ONLY when it is a `git` invocation,
+    # so Onward can reconcile the mirror even if the FS watcher dropped the
+    # `.git` write (VS Code's terminal-shell-integration model). Emitting only
+    # git command lines keeps non-git command lines inside the shell (privacy).
+    # Deduped by history Id so a bare Enter does not re-fire.
+    try {
+        $h = Get-History -Count 1 -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($h -and $h.Id -ne $Global:__OnwardLastHistoryId) {
+            $Global:__OnwardLastHistoryId = $h.Id
+            $first = ($h.CommandLine.TrimStart() -split '\s+', 2)[0]
+            $leaf = ($first -split '[\\/]')[-1]
+            if ($leaf -eq 'git' -or $leaf -eq 'git.exe') {
+                $safe = ($h.CommandLine -replace '[\x00-\x1f]', ' ')
+                if ($safe.Length -gt 2048) { $safe = $safe.Substring(0, 2048) }
+                Write-Host -NoNewline ($esc + ']633;E;' + $safe + $bel)
+            }
+        }
+    } catch { }
     & $Global:__OnwardOriginalPrompt
 }

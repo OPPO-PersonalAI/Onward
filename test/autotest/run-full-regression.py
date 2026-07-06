@@ -136,6 +136,13 @@ SCRIPTS: List[str] = [
     # from the 2026-07-04 diagnostic bundle: 3 of 5 mirrored repos with no live
     # terminal, ~950 background recomputes each).
     "test/autotest/run-gsm-subscription-leak-autotest.sh",
+    # Git-command / revalidate freshness (GCF-*): the FS watcher drops `.git/**`
+    # events on EDR Windows, so a `git commit` / `git init` / edit left the diff
+    # list + tab status stale until manual refresh (2026-07-05 bundles). Proves
+    # revalidate-on-open + non-git→git watcher re-attach surface the change even
+    # when no watcher event fired (a non-git cwd has no watcher, so the fresh
+    # detection is uniquely attributable to the fix).
+    "test/autotest/run-gsm-git-command-freshness-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
     "test/autotest/run-repo-prewarm-autotest.sh",

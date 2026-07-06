@@ -742,7 +742,32 @@ export const PERF_TRACE_EVENT = {
   WORKER_GIT_STATE_MIRROR_FOREGROUND_YIELD: 'worker:git-state-mirror.foreground-yield',
   // G4 — the open skeleton painted from the mirror snapshot while the
   // real list was still loading (diagnostic channel, default-on).
-  RENDERER_GIT_DIFF_OPEN_SKELETON_RENDERED: 'renderer:git-diff.open-skeleton-rendered'
+  RENDERER_GIT_DIFF_OPEN_SKELETON_RENDERED: 'renderer:git-diff.open-skeleton-rendered',
+
+  // ───────── 2026-07-05 watcher-independent freshness (revalidate-on-open + terminal-command trigger) ─────────
+  // Root cause (two diagnostic bundles): the GitStateMirror FS watcher is the
+  // SOLE freshness authority for the diff list + tab status, and on Windows
+  // under EDR it silently drops `.git/**` events, so a `git commit` / edit
+  // leaves the view stale until manual refresh; a `git init` in a non-git cwd
+  // is never detected (that cwd has no watcher). Fix mirrors VS Code: revalidate
+  // on Git Diff open, reconcile on completed terminal git commands, and
+  // re-attach the watcher when a cwd becomes a git repo.
+  //
+  // Renderer: Git Diff page-open asked the mirror to revalidate its cwd (ph=i).
+  RENDERER_GIT_DIFF_OPEN_REVALIDATE: 'renderer:git-diff.open-revalidate',
+  // Renderer: a completed terminal command classified as a state-mutating git
+  // invocation (ph=i). Payload carries ONLY the subcommand keyword + flags —
+  // never the raw command line (privacy).
+  RENDERER_TERMINAL_GIT_COMMAND_DETECTED: 'renderer:terminal.git-command-detected',
+  // Main: router received a revalidate request (source=diff-open|terminal-command).
+  MAIN_GIT_STATE_MIRROR_REVALIDATE_REQUESTED: 'main:git-state-mirror.revalidate-requested',
+  // Main: the bridge mapped a terminal git command to a cwd revalidate.
+  MAIN_GIT_STATE_MIRROR_TERMINAL_GIT_COMMAND: 'main:git-state-mirror.terminal-git-command',
+  // Worker: revalidate recompute ran (no generation bump, delta-gated emit).
+  WORKER_GIT_STATE_MIRROR_REVALIDATE: 'worker:git-state-mirror.revalidate',
+  // Worker: a recompute detected a non-git → git transition and re-attached the
+  // FS watcher for the newly-created repo (the BattleProject class).
+  WORKER_GIT_STATE_MIRROR_WATCHER_REATTACHED: 'worker:git-state-mirror.watcher-reattached'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

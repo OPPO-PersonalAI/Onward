@@ -22,6 +22,8 @@
  */
 
 import { gitStateMirrorRouter } from './git-state-mirror-router'
+import { performanceTrace } from './performance-trace'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { getTerminalCwd, type TerminalGitInfo } from './git-utils'
 import {
   emptyTerminalGitInfo,
@@ -162,6 +164,27 @@ export class TerminalGitInfoBridge {
     const entry = this.entries.get(terminalId)
     if (!entry || !entry.subscribedCwd) return
     gitStateMirrorRouter.internalForceRecompute(entry.subscribedCwd)
+  }
+
+  /**
+   * A state-mutating git command (commit / checkout / pull / init / …) just
+   * completed in this terminal — the watcher-independent freshness path
+   * (2026-07-05 spinner bundles; VS Code's terminal-shell-integration model).
+   * Revalidate the terminal's cwd WITHOUT the focus-resync generation bump, so
+   * a `git commit` the FS watcher dropped still refreshes the diff list + tab
+   * status. `subcommand` is diagnostic; `createsRepo` (init/clone) is served by
+   * the worker's recompute-then-reattach path, so no extra flag is needed here.
+   */
+  notifyTerminalGitCommand(terminalId: string, subcommand: string, createsRepo: boolean): void {
+    const entry = this.entries.get(terminalId)
+    if (!entry || !entry.subscribedCwd) return
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_TERMINAL_GIT_COMMAND, {
+      terminalId,
+      subcommand,
+      createsRepo,
+      cwd: entry.subscribedCwd
+    })
+    gitStateMirrorRouter.revalidateCwd(entry.subscribedCwd, 'terminal-command')
   }
 
   /**

@@ -43,6 +43,7 @@ import {
   requestMirrorAttach,
   requestMirrorDetach,
   resolveMirrorWatcherRoot,
+  shouldReattachWatcherAfterRecompute,
   type MirrorWorkerEntryCore
 } from './git-state-mirror-worker-core'
 import { buildMirrorChangeFingerprint } from './git-state-mirror-change-fingerprint'
@@ -567,6 +568,14 @@ async function runRecompute(
   if (entry.recomputeQueued && !entry.detachRequested && !shuttingDown) {
     entry.recomputeQueued = false
     scheduleRecompute(entry)
+  }
+  // Non-git → git transition backstop (2026-07-05): a user-driven recompute
+  // (focus-resync / revalidate 'reconcile') that just resolved a repoRoot for an
+  // entry with no watcher attaches it. Placed HERE — not in the callers — so a
+  // governor-DEFERRED reconcile still re-attaches when its retry finally re-runs
+  // runRecompute with the same reason. Guarded no-op for already-watched repos.
+  if (reason === 'focus-resync' || reason === 'reconcile') {
+    await reattachWatcherIfBecameGit(entry)
   }
   if (!delta) return false // stale, detached, or no-op
   // Short-circuit: only emit when delta has actual fields beyond capturedAt.
@@ -1110,12 +1119,12 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
 
 async function ensureWatcherForGroup(
   group: MirrorWatcherGroup,
-  reason: 'initial' | 'restart' | 'suspended-probe'
+  reason: 'initial' | 'restart' | 'suspended-probe' | 'reattach'
 ): Promise<void> {
   if (!isWatcherGroupCurrent(group) || group.attachInFlight) return
   group.attachInFlight = true
   clearGroupRestartTimer(group)
-  updateWatcherHealth(group, reason === 'initial' ? 'attaching' : 'recovering', {
+  updateWatcherHealth(group, reason === 'initial' || reason === 'reattach' ? 'attaching' : 'recovering', {
     message: group.message,
     failureKind: group.failureKind
   })
@@ -1236,16 +1245,35 @@ async function handleAttachWatch(cwd: string): Promise<void> {
     return
   }
 
+  await attachWatcherForEntry(entry, 'attach')
+}
+
+/**
+ * Attach the FS watcher for an entry whose current state resolves a repoRoot.
+ * Extracted from `handleAttachWatch` so a non-git → git transition
+ * (`git init`/`clone` inside an already-open dir) can (re)attach a watcher via
+ * the same path without a full re-attach handshake. Idempotent: a no-op when
+ * the entry already has a watcher group or is non-git. `origin` is diagnostic
+ * ('attach' = initial attach, 'reattach' = post-recompute transition).
+ */
+async function attachWatcherForEntry(
+  entry: MirrorWorkerEntryCore,
+  origin: 'attach' | 'reattach'
+): Promise<void> {
+  if (entry.detachRequested || entry.watcherGroupKey) return
+
   const watcherRoot = resolveMirrorWatcherRoot(entry.state)
   if (!watcherRoot) {
-    log('info', 'skipping parcel-watcher for non-git cwd', { cwd })
-    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED, {
-      cwd,
-      reason: 'non-git-cwd'
-    })
+    if (origin === 'attach') {
+      log('info', 'skipping parcel-watcher for non-git cwd', { cwd: entry.cwd })
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED, {
+        cwd: entry.cwd,
+        reason: 'non-git-cwd'
+      })
+    }
     entry.attachInFlight = false
     if (entry.detachRequested) {
-      entries.delete(cwd)
+      entries.delete(entry.cwd)
     }
     return
   }
@@ -1266,14 +1294,32 @@ async function handleAttachWatch(cwd: string): Promise<void> {
     await detachEntryFromWatcherGroup(entry.cwd)
   })
   if (result === 'detached') {
-    entries.delete(cwd)
+    entries.delete(entry.cwd)
     return
   }
+  if (origin === 'reattach') {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_REATTACHED, {
+      cwd: entry.cwd,
+      repoRoot: watcherRoot
+    })
+  }
   if (created) {
-    await ensureWatcherForGroup(group, 'initial')
+    await ensureWatcherForGroup(group, origin === 'attach' ? 'initial' : 'reattach')
   } else {
     emitWatcherStatus(group)
   }
+}
+
+/**
+ * After a user-driven recompute (focus-resync / revalidate), attach the watcher
+ * if the cwd just transitioned non-git → git (see
+ * {@link shouldReattachWatcherAfterRecompute}). Backstop for the "BattleProject
+ * not recognized" class: `git init` in an already-open dir now becomes watched
+ * the moment the next recompute resolves its repoRoot.
+ */
+async function reattachWatcherIfBecameGit(entry: MirrorWorkerEntryCore): Promise<void> {
+  if (!shouldReattachWatcherAfterRecompute(entry, entry.state?.repoRoot ?? null)) return
+  await attachWatcherForEntry(entry, 'reattach')
 }
 
 async function handleDetachWatch(cwd: string): Promise<void> {
@@ -1311,7 +1357,30 @@ async function handleFocusResync(cwd: string | null): Promise<void> {
     entry.pendingSince = null
     entry.pendingPaths.clear()
   }
+  // runRecompute handles the non-git → git watcher re-attach for user-driven
+  // reasons (incl. a governor-deferred retry), so no explicit re-attach here.
   await runRecompute(entry, 'focus-resync')
+}
+
+/**
+ * Watcher-independent revalidation (2026-07-05 spinner bundles): a Git Diff
+ * open or a completed terminal git command re-checks the mirror WITHOUT the
+ * focus-resync generation bump — recompute and emit only on a real delta, so an
+ * unchanged repo does not force a DiffEditor re-mount on every open. Also
+ * (re)attaches the watcher when the cwd became a git repo.
+ */
+async function handleRevalidate(cwd: string, source: string): Promise<void> {
+  if (shuttingDown) return
+  if (!cwd) return
+  const entry = entries.get(cwd)
+  if (!entry) return
+  performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_REVALIDATE, {
+    cwd,
+    source
+  })
+  // runRecompute performs the non-git → git watcher re-attach for the
+  // 'reconcile' reason (incl. a governor-deferred retry) — see runRecompute.
+  await runRecompute(entry, 'reconcile')
 }
 
 async function handleRequestFileBody(
@@ -1484,6 +1553,9 @@ parentPort.on('message', (msg: MainToMirrorMessage) => {
       return
     case 'focus-resync':
       if (!shuttingDown) trackOperation('focus-resync', handleFocusResync(msg.cwd))
+      return
+    case 'revalidate':
+      if (!shuttingDown) trackOperation('revalidate', handleRevalidate(msg.cwd, msg.source))
       return
     case 'reconcile-focus':
       // Which repo is focused (1 s cadence) vs the rest (3 s). Cheap — no git

@@ -26,13 +26,21 @@
 import type { Terminal as XTerm } from '@xterm/xterm'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
-import { parseTerminalCwdOsc, type TerminalCwdOscDialect } from '../../utils/terminal-cwd-osc'
+import { parseTerminalCwdOsc, parseOsc633Command, type TerminalCwdOscDialect } from '../../utils/terminal-cwd-osc'
+import { classifyGitCommandLine } from '../../utils/git-command-classifier'
 
 type Disposable = { dispose: () => void }
 
 export interface OscCwdAddonOptions {
   terminalId: string
   pushCwd: (terminalId: string, cwd: string) => void
+  /**
+   * A state-mutating git command completed in this terminal (watcher-independent
+   * freshness, 2026-07-05). The RAW command line is NEVER forwarded — only the
+   * classified subcommand keyword + createsRepo flag — so a git command carrying
+   * an inline credential never crosses IPC.
+   */
+  notifyGitCommand?: (terminalId: string, subcommand: string, createsRepo: boolean) => void
 }
 
 /**
@@ -55,6 +63,29 @@ export function installOscCwdAddon(terminal: XTerm, opts: OscCwdAddonOptions): D
     return true
   }
 
+  // OSC 633 carries BOTH `P;Cwd=<path>` (cwd) and — since 2026-07-05 — `E;<line>`
+  // (the last command, emitted by shell integration only when it is a `git`
+  // command). Route the `E;` payload through the git-command classifier: a
+  // state-mutating subcommand triggers a watcher-independent mirror reconcile.
+  // Consume the bytes regardless so the payload never renders.
+  const handle633 = (data: string): boolean => {
+    if (handle('osc633', data)) return true
+    const cmdLine = parseOsc633Command(data)
+    if (cmdLine === null) return false
+    const c = classifyGitCommandLine(cmdLine)
+    if (c.isGit && c.mutatesState && c.subcommand) {
+      // Trace the SUBCOMMAND only — never the raw command line (may hold creds).
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TERMINAL_GIT_COMMAND_DETECTED, {
+        terminalId: opts.terminalId,
+        subcommand: c.subcommand,
+        createsRepo: c.createsRepo
+      })
+      try { opts.notifyGitCommand?.(opts.terminalId, c.subcommand, c.createsRepo) } catch { /* ignore */ }
+    }
+    // Always consume a well-formed `E;` payload (git or not) so it never renders.
+    return true
+  }
+
   // Some xterm.js builds expose `parser` only when explicitly enabled; guard
   // both the property and the registerOscHandler method itself so the addon
   // never throws if a future version moves the API.
@@ -63,7 +94,7 @@ export function installOscCwdAddon(terminal: XTerm, opts: OscCwdAddonOptions): D
     return { dispose: () => { /* no-op */ } }
   }
 
-  disposers.push(parser.registerOscHandler(633,  (data) => handle('osc633', data)))
+  disposers.push(parser.registerOscHandler(633,  (data) => handle633(data)))
   disposers.push(parser.registerOscHandler(7,    (data) => handle('osc7', data)))
   disposers.push(parser.registerOscHandler(1337, (data) => handle('osc1337', data)))
   disposers.push(parser.registerOscHandler(9,    (data) => handle('osc9', data)))

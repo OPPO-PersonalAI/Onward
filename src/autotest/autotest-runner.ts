@@ -38,6 +38,7 @@ import { testGitDiffIdenticalBlob } from './test-git-diff-identical-blob'
 import { testGitLargeFileConfirmation } from './test-git-large-file-confirmation'
 import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitStateMirrorSubscriptionLeak } from './test-git-state-mirror-subscription-leak'
+import { testGitStateMirrorGitCommandFreshness } from './test-git-state-mirror-git-command-freshness'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
 import { testProjectEditorMultiTerminalScope } from './test-project-editor-multi-terminal-scope'
@@ -686,6 +687,17 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase5.496:begin')
       const results = await testGitStateMirrorSubscriptionLeak(ctx)
       collectSuiteResults('GitStateMirrorSubscriptionLeak', results)
+      await sleep(300)
+    }
+
+    // Phase 5.497: GitStateMirror watcher-independent freshness (revalidate-on-open
+    // + terminal git-command reconcile + non-git→git watcher re-attach). Isolated
+    // like the subscription-leak suite: its runner sets ONWARD_AUTOTEST_SUITE so
+    // an 'all' run never restarts earlier suites.
+    if (!ctx.cancelled() && shouldRun('git-state-mirror-git-command-freshness')) {
+      log('phase5.497:begin')
+      const results = await testGitStateMirrorGitCommandFreshness(ctx)
+      collectSuiteResults('GitStateMirrorGitCommandFreshness', results)
       await sleep(300)
     }
 

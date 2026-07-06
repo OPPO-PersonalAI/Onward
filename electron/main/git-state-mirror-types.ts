@@ -164,6 +164,13 @@ export type MainToMirrorMessage =
   | { kind: 'switch-cwd'; terminalId: string; newCwd: string | null }
   | { kind: 'request-file-body'; cwd: string; fileKey: string; force: boolean; replyId: number }
   | { kind: 'focus-resync'; cwd: string | null }
+  // Watcher-independent revalidation (2026-07-05 spinner bundles): a Git Diff
+  // open OR a completed terminal git command wants the mirror re-checked
+  // WITHOUT the focus-resync generation bump (so an unchanged repo does not
+  // force a DiffEditor re-mount / flicker on every open). Recompute + emit only
+  // on a real delta, and (re)attach the watcher if the cwd became a git repo.
+  // `source` is diagnostic only ('diff-open' | 'terminal-command').
+  | { kind: 'revalidate'; cwd: string; source: string }
   // Always-on reconcile heartbeat input: the focused terminal's cwd, so the
   // worker polls that repo at 1 s and the rest of the visible repos at 3 s.
   | { kind: 'reconcile-focus'; cwd: string | null }

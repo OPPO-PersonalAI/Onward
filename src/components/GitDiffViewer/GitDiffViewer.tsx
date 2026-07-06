@@ -3007,6 +3007,15 @@ export function GitDiffViewer({
         cwd,
         force: Boolean(options?.force)
       })
+      // Watcher-independent freshness (2026-07-05): ask the mirror to revalidate
+      // this cwd on open. If the FS watcher dropped a commit/edit, the recompute
+      // finds the real state and fans out an invalidation → this view reloads
+      // fresh; if nothing changed there is NO generation bump, so the cached
+      // list still paints instantly with no re-mount flicker. Fire-and-forget.
+      try {
+        window.electronAPI?.git?.revalidateMirror?.(cwd)
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_OPEN_REVALIDATE, { cwd })
+      } catch { /* ignore */ }
     }
     try {
       const stagedLoad = Boolean(options?.reset)

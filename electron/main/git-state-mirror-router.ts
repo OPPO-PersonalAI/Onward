@@ -855,6 +855,26 @@ class GitStateMirrorRouter {
   }
 
   /**
+   * Watcher-independent revalidation (2026-07-05 spinner bundles). Unlike
+   * `internalForceRecompute`, this does NOT bump the per-cwd generation, so an
+   * unchanged repo produces no delta and no DiffEditor re-mount — the diff view
+   * paints its cached list instantly and only re-renders if the recompute finds
+   * a REAL change the FS watcher missed. Drives (a) Git Diff revalidate-on-open
+   * and (b) the terminal git-command trigger. No-op for an unsubscribed cwd.
+   * `source` is diagnostic ('diff-open' | 'terminal-command').
+   */
+  revalidateCwd(rawCwd: string, source: string): void {
+    if (!rawCwd) return
+    const cwd = canonicalise(rawCwd)
+    if (!this.refCounts.has(cwd)) return
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_REVALIDATE_REQUESTED, {
+      cwd,
+      source
+    })
+    this.postToWorker({ kind: 'revalidate', cwd, source })
+  }
+
+  /**
    * Tell the worker which repo (by the focused terminal's cwd) is focused, so
    * its always-on reconcile heartbeat polls that repo at 1 s and the rest of
    * the visible repos at 3 s. Forward-only — no git work on main (constraint

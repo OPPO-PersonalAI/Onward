@@ -18,6 +18,27 @@ fi
 __onward_emit_cwd() {
   local pwd_url="${PWD// /%20}"
   printf '\e]633;P;Cwd=%s\a\e]7;file://%s%s\e\\' "$PWD" "${HOSTNAME:-localhost}" "$pwd_url"
+  # Watcher-independent git-state freshness (2026-07-05 spinner bundles):
+  # re-emit the last command via OSC 633;E ONLY when it is a `git` invocation,
+  # so Onward reconciles the mirror even if the FS watcher dropped the `.git`
+  # write. Only git command lines leave the shell (privacy); deduped by the
+  # history number so a bare Enter does not re-fire. `__ONWARD_LAST_HIST` is a
+  # global (persists across prompts) — deliberately NOT declared `local`.
+  local __hline __hcmd __first __leaf
+  __hline=$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)
+  if [[ "$__hline" =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ ]]; then
+    if [ "${BASH_REMATCH[1]}" != "${__ONWARD_LAST_HIST:-}" ]; then
+      __ONWARD_LAST_HIST="${BASH_REMATCH[1]}"
+      __hcmd="${BASH_REMATCH[2]}"
+      __first="${__hcmd%%[[:space:]]*}"
+      __leaf="${__first##*/}"
+      case "$__leaf" in
+        git|git.exe)
+          printf '\e]633;E;%s\a' "${__hcmd//[[:cntrl:]]/ }"
+          ;;
+      esac
+    fi
+  fi
 }
 
 # Compose with the user's existing PROMPT_COMMAND. Avoid double-registration

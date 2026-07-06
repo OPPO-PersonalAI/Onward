@@ -119,6 +119,11 @@ export const IPC = {
   GIT_NOTIFY_TERMINAL_ACTIVITY: 'git:notify-terminal-activity',
   GIT_NOTIFY_TERMINAL_FOCUS: 'git:notify-terminal-focus',
   GIT_NOTIFY_TERMINAL_GIT_UPDATE: 'git:notify-terminal-git-update',
+  // Watcher-independent freshness (2026-07-05): a completed terminal command
+  // classified as a state-mutating git invocation — reconcile the terminal's
+  // cwd even when the FS watcher dropped the `.git` write. VS Code's
+  // terminal-shell-integration refresh model, adapted to Onward's PTY.
+  GIT_NOTIFY_TERMINAL_GIT_COMMAND: 'git:notify-terminal-git-command',
   GIT_RESOLVE_REPO_ROOT: 'git:resolve-repo-root',
   GIT_SAVE_FILE_CONTENT: 'git:save-file-content',
   GIT_STAGE_FILE: 'git:stage-file',
@@ -136,6 +141,11 @@ export const IPC = {
   GIT_STATE_MIRROR_UPDATE: 'git-state-mirror:update',
   GIT_STATE_MIRROR_REQUEST_FILE_BODY: 'git-state-mirror:request-file-body',
   GIT_STATE_MIRROR_FILE_BODY_UPDATE: 'git-state-mirror:file-body-update',
+  // Watcher-independent freshness (2026-07-05): revalidate a cwd's mirror state
+  // without the focus-resync generation bump. Fired on Git Diff page-open so a
+  // watcher-missed commit/edit self-heals on open (no forced DiffEditor re-mount
+  // when nothing changed).
+  GIT_STATE_MIRROR_REVALIDATE: 'git-state-mirror:revalidate',
   GIT_STATE_PUSH_CWD: 'git-state-mirror:push-cwd',
   // Autotest-only (ONWARD_AUTOTEST=1): read-only dump of the router's
   // subscription tables (refCounts / internalRefCounts / per-renderer),
