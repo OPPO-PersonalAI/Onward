@@ -19,7 +19,7 @@ fi
 rm -f "$LOG_FILE"
 USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-terminal-autofollow-user-data.XXXXXX")"
 cleanup() {
-  rm -rf "$USER_DATA_DIR"
+  onward_robust_rm "$USER_DATA_DIR"
   find "$ROOT_DIR" -maxdepth 1 -name '__autotest_*' -exec rm -rf {} + 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

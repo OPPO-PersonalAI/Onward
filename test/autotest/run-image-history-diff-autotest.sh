@@ -50,7 +50,7 @@ cleanup() {
   local leftovers=("$REPO_ROOT"/__autotest_*)
   shopt -u nullglob
   if [[ ${#leftovers[@]} -gt 0 ]]; then
-    rm -rf "${leftovers[@]}"
+    onward_robust_rm "${leftovers[@]}"
   fi
 }
 trap cleanup EXIT

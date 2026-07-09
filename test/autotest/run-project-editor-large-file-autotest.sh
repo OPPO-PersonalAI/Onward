@@ -13,7 +13,7 @@ SCRATCH_DIR="$ROOT_DIR/test/autotest/results/project-editor-large-file"
 LARGE_GIF_FIXTURE="$SCRATCH_DIR/large-preview.gif"
 
 cleanup() {
-  rm -rf "$SCRATCH_DIR"
+  onward_robust_rm "$SCRATCH_DIR"
   find "$ROOT_DIR" -maxdepth 1 -name '__autotest_*' -exec rm -rf {} +
 }
 trap cleanup EXIT

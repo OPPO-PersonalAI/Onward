@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-}"
 SEED_LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/feedback-persistence-seed.log}"
 mkdir -p "$(dirname "$SEED_LOG_FILE")"
@@ -22,7 +23,7 @@ cleanup() {
     if [[ "${ONWARD_AUTOTEST_KEEP_TMP:-0}" == "1" ]]; then
       echo "[autotest] retained tmp for debugging: $USER_DATA_DIR"
     else
-      rm -rf "$USER_DATA_DIR"
+      onward_robust_rm "$USER_DATA_DIR"
     fi
   fi
 }

@@ -19,7 +19,7 @@ cleanup() {
   fi
   find "$ROOT_DIR" -maxdepth 1 -name '__autotest_*' -exec rm -rf {} + 2>/dev/null || true
   if [[ -n "$TMP_ROOT" && "${ONWARD_AUTOTEST_KEEP_TMP:-0}" != "1" ]]; then
-    rm -rf "$TMP_ROOT"
+    onward_robust_rm "$TMP_ROOT"
   fi
 }
 trap cleanup EXIT

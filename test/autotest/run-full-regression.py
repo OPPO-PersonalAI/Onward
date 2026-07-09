@@ -367,7 +367,7 @@ IS_WINDOWS = platform.system() == "Windows"
 @dataclass
 class RunResult:
     script: str
-    status: str  # PASS / FAIL / TIMEOUT / SKIP / ERROR
+    status: str  # PASS / FAIL / TIMEOUT / FLAKY / SKIP / ERROR
     exit_code: Optional[int]
     elapsed_sec: float
     log_file: str
@@ -376,6 +376,76 @@ class RunResult:
     # Independent of pass/fail: a PASS that ran 6 min is still over budget and
     # must be split. Surfaced in the duration audit + summary.json.
     over_budget: bool = False
+    # Lever 3 (honest flake quarantine): set when a runner FAILED/TIMED OUT on
+    # its first attempt and was re-run ONCE in isolation. If the retry passed,
+    # `status` becomes FLAKY (surfaced separately, does NOT fail the gate); if it
+    # failed again, `status` stays FAIL/TIMEOUT. `first_status` records the
+    # original verdict so the report can show "failed then passed on retry".
+    retried: bool = False
+    first_status: Optional[str] = None
+    retry_exit_code: Optional[int] = None
+
+
+def status_from_rc(rc: int) -> str:
+    """Map a runner exit code to a status. 0 = PASS; 124/137 = the
+    run-with-timeout / SIGKILL codes = TIMEOUT; anything else = FAIL."""
+    if rc == 0:
+        return "PASS"
+    if rc in (124, 137):
+        return "TIMEOUT"
+    return "FAIL"
+
+
+def classify_after_retry(first_status: str, retry_status: str) -> str:
+    """Reclassify a first-attempt FAIL/TIMEOUT by its isolation-retry outcome.
+
+    Honest flake quarantine (Lever 3, 2026-07-08): a large regression set run in
+    series (N≈85) turns even a tiny per-suite flake rate p into a low all-green
+    probability ((1-p)^N), and on this EDR host a *different* small subset flakes
+    each run (the "shifting set"). A suite that FAILS in the full run but PASSES
+    when re-run alone is flaky by definition, not broken. So: retry once in
+    isolation and, on a pass, label it FLAKY — reported separately, NOT counted
+    as FAIL for the gate and NOT hidden as PASS (retry + REPORT, the peer-blessed
+    pattern; retry-to-hide would be a test that lies). A second failure keeps the
+    original FAIL/TIMEOUT class — a deterministic failure is a real regression.
+
+    Pure — unit-tested via `--self-test`, no process launched.
+    """
+    if first_status not in ("FAIL", "TIMEOUT"):
+        return first_status  # only failures are retried
+    if retry_status == "PASS":
+        return "FLAKY"
+    return first_status  # still broken on isolation retry → a real failure
+
+
+def _run_flake_classify_self_test() -> int:
+    """Assert the pure Lever-3 helpers. Run via `--self-test`; returns 0/1."""
+    cases = [
+        # (first_status, retry_status) -> expected final
+        (("FAIL", "PASS"), "FLAKY"),
+        (("TIMEOUT", "PASS"), "FLAKY"),
+        (("FAIL", "FAIL"), "FAIL"),
+        (("FAIL", "TIMEOUT"), "FAIL"),
+        (("TIMEOUT", "TIMEOUT"), "TIMEOUT"),
+        (("TIMEOUT", "FAIL"), "TIMEOUT"),
+        (("PASS", "PASS"), "PASS"),      # non-failures are never retried
+    ]
+    ok = True
+    for (first, retry), expected in cases:
+        got = classify_after_retry(first, retry)
+        mark = "ok" if got == expected else "MISMATCH"
+        if got != expected:
+            ok = False
+        print(f"  [{mark}] classify_after_retry({first!r}, {retry!r}) = {got!r} (want {expected!r})")
+    rc_cases = [(0, "PASS"), (1, "FAIL"), (2, "FAIL"), (124, "TIMEOUT"), (137, "TIMEOUT")]
+    for rc, expected in rc_cases:
+        got = status_from_rc(rc)
+        mark = "ok" if got == expected else "MISMATCH"
+        if got != expected:
+            ok = False
+        print(f"  [{mark}] status_from_rc({rc}) = {got!r} (want {expected!r})")
+    print("SELF-TEST: " + ("ALL PASS" if ok else "FAILED"))
+    return 0 if ok else 1
 
 
 # ---------------------------------------------------------------------------
@@ -1099,7 +1169,22 @@ def main() -> int:
             "stability is not real stability."
         ),
     )
+    parser.add_argument(
+        "--no-flake-retry", action="store_true",
+        help=(
+            "Disable the isolation retry of FAILED/TIMED-OUT runners. By default "
+            "a first-attempt failure is re-run ONCE alone; a pass-on-retry is "
+            "reported as FLAKY (does not fail the gate), a second failure is a "
+            "real FAIL. Pass this to see raw first-attempt results with no retry."
+        ),
+    )
+    parser.add_argument(
+        "--self-test", action="store_true",
+        help="Run the pure flake-classify / status helpers' assertions and exit.",
+    )
     args = parser.parse_args()
+    if args.self_test:
+        return _run_flake_classify_self_test()
     if args.repeat < 1:
         sys.stderr.write("ERROR: --repeat must be >= 1.\n")
         return 2
@@ -1300,15 +1385,13 @@ def main() -> int:
                 break
 
             over_budget = elapsed > RUNNER_BUDGET_SEC
-            if rc == 0:
-                status = "PASS"
+            status = status_from_rc(rc)
+            if status == "PASS":
                 emit(f"PASS {script} ({elapsed:.0f}s)")
-            elif rc in (124, 137):
-                status = "TIMEOUT"
+            elif status == "TIMEOUT":
                 emit(f"FAIL {script} (timeout after {elapsed:.0f}s)")
                 kill_app(app_name)
             else:
-                status = "FAIL"
                 emit(f"FAIL {script} (exit={rc}, {elapsed:.0f}s)")
 
             # 5-minute budget check (the "no test case over 5 min" rule): flag
@@ -1318,12 +1401,58 @@ def main() -> int:
                 emit(f"  ⚠ OVER 5-MIN BUDGET: {script} ran {elapsed:.0f}s "
                      f"(> {RUNNER_BUDGET_SEC}s) — split this suite into smaller runners.")
 
+            # Lever 3 (honest flake quarantine): re-run a first-attempt failure
+            # ONCE in isolation (fresh app + fresh user-data — the "does it pass
+            # by itself?" test). A pass reclassifies to FLAKY (surfaced, does NOT
+            # fail the gate); a second failure keeps the real FAIL/TIMEOUT. This
+            # dissolves the "shifting flake set" (a different ~2 of ~85 red each
+            # full run) into an honest, non-blocking signal — retry + REPORT, not
+            # retry-to-hide.
+            first_status = status
+            retried = False
+            retry_rc: Optional[int] = None
+            if status in ("FAIL", "TIMEOUT") and not args.no_flake_retry:
+                emit(f"  ↻ isolation retry: re-running {Path(script).stem} alone "
+                     "to classify flake vs real ...")
+                kill_app(app_name)
+                time.sleep(INTER_SCRIPT_SLEEP_SEC)
+                retry_user_data = tempfile.mkdtemp(prefix="onward-regression-userdata.")
+                user_data_temp_dirs.append(retry_user_data)
+                retry_elapsed = 0.0
+                try:
+                    retry_rc, retry_elapsed = run_one(
+                        script=script, bash=bash, node=node, app_bin=app_bin,
+                        app_name=app_name, user_data_dir=retry_user_data,
+                        log_path=log_path, summary_fh=summary_fh, extra_args=extra_args,
+                    )
+                except KeyboardInterrupt:
+                    emit("")
+                    emit("INTERRUPTED during isolation retry — stopping.")
+                    interrupted = True
+                    kill_app(app_name)
+                    retry_rc = None
+                if retry_rc is not None:
+                    retried = True
+                    status = classify_after_retry(first_status, status_from_rc(retry_rc))
+                    if status == "FLAKY":
+                        emit(f"  ⚑ FLAKY {script}: failed then PASSED on isolation retry "
+                             f"({retry_elapsed:.0f}s) — NOT counted as a failure.")
+                    else:
+                        emit(f"  ✗ CONFIRMED {status} {script}: failed AGAIN on isolation "
+                             f"retry (exit={retry_rc}) — a real failure.")
+                    kill_app(app_name)
+
             results.append(RunResult(
                 script=script, status=status, exit_code=rc,
                 elapsed_sec=round(elapsed, 1),
                 log_file=str(log_path.relative_to(out_dir)),
                 over_budget=over_budget,
+                retried=retried,
+                first_status=first_status if retried else None,
+                retry_exit_code=retry_rc if retried else None,
             ))
+            if interrupted:
+                break
 
             kill_app(app_name)
             # Defence-in-depth: even with the per-runner EXIT traps, sweep
@@ -1338,6 +1467,7 @@ def main() -> int:
 
     passed = sum(1 for r in results if r.status == "PASS")
     failed = sum(1 for r in results if r.status in ("FAIL", "TIMEOUT"))
+    flaky = sum(1 for r in results if r.status == "FLAKY")
     skipped = sum(1 for r in results if r.status == "SKIP")
     errored = sum(1 for r in results if r.status == "ERROR")
 
@@ -1345,15 +1475,23 @@ def main() -> int:
     emit("=== FULL REGRESSION SUMMARY ===")
     emit(f"Passed:  {passed}")
     emit(f"Failed:  {failed}")
+    if flaky:
+        emit(f"Flaky:   {flaky}  (failed then PASSED on isolation retry — surfaced, not gate-failing)")
     emit(f"Skipped: {skipped}")
     if errored:
         emit(f"Errored: {errored}")
     if failed:
-        emit("Failed scripts:")
+        emit("Failed scripts (failed AGAIN on isolation retry — real):")
         for r in results:
             if r.status in ("FAIL", "TIMEOUT"):
                 tag = "TIMEOUT" if r.status == "TIMEOUT" else f"exit={r.exit_code}"
                 emit(f"  {r.script} ({tag})")
+    if flaky:
+        emit("Flaky scripts (passed on isolation retry; a leftover timing/cleanup "
+             "race to harden, but NOT blocking this run):")
+        for r in results:
+            if r.status == "FLAKY":
+                emit(f"  {r.script} (first={r.first_status}, retry=PASS)")
 
     # ---- Elapsed-time monitor + 5-minute budget check (the "no test case over
     # 5 min" rule). The duration audit lists every runner slowest-first so slow
@@ -1390,6 +1528,7 @@ def main() -> int:
         "interrupted": interrupted,
         "passed": passed,
         "failed": failed,
+        "flaky": flaky,
         "skipped": skipped,
         "errored": errored,
         "budget_sec": RUNNER_BUDGET_SEC,

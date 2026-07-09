@@ -50,6 +50,36 @@ resolve_dev_app_bin() {
   return 1
 }
 
+# Best-effort, EBUSY/EPERM-tolerant removal for autotest EXIT-trap / cleanup use.
+#
+# WHY (2026-07-08 full-regression drift): on Windows an EDR real-time scan, a
+# just-exited Electron helper, or the git worker can hold a handle on a runner's
+# scratch dir for ~1 s AFTER the app exits, so a plain `rm -rf` in an EXIT trap
+# fails with EBUSY/EPERM. Under `set -euo pipefail` that non-zero return became
+# the SCRIPT's exit status, turning a run whose assertions ALL PASSED into a
+# spurious FAIL — and since which runner is unlucky at teardown is probabilistic,
+# the failing set SHIFTED run-to-run (the classic "shifting flake" that was
+# really one shared cleanup bug across ~18 runners).
+#
+# The test verdict is decided by the assertions BEFORE cleanup runs; a leftover
+# scratch dir is disk hygiene, never a test failure. So: retry with a short
+# backoff to give the handle time to release (usually clears within ~1 s), then
+# swallow any residual failure. ALWAYS returns 0 so it can never flip the
+# runner's exit code. Accepts multiple paths (also covers `"${leftovers[@]}"`
+# array sweeps); an empty arg list or a missing path is a no-op.
+onward_robust_rm() {
+  local target attempt
+  for target in "$@"; do
+    [ -n "$target" ] || continue
+    [ -e "$target" ] || continue
+    for attempt in 1 2 3 4 5; do
+      rm -rf "$target" 2>/dev/null && break
+      sleep 0.3
+    done
+  done
+  return 0
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   root_dir="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
   resolve_dev_app_bin "$root_dir"

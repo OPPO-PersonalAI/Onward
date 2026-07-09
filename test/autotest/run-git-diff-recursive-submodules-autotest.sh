@@ -19,7 +19,7 @@ fi
 FIXTURE_JSON="$(node "$ROOT_DIR/test/autotest/create-recursive-git-submodule-fixture.mjs")"
 FIXTURE_ROOT="$(printf '%s' "$FIXTURE_JSON" | node -e 'let data="";process.stdin.on("data",c=>data+=c).on("end",()=>process.stdout.write(JSON.parse(data).repoRoot))')"
 FIXTURE_TEMP_ROOT="$(printf '%s' "$FIXTURE_JSON" | node -e 'let data="";process.stdin.on("data",c=>data+=c).on("end",()=>process.stdout.write(JSON.parse(data).tempRoot))')"
-trap 'rm -rf "$FIXTURE_TEMP_ROOT"' EXIT
+trap 'onward_robust_rm "$FIXTURE_TEMP_ROOT"' EXIT
 
 rm -f "$LOG_FILE"
 

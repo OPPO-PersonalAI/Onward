@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/change-log-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -16,7 +17,7 @@ TEMP_USER_DATA=""
 
 cleanup() {
   if [[ -n "$TEMP_ROOT" && -d "$TEMP_ROOT" ]]; then
-    rm -rf "$TEMP_ROOT"
+    onward_robust_rm "$TEMP_ROOT"
   fi
 }
 

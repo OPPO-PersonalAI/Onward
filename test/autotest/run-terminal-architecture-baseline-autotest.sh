@@ -33,7 +33,7 @@ WORK_DIR="$ROOT_DIR/test/autotest/fixtures/terminal-architecture-baseline/workdi
 USER_DATA_DIR="$ROOT_DIR/test/autotest/fixtures/terminal-architecture-baseline/user-data"
 case "$USER_DATA_DIR" in
   "$ROOT_DIR"/test/autotest/fixtures/terminal-architecture-baseline/user-data)
-    rm -rf "$USER_DATA_DIR"
+    onward_robust_rm "$USER_DATA_DIR"
     mkdir -p "$USER_DATA_DIR"
     ;;
   *)

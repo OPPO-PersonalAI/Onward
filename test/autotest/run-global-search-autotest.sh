@@ -32,7 +32,7 @@ if [[ ! -f "$WORK_DIR/seed.md" ]]; then
 fi
 case "$USER_DATA_DIR" in
   "$ROOT_DIR"/test/autotest/fixtures/global-search/user-data)
-    rm -rf "$USER_DATA_DIR"
+    onward_robust_rm "$USER_DATA_DIR"
     mkdir -p "$USER_DATA_DIR"
     ;;
   *)
