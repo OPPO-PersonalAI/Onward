@@ -843,10 +843,25 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await restoreBaseline()
     await callDiff(cleanRoot, true)
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-06\n')
-    // Intentionally NOT passing force on the second call — relying on watcher.
-    // 250 ms gives the 180 ms debounce inside the invalidator a window to fire.
+    // Intentionally NOT passing force on the polled calls — only the
+    // watcher / freshness machinery may surface the change. 280 ms gives the
+    // 180 ms invalidator debounce its first window; then poll the UNFORCED
+    // diff until the change lands. A single fixed-sleep sample races the
+    // debounce + FS-event + precompute-rewarm latency and fails for non-bug
+    // reasons under load (same class as the GDS-13 EDR note above); polling
+    // without force still only passes once the cache was actually
+    // invalidated — a genuinely-missed invalidation fails at the ceiling.
     await sleep(280)
-    const diff = await callDiff(cleanRoot)
+    let diff = await callDiff(cleanRoot)
+    const gds06Deadline = Date.now() + adaptiveDiffBudget()
+    while (
+      !cancelled() &&
+      Date.now() < gds06Deadline &&
+      !(diff.success && diff.files.some((f) => f.filename === parentFile))
+    ) {
+      await sleep(250)
+      diff = await callDiff(cleanRoot)
+    }
     const seen = diff.files.find((f) => f.filename === parentFile)
     record('GDS-06-watcher-invalidates-cache-on-fs-change', (
       diff.success && Boolean(seen)
@@ -861,8 +876,20 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await callDiff(cleanRoot, true)
     await sleep(50)
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-07\n')
+    // Same unforced-poll hardening as GDS-06; the 50 ms offset above keeps
+    // this case's distinct timing shape (save lands after the forced diff's
+    // debounce window opened) while the verdict no longer rides one sample.
     await sleep(280)
-    const diff = await callDiff(cleanRoot)
+    let diff = await callDiff(cleanRoot)
+    const gds07Deadline = Date.now() + adaptiveDiffBudget()
+    while (
+      !cancelled() &&
+      Date.now() < gds07Deadline &&
+      !(diff.success && diff.files.some((f) => f.filename === parentFile))
+    ) {
+      await sleep(250)
+      diff = await callDiff(cleanRoot)
+    }
     const seen = diff.files.find((f) => f.filename === parentFile)
     record('GDS-07-watcher-invalidates-after-debounce', (
       diff.success && Boolean(seen)

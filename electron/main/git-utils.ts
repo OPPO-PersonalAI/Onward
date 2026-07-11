@@ -17,6 +17,7 @@ import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { GitDiffRequestCacheController } from './git-diff-request-cache'
+import { shouldReuseWarmStatus, WARM_STATUS_REUSE_MAX_AGE_MS } from './git-diff-warm-status-gate'
 import { isMetaCacheEntryFresh } from './git-meta-cache-policy'
 import { extractGitSubcommand } from './git-exec-subcommand'
 import { parseGitLogRawNumstat, type ParsedDiffStatus } from './git-log-diff-parse'
@@ -279,9 +280,12 @@ export interface GitDiffLoadOptions {
   // G2 C-i, WARM PATH ONLY: the GitStateMirror worker's just-computed parent
   // status (MirrorState.files + capturedAt), forwarded by the main-process
   // warm caller so a background list warm can skip its own `git status`
-  // spawn (~4 s under EDR). Honored only when `background` is true AND the
-  // payload is younger than WARM_STATUS_REUSE_MAX_AGE_MS; foreground opens
-  // NEVER take this path — the request cache's freshness authority (the
+  // spawn (~4 s under EDR). Honored only when `background` is true, the
+  // payload is younger than WARM_STATUS_REUSE_MAX_AGE_MS, AND it was
+  // captured after the repo's latest mutation-grade invalidation (see
+  // git-diff-warm-status-gate.ts — a pre-mutation capture must never seed
+  // the re-warm that the mutation itself scheduled). Foreground opens NEVER
+  // take this path — the request cache's freshness authority (the
   // invalidation bus) is unchanged, this only narrows a warm's spawn count.
   presuppliedRootStatus?: { files: GitFileStatus[]; capturedAt: number }
 }
@@ -494,6 +498,14 @@ let gitDiffRequestCacheController: GitDiffRequestCacheController<GitDiffResult> 
  */
 export function invalidateGitDiffCache(cwd: string, reason: string): number {
   const normalized = resolve(cwd)
+  // Mutation-grade invalidations fence warm-status reuse: a presupplied
+  // status captured at or before this moment must not seed a re-warm (see
+  // git-diff-warm-status-gate.ts for the GDS-07 permanent-staleness chain).
+  // 'mirror' is exempt — the status accompanying a mirror update IS the
+  // fresh truth that caused the invalidation.
+  if (reason === 'manual' || reason === 'force' || reason === 'watcher-error') {
+    stampDiffMutationInvalidation(normalized)
+  }
   let cleared = 0
   for (const scope of ['root-only', 'full'] as const) {
     if (invalidateGitDiffRequestKey(`${normalized}::${scope}`)) {
@@ -514,6 +526,27 @@ export function invalidateGitDiffCache(cwd: string, reason: string): number {
     entriesCleared: cleared
   })
   return cleared
+}
+
+/**
+ * Per-module-instance registry of the last MUTATION-GRADE invalidation
+ * ('manual' / 'force' / 'watcher-error') per normalized repo root. Read by
+ * getSingleRepoDiff's warm-status reuse gate; both the main process and the
+ * git-ipc-worker keep their own copy (each instance's invalidateGitDiffCache
+ * stamps its own map — the worker receives main's invalidations via the
+ * forwarded control envelope, which is processed before any re-warm request
+ * queued behind it). FIFO-capped so abandoned repos cannot grow it unbounded.
+ */
+const DIFF_MUTATION_STAMP_CAP = 64
+const lastDiffMutationInvalidateAt = new Map<string, number>()
+function stampDiffMutationInvalidation(normalizedCwd: string): void {
+  lastDiffMutationInvalidateAt.delete(normalizedCwd)
+  lastDiffMutationInvalidateAt.set(normalizedCwd, Date.now())
+  while (lastDiffMutationInvalidateAt.size > DIFF_MUTATION_STAMP_CAP) {
+    const oldest = lastDiffMutationInvalidateAt.keys().next().value
+    if (oldest === undefined) break
+    lastDiffMutationInvalidateAt.delete(oldest)
+  }
 }
 
 // Lazily wire the watcher → cache invalidation chain. The first getGitDiff
@@ -1922,9 +1955,6 @@ async function getWorktreeAwareDiffFingerprint(
   return hash.digest('hex')
 }
 
-/** Max age at which a warm may reuse the mirror's presupplied status. */
-const WARM_STATUS_REUSE_MAX_AGE_MS = 15_000
-
 async function getSingleRepoDiff(
   repoRoot: string,
   gitExecutable: string,
@@ -1959,29 +1989,36 @@ async function getSingleRepoDiff(
     const diffMeta: GitTaskMeta = { repoKey: repoRoot, repoConcurrencyLimit: 1, priority }
 
     // G2 C-i (warm path only): reuse the mirror's just-computed parent
-    // status instead of spawning our own, when it is young enough. The
-    // request cache's freshness stays owned by the invalidation bus exactly
-    // as with a spawned status — any change after the mirror capture fires
-    // the watcher → invalidate → re-warm, the same eventual-consistency
-    // window as today, so this trades no correctness for one fewer
-    // EDR-taxed spawn per warm.
+    // status instead of spawning our own, when it is young enough AND was
+    // captured after the repo's latest mutation-grade invalidation. Without
+    // the invalidation clause, the re-warm that a file-save invalidation
+    // schedules could reuse a status captured BEFORE that save and rebuild
+    // every cache from pre-mutation state — permanently, since the
+    // invalidation authority is already spent (GDS-07). Rejected reuses fall
+    // through to a fresh `git status` spawn, which the mutation made
+    // necessary anyway.
     let parsedFiles: GitFileStatus[] | null = null
     const presupplied = options?.presuppliedRootStatus
     if (presupplied) {
-      const ageMs = Date.now() - presupplied.capturedAt
-      if (ageMs >= 0 && ageMs <= WARM_STATUS_REUSE_MAX_AGE_MS) {
+      const decision = shouldReuseWarmStatus({
+        capturedAt: presupplied.capturedAt,
+        now: Date.now(),
+        lastInvalidatedAt: lastDiffMutationInvalidateAt.get(normalizedRoot) ?? null,
+        maxAgeMs: WARM_STATUS_REUSE_MAX_AGE_MS
+      })
+      if (decision.reuse) {
         parsedFiles = presupplied.files
         performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_WARM_STATUS_REUSE, {
           cwd: repoRoot,
           result: 'hit',
-          ageMs,
+          ageMs: decision.ageMs,
           fileCount: presupplied.files.length
         })
       } else {
         performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_WARM_STATUS_REUSE, {
           cwd: repoRoot,
-          result: 'stale',
-          ageMs
+          result: decision.reason,
+          ageMs: decision.ageMs
         })
       }
     }
@@ -2105,6 +2142,11 @@ export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Pro
       })
     },
     onForceInvalidate: (entriesCleared) => {
+      // A forced get is the request cache's own invalidation entrance (it
+      // bypasses the invalidator bus), so it must fence warm-status reuse
+      // the same way: a warm carrying a status captured before this force
+      // could regress the cache to pre-force content.
+      stampDiffMutationInvalidation(resolve(meta.repoRoot || cwd))
       performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
         cwd: resolve(cwd),
         reason: 'force',

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GDS-07 永久陈旧缓存 — 根因与修复决策</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1d2130; --text: #d7dae2;
+    --muted: #8b91a3; --accent: #5ea1ff; --green: #4ade80; --red: #f87171;
+    --amber: #fbbf24; --border: #2a2f40; --code-bg: #12141c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; }
+  nav#toc { position: fixed; top: 0; left: 0; width: 230px; height: 100vh; overflow-y: auto; background: var(--panel); border-right: 1px solid var(--border); padding: 20px 14px; }
+  nav#toc h2 { font-size: 14px; color: var(--muted); margin-bottom: 12px; letter-spacing: 1px; }
+  nav#toc a { display: block; color: var(--text); text-decoration: none; font-size: 13px; padding: 6px 10px; border-radius: 6px; margin-bottom: 2px; }
+  nav#toc a:hover { background: var(--panel2); }
+  nav#toc a.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  main { margin-left: 230px; padding: 36px 48px; max-width: 980px; }
+  h1 { font-size: 26px; margin-bottom: 8px; }
+  h2 { font-size: 20px; margin: 36px 0 14px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--accent); }
+  h3 { font-size: 16px; margin: 20px 0 10px; }
+  p { margin-bottom: 12px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+  .callout { border-left: 4px solid var(--accent); background: var(--panel2); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .callout.red { border-left-color: var(--red); }
+  .callout.green { border-left-color: var(--green); }
+  .callout.amber { border-left-color: var(--amber); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; background: var(--code-bg); padding: 1px 6px; border-radius: 4px; color: #a5c8ff; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 12px 0; }
+  pre code { background: none; padding: 0; color: #c9d4f0; }
+  .pill { display: inline-block; font-size: 11.5px; padding: 2px 10px; border-radius: 999px; margin-right: 6px; }
+  .pill.pass { background: rgba(74,222,128,.15); color: var(--green); }
+  .pill.fail { background: rgba(248,113,113,.15); color: var(--red); }
+  .pill.info { background: rgba(94,161,255,.15); color: var(--accent); }
+  .flow { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }
+  .fnode { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 13px; }
+  .fnode.bad { border-color: var(--red); background: rgba(248,113,113,.08); }
+  .fnode.good { border-color: var(--green); background: rgba(74,222,128,.08); }
+  .farrow { color: var(--muted); text-align: center; font-size: 12px; line-height: 1.2; }
+  .meta { margin-top: 48px; padding-top: 16px; border-top: 1px dashed var(--border); font-size: 12.5px; color: var(--muted); }
+  @media (max-width: 860px) { nav#toc { display: none; } main { margin-left: 0; } }
+</style>
+</head>
+<body>
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#sec-summary">1. 摘要</a>
+  <a href="#sec-evidence">2. 证据链</a>
+  <a href="#sec-root">3. 根因：当前策略</a>
+  <a href="#sec-fix">4. 提议修复</a>
+  <a href="#sec-tradeoff">5. 权衡清单</a>
+  <a href="#sec-verify">6. 验证计划</a>
+  <a href="#sec-decision">7. 待决策项</a>
+</nav>
+<main>
+  <h1>GDS-07 永久陈旧缓存 — 根因与修复决策</h1>
+  <p class="sub">git-diff 预热 status 复用缺少"失效代际门"导致的持久 staleness · 2026-07-11</p>
+
+  <h2 id="sec-summary">1. 摘要</h2>
+  <div class="callout red">
+    <strong>缺陷（与本次三分支合并无关，master 基线 faec049 上可复现）：</strong>
+    对同一仓库执行「强制 diff → 约 50ms 后外部写文件 → 非强制读 diff」时，非强制读取会<strong>永久</strong>
+    返回写文件之前的陈旧结果——在 90 秒的轮询窗口内 3/3 次迭代均不收敛（<code>ageMs</code> 单调增长到 90s）。
+  </div>
+  <p>
+    失效链本身工作正常（save 的 <code>manual</code> 失效正确触发、请求缓存有代际栅栏）。问题出在
+    <strong>失效触发的"重预热"步骤复用了失效之前捕获的预热 status</strong>（15 秒年龄门内），
+    用变更前的数据把刚清空的缓存重新填满；父仓库此时无 mirror 订阅、不会再有第二次失效，陈旧状态从此固化。
+  </p>
+
+  <h2 id="sec-evidence">2. 证据链（trace 时间线，perf-0009）</h2>
+  <table>
+    <tr><th>时刻</th><th>事件</th><th>含义</th></tr>
+    <tr><td>2315ms</td><td><code>diff.cache-invalidate {reason:manual}</code> + <code>snapshot.invalidate</code></td><td>save 的失效正确触发，各缓存被清空 <span class="pill pass">正常</span></td></tr>
+    <tr><td>2381ms</td><td><code>watcher-fire {kind:update, src/main.txt}</code></td><td>watcher 看到了 save 的磁盘写入 <span class="pill pass">正常</span></td></tr>
+    <tr><td><strong>2390ms</strong></td><td><code>diff.warm-status-reuse {ageMs: 2016}</code></td><td><strong>重算复用了约 2 秒前（save 之前）捕获的预热 status</strong> <span class="pill fail">毒化点</span></td></tr>
+    <tr><td>2401ms≈</td><td>（请求缓存条目出生）</td><td>用陈旧 status 组装的 diff 写回缓存，代际栅栏无法拦截（栅栏只护请求缓存本身，不护其输入）</td></tr>
+    <tr><td>2506ms → 90s+</td><td><code>diff.cache-hit ageMs 105 → 29 000+</code></td><td>此后零失效、零 mirror 增量，轮询永远命中同一条目 <span class="pill fail">永久陈旧</span></td></tr>
+  </table>
+  <div class="callout amber">
+    <strong>归因排除（A/B 实验）：</strong>7 月 8 日 master（422a73e 及更早）3 次全量 PASS；7 月 10 日
+    keep worktree（faec049+keep）FAIL；7 月 11 日合并树 4/4 FAIL；<strong>纯 faec049 的
+    release-candidate worktree 同签名 FAIL</strong>。faec049 只改测试基建 → 缺陷为预热复用机制（G2 C-i，7 月 5-6 日引入）
+    的潜伏窗口在本机当前时序下被 GDS-07 的 50ms 偏移稳定命中。三个合并分支全部无关。
+  </div>
+
+  <h2 id="sec-root">3. 根因：当前策略</h2>
+  <div class="flow">
+    <div class="fnode">外部写文件（<code>GIT_SAVE_FILE_CONTENT</code>）成功</div>
+    <div class="farrow">↓ 主进程 <code>invalidateGitDiffAfterKnownMutation</code></div>
+    <div class="fnode good">失效总线：请求缓存 key 删除 + 代际++ / 单仓库缓存清空 / 快照丢弃（主进程与 worker 两份副本都到位）</div>
+    <div class="farrow">↓ <code>repoPrewarmCoordinator.onCwdInvalidated</code>（静默窗口重预热）</div>
+    <div class="fnode bad">worker <code>warmDiffCache</code>：携带 <strong>mirror 上一次（save 之前）的 presupplied status</strong><br>
+      <code>getSingleRepoDiff</code> 复用门：<strong>只查年龄 ≤ 15s</strong>（git-utils.ts:1972），不知道"这份 status 早于最近一次失效"</div>
+    <div class="farrow">↓</div>
+    <div class="fnode bad">陈旧 diff 写回请求缓存（store 时代际未再变 → 栅栏放行）→ 无订阅 → 无后续失效 → <strong>永久陈旧</strong></div>
+  </div>
+  <p>
+    复用门代码注释（G2 C-i）声称"捕获之后的任何变更都会 watcher → invalidate → re-warm，不牺牲正确性"——
+    漏判了<strong>re-warm 本身就是那次 invalidate 触发的、而它拿到的 status 恰在变更之前捕获</strong>这一自指情形。
+  </p>
+
+  <h2 id="sec-fix">4. 提议修复：失效代际门（方案 A，推荐）</h2>
+  <div class="flow">
+    <div class="fnode">在 <code>git-utils.ts</code> 增加每实例注册表：<code>lastDiffInvalidateAtByProject: Map&lt;string, number&gt;</code>（FIFO 上限 64）</div>
+    <div class="farrow">↓ <code>invalidateGitDiffCache(cwd)</code> 内（主进程与 worker 各自实例都会执行）</div>
+    <div class="fnode good"><code>lastDiffInvalidateAtByProject.set(normalized, Date.now())</code></div>
+    <div class="farrow">↓ <code>getSingleRepoDiff</code> 复用门（git-utils.ts:1972）</div>
+    <div class="fnode good">复用条件从「<code>ageMs ≤ 15s</code>」收紧为「<code>ageMs ≤ 15s</code> <strong>且 <code>presupplied.capturedAt &gt; lastInvalidateAt(repoRoot)</code></strong>」；
+      不满足则走既有 fallback：现场 spawn <code>git status</code>，并以 <code>result:'invalidated'</code> 记入既有 trace 事件</div>
+  </div>
+  <pre><code>// getSingleRepoDiff reuse gate (git-utils.ts)
+const invalidatedAt = lastDiffInvalidateAtByProject.get(normalizedRoot) ?? 0
+if (ageMs &gt;= 0 &amp;&amp; ageMs &lt;= WARM_STATUS_REUSE_MAX_AGE_MS &amp;&amp; presupplied.capturedAt &gt; invalidatedAt) {
+  parsedFiles = presupplied.files   // reuse（原路径）
+} else {
+  // fallthrough：现场 git status（原路径），trace result: 'stale' | 'invalidated'
+}</code></pre>
+  <p>
+    顺序保证：main 的失效转发（一次性控制信封）先于重预热请求进入 worker 消息队列，worker 顺序处理 →
+    门先更新、重预热后到达，竞态封死。时钟为同机 <code>Date.now()</code>，跨进程可比。
+  </p>
+
+  <h2 id="sec-tradeoff">5. 权衡清单</h2>
+  <table>
+    <tr><th>维度</th><th>方案 A：失效代际门（推荐）</th><th>方案 B：只改测试（GDS-06/07 退役/改契约）</th><th>方案 C：失效时直接丢弃预热 status</th></tr>
+    <tr><td>正确性</td><td>封死"重预热吃到变更前 status"整类；外部编辑无订阅时的既有语义不变（由 GDS-08/09 契约覆盖）</td><td>产品缺陷保留：任何"已知变更后的重预热"仍可能固化陈旧缓存（潜伏足枪）</td><td>同 A（等效封死）</td></tr>
+    <tr><td>性能</td><td>仅在"status 早于最近失效"时多付一次本就该付的 <code>git status</code>；预热收益全保留</td><td>零开销</td><td>略差于 A：mirror 稍后送来的<strong>新</strong> status 也被丢弃，重预热必然 spawn</td></tr>
+    <tr><td>侵入面</td><td>1 个 Map + 2 处小改（同一文件），不动订阅/mirror 权威设计（P1-1 结构保持）</td><td>只动测试文件</td><td>需在 coordinator/worker 间传递"由失效触发"的标记，链路更长</td></tr>
+    <tr><td>风险</td><td>低：门只会"更保守地放弃复用"，失败方向安全</td><td>无代码风险，但测试网撤除</td><td>中：改动跨 coordinator 协议</td></tr>
+  </table>
+
+  <h2 id="sec-verify">6. 验证计划（方案 A）</h2>
+  <div class="card">
+    <p>① <strong>单测</strong>（配对交付）：新增 <code>test/unittest/git-diff-warm-status-invalidation-gate.test.mts</code>，锁复用门决策表（新鲜+未失效→复用；新鲜+已失效→拒绝；过龄→拒绝；无记录→复用）。纯函数化提取门判定以便 Node 直测。</p>
+    <p>② <strong>autotest</strong>：已加固的 GDS-06/07（非强制轮询 + 自适应上限）就是端到端锁——修复后应在首个轮询周期内收敛。<code>--repeat 3</code> 证稳定。</p>
+    <p>③ <strong>全量回归</strong> <code>--build</code> 全绿收口。</p>
+    <p>④ trace 事件复用既有 <code>MAIN_GIT_DIFF_WARM_STATUS_REUSE</code>，新增 <code>result:'invalidated'</code> 取值并更新 <code>infra/trace.md</code> 行说明——无新事件名注册。</p>
+  </div>
+
+  <h2 id="sec-decision">7. 待决策项</h2>
+  <div class="callout">
+    本缺陷先于合并存在（master 基线可复现），严格说超出合并会话范围；但用户要求「全量回归全部通过」，
+    且它是真实产品缺陷而非测试瑕疵。已通过 AskUserQuestion 征求决定：<strong>A</strong> 立即修复（推荐）／
+    <strong>B</strong> 本轮只处理测试、缺陷另开会话修复。
+  </div>
+
+  <div class="meta">
+    <p>分支: master · 应用版本: 2.0.1 · 反映提交: 3e27c6a（合并后 + H1/H2 协调）· 文档版本: v1.0</p>
+    <p>更新历史（只增不改）：</p>
+    <table>
+      <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+      <tr><td>v1.0</td><td>2026-07-11</td><td>master</td><td>初版：GDS-07 根因（warm-status 复用缺失效代际门）+ 方案 A/B/C 权衡</td></tr>
+    </table>
+  </div>
+</main>
+<script>
+  (function () {
+    var links = document.querySelectorAll('nav#toc a');
+    var sections = Array.prototype.map.call(links, function (a) {
+      return document.querySelector(a.getAttribute('href'));
+    });
+    function onScroll() {
+      var idx = 0;
+      for (var i = 0; i < sections.length; i++) {
+        if (sections[i] && sections[i].getBoundingClientRect().top <= 80) idx = i;
+      }
+      links.forEach(function (a, i) { a.classList.toggle('active', i === idx); });
+    }
+    document.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+</body>
+</html>
