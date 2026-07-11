@@ -895,7 +895,17 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
     '# detour\n\nphtml scroll persistence detour file\n'
   )
   try {
-    // PHTML-16's Cmd+R reload restores its captured scroll on the FIRST
+    // The nav suite (PHTML-17..28) leaves the iframe-host fixture active;
+    // the scroll-persistence assertions target the main fixture, so
+    // re-establish it as the active file before seeding.
+    await openFileInEditor(fixturePath)
+    await waitFor(
+      'phtml-scroll-persist-fixture-back',
+      () => getApi()?.getActiveFilePath?.() === fixturePath,
+      10000,
+      100
+    )
+    // A reload/reopen restores the previously captured scroll on the FIRST
     // load-finish — and the fixture's external HTTP script can keep `loading`
     // true well past the rendered-DOM check. Seeding before that deferred
     // restore lands would get stomped back to the old offset (real product
@@ -940,7 +950,7 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
       (state) => Math.abs((state.scrollY ?? 0) - HTML_SCROLL_TARGET_Y) <= htmlScrollTolerance,
       15000
     )
-    record('PHTML-17-html-scroll-survives-file-switch', Boolean(
+    record('PHTML-29-html-scroll-survives-file-switch', Boolean(
       detourCreated.success && scrollSeeded && scrollSeededReady.ok && detourOpened && backOnFixture && restoredAfterSwitch.ok
     ), {
       target: HTML_SCROLL_TARGET_Y,
@@ -975,7 +985,7 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
       (state) => Math.abs((state.scrollY ?? 0) - HTML_SCROLL_TARGET_Y) <= htmlScrollTolerance,
       15000
     )
-    record('PHTML-18-html-scroll-survives-close-reopen', Boolean(
+    record('PHTML-30-html-scroll-survives-close-reopen', Boolean(
       closed && reopened && fixtureBackAfterReopen && restoredAfterReopen.ok
     ), {
       target: HTML_SCROLL_TARGET_Y,
@@ -1001,7 +1011,7 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
       if (persistedFound) break
       await sleep(200)
     }
-    record('PHTML-19-html-scroll-persisted-in-appstate', persistedFound, {
+    record('PHTML-31-html-scroll-persisted-in-appstate', persistedFound, {
       fixturePath,
       persistedHtmlScrollY
     })
