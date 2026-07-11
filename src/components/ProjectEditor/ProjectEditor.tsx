@@ -2678,6 +2678,19 @@ export function ProjectEditor({
     const filePath = activeFilePathRef.current
     const browserId = htmlReaderStateRef.current?.browserId
     if (!filePath || !isHtmlRef.current || !browserId) return
+    // Browser-style nav can move the preview off the opened file's document;
+    // capturing there would transplant another page's offset into this
+    // file's memory. Keep the last on-home offset instead.
+    const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
+    if (!isSameHtmlPreviewDocument(htmlReaderStateRef.current?.url ?? null, homeUrl)) {
+      const skippedPayload = { ph: 'i', site, skipped: 'off-home' }
+      if (site === 'poll') {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED, skippedPayload)
+      } else {
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED, skippedPayload)
+      }
+      return
+    }
     let scrollState: HtmlPreviewScrollState | null = null
     try {
       const scrollResult = await window.electronAPI.browser.getScrollState(browserId)
