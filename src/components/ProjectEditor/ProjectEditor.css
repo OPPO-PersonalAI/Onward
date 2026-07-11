@@ -2376,6 +2376,20 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
   color: var(--text-2);
 }
 
+.project-editor-context-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.project-editor-context-item:disabled:hover {
+  background-color: transparent;
+  color: var(--text-2);
+}
+
+.project-editor-context-item:disabled:hover svg {
+  color: var(--text-3);
+}
+
 .project-editor-context-item.danger {
   color: var(--danger);
 }

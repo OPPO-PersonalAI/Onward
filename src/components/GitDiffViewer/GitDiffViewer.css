@@ -1527,6 +1527,26 @@ body.git-diff-resizing * {
   color: var(--text-2);
 }
 
+.git-diff-context-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.git-diff-context-item:disabled:hover {
+  background-color: transparent;
+  color: var(--text-2);
+}
+
+.git-diff-context-item:disabled:hover svg {
+  color: var(--text-3);
+}
+
+.git-diff-context-separator {
+  height: 1px;
+  background-color: var(--border);
+  margin: 4px 6px;
+}
+
 @keyframes git-diff-context-fade-in {
   from {
     opacity: 0;

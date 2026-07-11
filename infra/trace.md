@@ -399,6 +399,8 @@ details plus trace events for trend analysis.
 | `MAIN_IPC_GIT_GET_FILE_CONTENT` | `main:ipc.git.get-file-content` | `X` | Git Diff per-file body handler |
 | `MAIN_IPC_GIT_GET_HISTORY` | `main:ipc.git.get-history` | `X` | getHistory handler |
 | `MAIN_IPC_TERMINAL_SPAWN` | `main:ipc.terminal.spawn` | `X` | terminal create handler |
+| `MAIN_IPC_SHELL_OPEN_PATH` | `main:ipc.shell.open-path` | `i` (carries `durationMs`) | `ipc-handlers.ts` `SHELL_OPEN_PATH` handler — outcome `result: 'success' \| 'error' \| 'stubbed'` (`stubbed` = ONWARD_AUTOTEST record-only branch), `targetPath` sliced to 256 chars, `error?`. Callers: terminal "open working directory" + every file-entry context-menu "Open with Default Application". |
+| `MAIN_IPC_SHELL_SHOW_ITEM_IN_FOLDER` | `main:ipc.shell.show-item-in-folder` | `i` (carries `durationMs`) | `ipc-handlers.ts` `SHELL_SHOW_ITEM_IN_FOLDER` handler — same payload shape as `main:ipc.shell.open-path`; existence pre-check is the only failure signal (Electron API is void). |
 
 #### Child processes — PTY / Git CLI / Ripgrep / Updater
 
@@ -634,6 +636,9 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_CUSTOM_LAYOUT_EDITOR_OPEN` | `renderer:custom-layout.editor-open` | `i` | `CustomLayoutEditor.tsx` mount effect — fires when the editor opens (popover "+ New layout" or "Edit"). Tagged `mode: 'create' \| 'edit'`, `seedCellCount`. |
 | `RENDERER_DOWNSIZE_DIALOG_OPEN` | `renderer:downsize-dialog.open` | `i` | `DownsizeConfirmDialog.tsx` open-effect — fires when the user picks a smaller layout (preset or custom) and the keep-Tasks dialog appears. Tagged `currentCount`, `requiredCount`. |
 | `RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE` | `renderer:terminal.destroy-by-downsize` | `i` | `App.tsx::handleDownsizeConfirm` — emitted on the per-Task tid lane just before `terminalSessionManager.dispose(id)`, so a Task's lifetime ends visibly on its own Perfetto row. Tagged `tabId`, `terminalId`. |
+| `RENDERER_FILE_ENTRY_OS_ACTION` | `renderer:file-entry.os-action` | `i` | `src/hooks/useFileEntryOsActions.ts` — a context-menu "Open with Default Application" / "Reveal in …" action fired on a file entry. Tagged `surface: 'tree' \| 'quick-pin' \| 'quick-recent' \| 'search' \| 'outline' \| 'monaco' \| 'git-diff' \| 'git-history'`, `action: 'open-default' \| 'reveal'`, `ok`, `error?`. Pairs with the `main:ipc.shell.*` row for the round trip. |
+| `RENDERER_FILE_ENTRY_EXIST_CHECK` | `renderer:file-entry.exist-check` | `i` | Same hook — on-disk existence check run when a file-entry context menu opens (gates the disabled state of the two OS actions). Tagged `surface`, `exists`, `skipped` (git-status `deleted` entries skip the IPC), `durationMs`. |
+| `RENDERER_FILE_ENTRY_MONACO_ACTIONS_SKIPPED` | `renderer:file-entry.monaco-actions-skipped` | `i` | `ProjectEditor.tsx` Monaco action-registration effect — `editor.addAction` threw because the editor instance was already disposed (locale change while the `<Editor>` conditional is unmounted). Breadcrumb for "Monaco context-menu items missing" reports; next onMount re-registers. Tagged `reason`, `error`. |
 
 #### Background ops
 

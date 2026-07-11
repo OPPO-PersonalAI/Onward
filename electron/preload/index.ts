@@ -250,6 +250,7 @@ export interface DialogAPI {
 
 export interface ShellAPI {
   openPath: (path: string) => Promise<{ success: boolean; error?: string }>
+  showItemInFolder: (path: string) => Promise<{ success: boolean; error?: string }>
   openExternal: (url: string) => Promise<{
     success: boolean
     canceled?: boolean
@@ -1265,6 +1266,9 @@ export interface DebugAPI {
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
+  shellReset: () => Promise<void>
+  shellGetLastOpenedPath: () => Promise<string | null>
+  shellGetLastRevealedPath: () => Promise<string | null>
   readTelemetryLog: () => Promise<string>
   emitBundleMarker: (
     uuid: string,
@@ -1607,6 +1611,9 @@ const dialogAPI: DialogAPI = {
 const shellAPI: ShellAPI = {
   openPath: (path: string) => {
     return ipcRenderer.invoke(IPC.SHELL_OPEN_PATH, path)
+  },
+  showItemInFolder: (path: string) => {
+    return ipcRenderer.invoke(IPC.SHELL_SHOW_ITEM_IN_FOLDER, path)
   },
   openExternal: (url: string) => {
     return ipcRenderer.invoke(IPC.SHELL_OPEN_EXTERNAL, url)
@@ -2293,6 +2300,15 @@ const debugAPI: DebugAPI = {
   },
   feedbackGetLastOpenedUrl: () => {
     return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL)
+  },
+  shellReset: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_SHELL_RESET)
+  },
+  shellGetLastOpenedPath: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_SHELL_GET_LAST_OPENED_PATH)
+  },
+  shellGetLastRevealedPath: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_SHELL_GET_LAST_REVEALED_PATH)
   },
   readTelemetryLog: () => {
     return ipcRenderer.invoke(IPC.DEBUG_READ_TELEMETRY_LOG) as Promise<string>

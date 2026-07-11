@@ -216,6 +216,9 @@ point at files under `test/unittest/`.
 | Editor auto-refresh on external file mutation | `run-file-watch` (FW-01..05) |
 | Global ripgrep search across project | `run-global-search` (GS-01..11) |
 | Working directory copy from terminal header | `run-working-directory-copy` (WDC-*) |
+| File-entry context menu OS actions — "Open with Default Application" + "Reveal in Finder / File Explorer / File Manager" on all six surfaces (Project Editor tree / quick-pin / quick-recent / global-search results / Outline pane / Monaco editor body, Git Diff file list, Git History file list), ONWARD_AUTOTEST shell stub asserts recorded paths, git-deleted row stays disabled, TOCTOU failure toast stays visible without a selection | `run-file-entry-os-actions` (FEOS-01..12) + `test/unittest/file-entry-os-actions.test.mts` (path joiner / reveal label / disabled decision table / drive-root + `..`-collapse + POSIX-backslash edges) |
+| Root-containment path helpers (`isSubPath` / `resolveInRoot`, shared by project-editor utils + FS worker) — filesystem-root workspaces, trailing-separator roots, win32 case folding, traversal rejection | `test/unittest/path-containment.test.mts` (executed by `run-unittest-suite`) |
+| ipc-handlers.ts handle/removeHandler symmetry (macOS cleanup → Dock-reopen re-register cycle must not throw) | `test/unittest/ipc-handler-symmetry.test.mts` (executed by `run-unittest-suite`) |
 | Sidebar outline auto-scroll follows preview / editor | (`shouldRun('sidebar-autoscroll')`, no shell runner; SA-*) |
 | Quick file open (unit harness) | (`shouldRun('quick-file-unit')`, no shell runner; QF-*) |
 

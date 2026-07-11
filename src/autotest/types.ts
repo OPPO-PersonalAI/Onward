@@ -490,6 +490,10 @@ export interface ProjectEditorDebugApi {
   openFileByPath: (filePath: string) => Promise<void>
   openFileByPathAsUser: (filePath: string, options?: { trackRecent?: boolean }) => Promise<void>
   triggerEditorSaveCommand: () => boolean
+  /** Runs a registered Monaco editor action (e.g. 'onward.openWithDefaultApp') by id. */
+  triggerMonacoContextAction?: (actionId: string) => Promise<boolean>
+  /** Lists the Onward file actions registered on the Monaco context menu. */
+  getMonacoContextActions?: () => Array<{ id: string; label: string }>
   triggerToolbarSave: () => Promise<boolean>
   isSqliteViewerVisible: () => boolean
   isPdfReaderVisible?: () => boolean

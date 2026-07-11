@@ -4,8 +4,8 @@
  */
 
 import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'electron'
-import { dirname, join, resolve, sep } from 'path'
-import { readFileSync, writeFileSync, statSync } from 'fs'
+import { dirname, isAbsolute, join, resolve, sep } from 'path'
+import { existsSync, lstatSync, readFileSync, writeFileSync, statSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
 import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
 import { getPromptStorage, Prompt } from './prompt-storage'
@@ -80,6 +80,10 @@ let fileWatchManager: FileWatchManager | null = null
 let imageWatchManager: ImageWatchManager | null = null
 let projectTreeWatchManager: ProjectTreeWatchManager | null = null
 let feedbackDebugLastOpenedUrl: string | null = null
+// Autotest-only (ONWARD_AUTOTEST=1): last paths recorded by the shell
+// open-path / show-item-in-folder stubs, read back via DEBUG_SHELL_* IPC.
+let shellDebugLastOpenedPath: string | null = null
+let shellDebugLastRevealedPath: string | null = null
 let terminalIpcDiagTimer: ReturnType<typeof setInterval> | null = null
 
 type TerminalInputSequencePayload = {
@@ -912,6 +916,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL, () => {
     return feedbackDebugLastOpenedUrl
   })
+  ipcMain.handle(IPC.DEBUG_SHELL_RESET, () => {
+    shellDebugLastOpenedPath = null
+    shellDebugLastRevealedPath = null
+  })
+  ipcMain.handle(IPC.DEBUG_SHELL_GET_LAST_OPENED_PATH, () => {
+    return shellDebugLastOpenedPath
+  })
+  ipcMain.handle(IPC.DEBUG_SHELL_GET_LAST_REVEALED_PATH, () => {
+    return shellDebugLastRevealedPath
+  })
   ipcMain.handle(IPC.DEBUG_READ_TELEMETRY_LOG, () => {
     try {
       const logPath = getTelemetryService().logFilePath
@@ -1557,14 +1571,84 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Shell handlers
   ipcMain.handle(IPC.SHELL_OPEN_PATH, async (_, targetPath: string) => {
+    const startedAt = Date.now()
+    const trace = (result: 'success' | 'error' | 'stubbed', error?: string) => {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_IPC_SHELL_OPEN_PATH, {
+        targetPath: typeof targetPath === 'string' ? targetPath.slice(0, 256) : String(targetPath),
+        result,
+        ...(error ? { error: error.slice(0, 256) } : {}),
+        durationMs: Date.now() - startedAt
+      })
+    }
     try {
+      if (typeof targetPath !== 'string' || !isAbsolute(targetPath)) {
+        trace('error', 'Path must be absolute')
+        return { success: false, error: 'Path must be absolute' }
+      }
+      if (!existsSync(targetPath)) {
+        trace('error', 'Path does not exist')
+        return { success: false, error: 'Path does not exist' }
+      }
+      if (process.env.ONWARD_AUTOTEST === '1') {
+        shellDebugLastOpenedPath = targetPath
+        trace('stubbed')
+        return { success: true }
+      }
       const result = await shell.openPath(targetPath)
       if (result) {
+        trace('error', result)
         return { success: false, error: result }
       }
+      trace('success')
       return { success: true }
     } catch (error) {
       console.error('Failed to open path:', error)
+      trace('error', String(error))
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle(IPC.SHELL_SHOW_ITEM_IN_FOLDER, async (_, targetPath: string) => {
+    const startedAt = Date.now()
+    const trace = (result: 'success' | 'error' | 'stubbed', error?: string) => {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_IPC_SHELL_SHOW_ITEM_IN_FOLDER, {
+        targetPath: typeof targetPath === 'string' ? targetPath.slice(0, 256) : String(targetPath),
+        result,
+        ...(error ? { error: error.slice(0, 256) } : {}),
+        durationMs: Date.now() - startedAt
+      })
+    }
+    try {
+      if (typeof targetPath !== 'string' || !isAbsolute(targetPath)) {
+        trace('error', 'Path must be absolute')
+        return { success: false, error: 'Path must be absolute' }
+      }
+      // showItemInFolder is void/fire-and-forget, so the existence check is
+      // the only failure signal we can surface to the renderer. lstat (not
+      // existsSync) so a dangling symlink — which the file manager CAN still
+      // select — passes the gate; open-default keeps follow-symlink semantics.
+      let revealTargetExists = false
+      try {
+        lstatSync(targetPath)
+        revealTargetExists = true
+      } catch {
+        revealTargetExists = false
+      }
+      if (!revealTargetExists) {
+        trace('error', 'Path does not exist')
+        return { success: false, error: 'Path does not exist' }
+      }
+      if (process.env.ONWARD_AUTOTEST === '1') {
+        shellDebugLastRevealedPath = targetPath
+        trace('stubbed')
+        return { success: true }
+      }
+      shell.showItemInFolder(targetPath)
+      trace('success')
+      return { success: true }
+    } catch (error) {
+      console.error('Failed to show item in folder:', error)
+      trace('error', String(error))
       return { success: false, error: String(error) }
     }
   })
@@ -2566,6 +2650,14 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_RESET)
   ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_SET_MOCK_ISSUES)
   ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL)
+  ipcMain.removeHandler(IPC.DEBUG_SHELL_RESET)
+  ipcMain.removeHandler(IPC.DEBUG_SHELL_GET_LAST_OPENED_PATH)
+  ipcMain.removeHandler(IPC.DEBUG_SHELL_GET_LAST_REVEALED_PATH)
+  ipcMain.removeHandler(IPC.DEBUG_GIT_DIFF_GET_DEBUG_STATS)
+  ipcMain.removeHandler(IPC.CHANGELOG_GET_CURRENT)
+  ipcMain.removeHandler(IPC.APP_GET_PDF_VIEWER_URL)
+  ipcMain.removeHandler(IPC.BROWSER_GET_ZOOM_FACTOR)
+  ipcMain.removeHandler(IPC.BROWSER_SET_ZOOM_FACTOR)
   ipcMain.removeHandler(IPC.APP_READ_NOTICE)
   ipcMain.removeHandler(IPC.UPDATER_GET_STATUS)
   ipcMain.removeHandler(IPC.UPDATER_CHECK_NOW)
@@ -2593,6 +2685,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE)
   ipcMain.removeHandler(IPC.DEBUG_EMIT_BUNDLE_MARKER)
   ipcMain.removeHandler(IPC.SHELL_OPEN_PATH)
+  ipcMain.removeHandler(IPC.SHELL_SHOW_ITEM_IN_FOLDER)
   ipcMain.removeHandler(IPC.SHELL_OPEN_EXTERNAL)
   ipcMain.removeHandler(IPC.CLIPBOARD_WRITE_TEXT)
   ipcMain.removeHandler(IPC.CLIPBOARD_READ_TEXT)
@@ -2651,6 +2744,8 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE)
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_COMMAND)
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_REVALIDATE)
+  ipcMain.removeHandler(IPC.GIT_GET_SUBMODULES)
+  ipcMain.removeHandler(IPC.GIT_WARM_DIFF_CACHE)
   ipcMain.removeHandler(IPC.PROJECT_LIST_DIRECTORY)
   ipcMain.removeHandler(IPC.PROJECT_BUILD_FILE_INDEX)
   ipcMain.removeHandler(IPC.PROJECT_SEARCH_FILENAMES)
@@ -2671,6 +2766,13 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.PROJECT_WATCH_IMAGE_FILES)
   ipcMain.removeHandler(IPC.PROJECT_UNWATCH_IMAGE_FILES)
   ipcMain.removeHandler(IPC.PROJECT_UNWATCH_ALL_IMAGE_FILES)
+  ipcMain.removeHandler(IPC.PROJECT_FILES_EXIST)
+  ipcMain.removeHandler(IPC.PROJECT_SQLITE_GET_SCHEMA)
+  ipcMain.removeHandler(IPC.PROJECT_SQLITE_READ_TABLE_ROWS)
+  ipcMain.removeHandler(IPC.PROJECT_SQLITE_INSERT_ROW)
+  ipcMain.removeHandler(IPC.PROJECT_SQLITE_UPDATE_ROW)
+  ipcMain.removeHandler(IPC.PROJECT_SQLITE_DELETE_ROW)
+  ipcMain.removeHandler(IPC.PROJECT_SQLITE_EXECUTE)
   ipcMain.removeHandler(IPC.SETTINGS_LOAD)
   ipcMain.removeHandler(IPC.SETTINGS_SAVE)
   ipcMain.removeHandler(IPC.SETTINGS_UPDATE)

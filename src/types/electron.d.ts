@@ -189,6 +189,7 @@ export interface DialogAPI {
 
 export interface ShellAPI {
   openPath: (path: string) => Promise<{ success: boolean; error?: string }>
+  showItemInFolder: (path: string) => Promise<{ success: boolean; error?: string }>
   openExternal: (url: string) => Promise<{
     success: boolean
     canceled?: boolean
@@ -1095,6 +1096,9 @@ export interface DebugAPI {
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
+  shellReset: () => Promise<void>
+  shellGetLastOpenedPath: () => Promise<string | null>
+  shellGetLastRevealedPath: () => Promise<string | null>
   readTelemetryLog: () => Promise<string>
   /**
    * Autotest-only: synchronously record an `autotest:bundle-marker`

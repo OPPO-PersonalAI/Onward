@@ -28,6 +28,7 @@ import { testProjectEditorOpenPosition } from './test-project-editor-open-positi
 import { testProjectEditorLargeFile } from './test-project-editor-large-file'
 import { testSubpageNavigation } from './test-subpage-navigation'
 import { testWorkingDirectoryCopy } from './test-working-directory-copy'
+import { testFileEntryOsActions } from './test-file-entry-os-actions'
 import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
@@ -335,6 +336,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.585:begin')
       const results = await testWorkingDirectoryCopy(ctx)
       collectSuiteResults('WorkingDirectoryCopy', results)
+      await sleep(300)
+    }
+
+    if (!ctx.cancelled() && shouldRun('file-entry-os-actions')) {
+      log('phase0.586:begin')
+      const results = await testFileEntryOsActions(ctx)
+      collectSuiteResults('FileEntryOsActions', results)
       await sleep(300)
     }
 

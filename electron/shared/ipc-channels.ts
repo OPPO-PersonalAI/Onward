@@ -91,6 +91,12 @@ export const IPC = {
   // fires 'destroyed' on reload, so reload is its own leak class).
   DEBUG_RELOAD_WINDOW: 'debug:reload-window',
   DEBUG_RESET_PERF_TRACE_METRICS: 'debug:reset-perf-trace-metrics',
+  // Autotest-only (ONWARD_AUTOTEST=1): read back / reset the paths recorded
+  // by the shell open-path / show-item-in-folder stubs so the file-entry OS
+  // action suite can assert IPC round-trips without launching external apps.
+  DEBUG_SHELL_GET_LAST_OPENED_PATH: 'debug:shell-get-last-opened-path',
+  DEBUG_SHELL_GET_LAST_REVEALED_PATH: 'debug:shell-get-last-revealed-path',
+  DEBUG_SHELL_RESET: 'debug:shell-reset',
   DIALOG_OPEN_DIRECTORY: 'dialog:openDirectory',
   DIALOG_OPEN_TEXT_FILE: 'dialog:openTextFile',
   DIALOG_SAVE_TEXT_FILE: 'dialog:saveTextFile',
@@ -219,6 +225,7 @@ export const IPC = {
   SETTINGS_UPDATE: 'settings:update',
   SHELL_OPEN_EXTERNAL: 'shell:open-external',
   SHELL_OPEN_PATH: 'shell:open-path',
+  SHELL_SHOW_ITEM_IN_FOLDER: 'shell:show-item-in-folder',
   SHORTCUT_ACTIVATED: 'shortcut:activated',
   SHORTCUT_TRIGGERED: 'shortcut:triggered',
   SHORTCUT_WINDOW_TRIGGERED: 'shortcut:window-triggered',

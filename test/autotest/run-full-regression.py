@@ -94,6 +94,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-change-log-autotest.sh",
     "test/autotest/run-feedback-autotest.sh",
     "test/autotest/run-feedback-persistence-autotest.sh",
+    "test/autotest/run-file-entry-os-actions-autotest.sh",
     "test/autotest/run-file-index-cache-ui-autotest.sh",
     "test/autotest/run-file-watch-autotest.sh",
     "test/autotest/run-git-cross-platform-autotest.sh",

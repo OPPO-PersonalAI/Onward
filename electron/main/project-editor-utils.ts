@@ -7,6 +7,7 @@ import BetterSqlite3 from 'better-sqlite3'
 import { readdir, stat, readFile, writeFile, mkdir, rename, rm, unlink, access, open as openFileHandle } from 'fs/promises'
 import { resolve, relative, dirname, sep, normalize, extname, join } from 'path'
 import { isHtmlPath } from '../../src/utils/html-file'
+import { resolveInRoot } from './path-containment'
 import { isSupportedImageFile } from './image-utils'
 import {
   classifyProjectTextRead,
@@ -133,30 +134,7 @@ type SqlitePathResult =
   | { ok: true; rootPath: string; fullPath: string }
   | { ok: false; rootPath: string; error: string }
 
-function normalizePath(value: string): string {
-  return normalize(value)
-}
-
-function normalizeForCompare(value: string): string {
-  const normalized = normalizePath(value)
-  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
-}
-
-function isSubPath(root: string, target: string): boolean {
-  const rootNormalized = normalizeForCompare(root)
-  const targetNormalized = normalizeForCompare(target)
-  if (targetNormalized === rootNormalized) return true
-  return targetNormalized.startsWith(rootNormalized + sep)
-}
-
-export function resolveInRoot(root: string, relativePath: string): string | null {
-  const safeRelative = relativePath
-    ? relativePath.split('/').join(sep)
-    : ''
-  const fullPath = resolve(root, safeRelative)
-  if (!isSubPath(root, fullPath)) return null
-  return fullPath
-}
+export { resolveInRoot }
 
 function resolveSqlitePath(root: string, path: string): SqlitePathResult {
   const rootPath = resolve(root)

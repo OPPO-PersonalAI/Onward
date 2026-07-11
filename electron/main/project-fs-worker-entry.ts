@@ -4,8 +4,9 @@
  */
 
 import { readdir } from 'fs/promises'
-import { resolve, relative, sep, normalize } from 'path'
+import { relative, resolve, sep } from 'path'
 import { parentPort } from 'worker_threads'
+import { resolveInRoot } from './path-containment'
 
 type ProjectEntry = {
   name: string
@@ -30,24 +31,6 @@ type WorkerResponse = {
 
 const fileIndexCache = new Map<string, string[]>()
 
-function normalizeForCompare(value: string): string {
-  const normalized = normalize(value)
-  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
-}
-
-function isSubPath(root: string, target: string): boolean {
-  const rootNormalized = normalizeForCompare(root)
-  const targetNormalized = normalizeForCompare(target)
-  if (targetNormalized === rootNormalized) return true
-  return targetNormalized.startsWith(rootNormalized + sep)
-}
-
-function resolveInRoot(root: string, relativePath: string): string | null {
-  const safeRelative = relativePath ? relativePath.split('/').join(sep) : ''
-  const fullPath = resolve(root, safeRelative)
-  if (!isSubPath(root, fullPath)) return null
-  return fullPath
-}
 
 function toRelativePath(root: string, fullPath: string): string {
   return relative(root, fullPath).split(sep).join('/')

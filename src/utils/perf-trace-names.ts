@@ -802,7 +802,26 @@ export const PERF_TRACE_EVENT = {
   // different scope (cross-Task contamination guard; site=snapshot|restore-null).
   RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED: 'renderer:project-editor.persist-active-file-guarded',
   // Renderer: a token-cancelled (non-user) restore was re-run for the still-open scope.
-  RENDERER_PROJECT_EDITOR_RESTORE_RERUN_AFTER_CANCEL: 'renderer:project-editor.restore-rerun-after-cancel'
+  RENDERER_PROJECT_EDITOR_RESTORE_RERUN_AFTER_CANCEL: 'renderer:project-editor.restore-rerun-after-cancel',
+
+  // ───────── 2026-07-10 file-entry OS actions (open with default app / reveal in file manager) ─────────
+  // Main: SHELL_OPEN_PATH handler outcome (success | error | stubbed under
+  // ONWARD_AUTOTEST), path sliced to 256 chars, durationMs.
+  MAIN_IPC_SHELL_OPEN_PATH: 'main:ipc.shell.open-path',
+  // Main: SHELL_SHOW_ITEM_IN_FOLDER handler outcome (same payload shape).
+  MAIN_IPC_SHELL_SHOW_ITEM_IN_FOLDER: 'main:ipc.shell.show-item-in-folder',
+  // Renderer: a context-menu OS action was invoked on a file entry (ph=i).
+  // Payload: surface (tree|quick-pin|quick-recent|search|outline|monaco|
+  // git-diff|git-history), action (open-default|reveal), ok, error?.
+  RENDERER_FILE_ENTRY_OS_ACTION: 'renderer:file-entry.os-action',
+  // Renderer: on-disk existence check gating the OS-action menu items.
+  // Payload: surface, exists, skipped (deleted entries skip the IPC), durationMs.
+  RENDERER_FILE_ENTRY_EXIST_CHECK: 'renderer:file-entry.exist-check',
+  // Renderer: Monaco context-action registration was skipped because the
+  // editor instance was already disposed (locale change while the <Editor>
+  // conditional is unmounted). Breadcrumb for "Monaco menu items missing"
+  // reports; the next onMount re-registers cleanly.
+  RENDERER_FILE_ENTRY_MONACO_ACTIONS_SKIPPED: 'renderer:file-entry.monaco-actions-skipped'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

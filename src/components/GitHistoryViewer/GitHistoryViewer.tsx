@@ -35,6 +35,8 @@ import { GitPdfCompare, type GitPdfStatus } from '../GitPdfCompare/GitPdfCompare
 import { GitEpubCompare, type GitEpubStatus } from '../GitEpubCompare/GitEpubCompare'
 import { inspectPdfCompareDom, inspectEpubCompareDom } from '../GitDiffViewer/GitDiffViewer'
 import { usePathCopy } from '../../hooks/usePathCopy'
+import { useFileEntryOsActions } from '../../hooks/useFileEntryOsActions'
+import { fileEntryOsItemState, resolveEntryAbsolutePath } from '../../utils/file-entry-path'
 import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
 import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
 import {
@@ -568,7 +570,14 @@ export function GitHistoryViewer({
   const oldestCommit = selectionInfo.selectedCommits[selectionInfo.selectedCommits.length - 1] ?? null
 
   // --- Path copy (shared hook) ---
-  const { copyMessage, copyToClipboard, flashCopyFeedback } = usePathCopy(t, 'gitHistory.copyFailed')
+  const { copyMessage, copyToClipboard, showCopyError, flashCopyFeedback } = usePathCopy(t, 'gitHistory.copyFailed')
+  const {
+    entryOnDisk,
+    checkEntryOnDisk,
+    openWithDefaultApp,
+    revealInFileManager,
+    revealLabel
+  } = useFileEntryOsActions(t, showCopyError)
 
   const handleFilenameDblClick = useCallback(async (e: React.MouseEvent) => {
     if (!selectedFile) return
@@ -586,7 +595,12 @@ export function GitHistoryViewer({
     e.preventDefault()
     e.stopPropagation()
     setFileContextMenu({ x: e.clientX, y: e.clientY, targetFile: file })
-  }, [])
+    // Working-tree semantics: the OS actions target the file as it exists on
+    // disk today. Unlike Git Diff, a history row's 'D' refers to a past
+    // commit — the file may have been re-created since — so every row gets a
+    // live existence check instead of a status-based skip.
+    checkEntryOnDisk('git-history', activeCwd, file.filename)
+  }, [activeCwd, checkEntryOnDisk])
 
   const closeFileContextMenu = useCallback(() => {
     setFileContextMenu(null)
@@ -2387,12 +2401,15 @@ export function GitHistoryViewer({
                             ? `${selectedFile.originalFilename} → ${selectedFile.filename}`
                             : selectedFile.filename}
                         </span>
-                        {copyMessage && (
-                          <span className={`path-copy-toast ${copyMessage.type}`}>
-                            {copyMessage.text}
-                          </span>
-                        )}
                       </>
+                    )}
+                    {/* Outside the selectedFile gate: context-menu OS actions
+                        fire without a selection and their failure toast must
+                        stay visible. */}
+                    {copyMessage && (
+                      <span className={`path-copy-toast ${copyMessage.type}`}>
+                        {copyMessage.text}
+                      </span>
                     )}
                   </div>
                   {!selectedFile?.isImage && !selectedFile?.isPdf && !selectedFile?.isEpub && renderDiffOptions()}
@@ -2431,6 +2448,33 @@ export function GitHistoryViewer({
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9 1H3.5A1.5 1.5 0 0 0 2 2.5v11A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V6h-4a1 1 0 0 1-1-1V1zm1 0v4h4L10 1z" /><path d="M8.5 9a.5.5 0 0 0-.894-.447l-2 4a.5.5 0 1 0 .894.447l2-4z" /></svg>
             <span>{t('common.copyAbsolutePath')}</span>
+          </button>
+          <div className="git-history-context-separator" />
+          <button
+            className="git-history-context-item"
+            data-testid="file-entry-open-default"
+            disabled={fileEntryOsItemState(undefined, entryOnDisk).disabled}
+            onClick={() => {
+              const file = fileContextMenu.targetFile
+              closeFileContextMenu()
+              void openWithDefaultApp('git-history', resolveEntryAbsolutePath(activeCwd, file.filename))
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fillRule="evenodd" d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z" /><path fillRule="evenodd" d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z" /></svg>
+            <span>{t('common.openWithDefaultApp')}</span>
+          </button>
+          <button
+            className="git-history-context-item"
+            data-testid="file-entry-reveal"
+            disabled={fileEntryOsItemState(undefined, entryOnDisk).disabled}
+            onClick={() => {
+              const file = fileContextMenu.targetFile
+              closeFileContextMenu()
+              void revealInFileManager('git-history', resolveEntryAbsolutePath(activeCwd, file.filename))
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14V3.5zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.374 3.334 5.82 3 5.264 3H2.5a.5.5 0 0 0-.5.5V6zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7H1.633z" /></svg>
+            <span>{revealLabel}</span>
           </button>
         </div>
       )}

@@ -63,6 +63,8 @@ import { HtmlPreviewSearchBar, type HtmlPreviewSearchResult } from './HtmlPrevie
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { usePathCopy } from '../../hooks/usePathCopy'
 import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
+import { useFileEntryOsActions, type FileEntryOsSurface } from '../../hooks/useFileEntryOsActions'
+import { fileEntryOsItemState, resolveEntryAbsolutePath } from '../../utils/file-entry-path'
 import {
   deriveHtmlPreviewNavButtonState,
   formatHtmlPreviewZoomPercent,
@@ -202,7 +204,7 @@ type ContextMenuState = {
   y: number
   targetPath: string | null
   targetType: 'file' | 'dir' | null
-  source: 'tree' | 'quick-recent' | 'quick-pin'
+  source: 'tree' | 'quick-recent' | 'quick-pin' | 'search' | 'outline'
 }
 
 type SaveSource = 'toolbar' | 'global-shortcut' | 'editor-shortcut' | 'debug-toolbar'
@@ -4469,6 +4471,13 @@ export function ProjectEditor({
   // --- Path copy (shared hook) ---
   const { copyMessage: pathCopyMessage, copyToClipboard, showCopyError, flashCopyFeedback } = usePathCopy(t, 'projectEditor.copyFailed')
   const {
+    entryOnDisk,
+    checkEntryOnDisk,
+    openWithDefaultApp,
+    revealInFileManager,
+    revealLabel
+  } = useFileEntryOsActions(t, showCopyError)
+  const {
     title: cwdTitle,
     onDoubleClick: handleCwdDblClick,
     feedback: cwdFeedback
@@ -4487,9 +4496,9 @@ export function ProjectEditor({
   const resolveAbsolutePath = useCallback((relativePath: string): string | null => {
     const root = rootRef.current ?? rootPath
     if (!root) return null
-    const normalizedRoot = normalizePath(root).replace(/\/+$/, '')
-    if (!relativePath) return normalizedRoot
-    return `${normalizedRoot}/${relativePath}`
+    // Delegates to the unit-tested joiner (test/unittest/file-entry-os-actions.test.mts);
+    // normalizePath keeps the pre-existing forward-slash canonical form.
+    return resolveEntryAbsolutePath(normalizePath(root), relativePath)
   }, [rootPath])
 
   const copyContextMenuPath = useCallback(async (
@@ -4522,6 +4531,81 @@ export function ProjectEditor({
     }
     await copyToClipboard(absolutePath, t('common.absolutePath'))
   }, [copyToClipboard, resolveAbsolutePath, rootPath, showCopyError, t])
+
+  // --- Monaco context-menu file actions (surface E) ---
+  // Registered via effect (not once in onMount) so the labels re-register on
+  // locale change and the run() callbacks never go stale.
+  const [editorMountTick, setEditorMountTick] = useState(0)
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor || editorMountTick === 0) return
+    const actions: Array<{ id: string; label: string; order: number; run: () => void }> = [
+      {
+        id: 'onward.copyFileName',
+        label: t('common.copyName'),
+        order: 1,
+        run: () => { void copyContextMenuPath(activeFilePathRef.current ?? '', 'name') }
+      },
+      {
+        id: 'onward.copyRelativePath',
+        label: t('common.copyRelativePath'),
+        order: 2,
+        run: () => { void copyContextMenuPath(activeFilePathRef.current ?? '', 'relative') }
+      },
+      {
+        id: 'onward.copyAbsolutePath',
+        label: t('common.copyAbsolutePath'),
+        order: 3,
+        run: () => { void copyContextMenuPath(activeFilePathRef.current ?? '', 'absolute') }
+      },
+      {
+        id: 'onward.openWithDefaultApp',
+        label: t('common.openWithDefaultApp'),
+        order: 4,
+        // With no active file the joiner would degenerate to the project
+        // ROOT (empty relative path) and silently open a folder — pass null
+        // instead so the hook surfaces the openEntryFailed toast.
+        run: () => {
+          const activePath = activeFilePathRef.current
+          void openWithDefaultApp('monaco', activePath ? resolveAbsolutePath(activePath) : null)
+        }
+      },
+      {
+        id: 'onward.revealInFileManager',
+        label: revealLabel,
+        order: 5,
+        run: () => {
+          const activePath = activeFilePathRef.current
+          void revealInFileManager('monaco', activePath ? resolveAbsolutePath(activePath) : null)
+        }
+      }
+    ]
+    // addAction throws on an already-disposed editor (locale change can
+    // re-run this effect while the <Editor> conditional is unmounted and
+    // editorRef still points at the stale instance) — treat as no-op; the
+    // next onMount bumps editorMountTick and re-registers cleanly.
+    let disposables: Array<{ dispose(): void }> = []
+    try {
+      disposables = actions.map((action) => editor.addAction({
+        id: action.id,
+        label: action.label,
+        contextMenuGroupId: '9_onward_file',
+        contextMenuOrder: action.order,
+        run: action.run
+      }))
+    } catch (error) {
+      disposables = []
+      perfTrace(PERF_TRACE_EVENT.RENDERER_FILE_ENTRY_MONACO_ACTIONS_SKIPPED, {
+        reason: 'editor-disposed',
+        error: String(error).slice(0, 256)
+      })
+    }
+    return () => {
+      for (const disposable of disposables) {
+        try { disposable.dispose() } catch { /* editor already disposed */ }
+      }
+    }
+  }, [editorMountTick, t, revealLabel, copyContextMenuPath, openWithDefaultApp, revealInFileManager, resolveAbsolutePath])
 
   const touchRecentFile = useCallback((path: string) => {
     setRecentFiles((prev) => prependRecentFile(prev, path, MAX_RECENT_FILES))
@@ -8417,6 +8501,18 @@ export function ProjectEditor({
         editor.trigger('autotest', commandId, undefined)
         return true
       },
+      triggerMonacoContextAction: async (actionId: string) => {
+        const action = editorRef.current?.getAction(actionId)
+        if (!action) return false
+        await action.run()
+        return true
+      },
+      getMonacoContextActions: () => {
+        const actions = editorRef.current?.getSupportedActions() ?? []
+        return actions
+          .filter((action) => action.id.includes('onward.'))
+          .map((action) => ({ id: action.id, label: action.label }))
+      },
       triggerToolbarSave: async () => {
         const result = await handleSaveRef.current('debug-toolbar')
         return Boolean(result?.success)
@@ -9325,7 +9421,7 @@ export function ProjectEditor({
     options?: {
       path: string | null
       type: 'file' | 'dir' | null
-      source?: 'tree' | 'quick-recent' | 'quick-pin'
+      source?: 'tree' | 'quick-recent' | 'quick-pin' | 'search' | 'outline'
       select?: boolean
     }
   ) => {
@@ -9340,10 +9436,15 @@ export function ProjectEditor({
       targetType: options?.type ?? null,
       source: options?.source ?? 'tree'
     })
+    if (options?.path !== null && options?.path !== undefined && options.type) {
+      // Gate the OS-action items (open with default app / reveal) on a fresh
+      // on-disk existence check; they stay disabled until it confirms.
+      checkEntryOnDisk(options.source ?? 'tree', rootRef.current ?? rootPath, options.path)
+    }
     if (options?.select && options.path) {
       setSelectedPath(options.path)
     }
-  }, [])
+  }, [checkEntryOnDisk, rootPath])
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(null)
@@ -10280,6 +10381,9 @@ export function ProjectEditor({
                 buildFileIndex={buildFileIndex}
                 getFileIndex={getFileIndex}
                 searchInputRef={globalSearchInputRef}
+                onFileContextMenu={(event, filePath) =>
+                  openContextMenu(event, { path: filePath, type: 'file', source: 'search' })
+                }
               />
             )}
             <div className="project-editor-file-tree-resizer" onMouseDown={handleResizeMouseDown} />
@@ -10749,7 +10853,15 @@ export function ProjectEditor({
                       {outlineShowInSplit && (
                         <>
                           <div className="project-editor-outline-resizer" onMouseDown={handleOutlineResizeMouseDown} />
-                          <div className="project-editor-outline-pane" style={outlinePaneStyle}>
+                          <div
+                        className="project-editor-outline-pane"
+                        style={outlinePaneStyle}
+                        onContextMenu={(event) => {
+                          if (activeFilePath) {
+                            openContextMenu(event, { path: activeFilePath, type: 'file', source: 'outline' })
+                          }
+                        }}
+                      >
                             <OutlinePanel
                               symbols={pdfOutlineSymbols}
                               activeItem={pdfActiveItem}
@@ -10812,7 +10924,15 @@ export function ProjectEditor({
                       {outlineShowInSplit && (
                         <>
                           <div className="project-editor-outline-resizer" onMouseDown={handleOutlineResizeMouseDown} />
-                          <div className="project-editor-outline-pane" style={outlinePaneStyle}>
+                          <div
+                        className="project-editor-outline-pane"
+                        style={outlinePaneStyle}
+                        onContextMenu={(event) => {
+                          if (activeFilePath) {
+                            openContextMenu(event, { path: activeFilePath, type: 'file', source: 'outline' })
+                          }
+                        }}
+                      >
                             <OutlinePanel
                               symbols={epubOutlineSymbols}
                               activeItem={epubActiveItem}
@@ -10911,6 +11031,7 @@ export function ProjectEditor({
                           applyPendingViewState()
                         }
                         syncOriginalVersion()
+                        setEditorMountTick((tick) => tick + 1)
                       }}
                       options={{
                         fontSize: editorFontSize,
@@ -11168,7 +11289,15 @@ export function ProjectEditor({
                   {outlineShowInSplit && (
                     <>
                       <div className="project-editor-outline-resizer" onMouseDown={handleOutlineResizeMouseDown} />
-                      <div className="project-editor-outline-pane" style={outlinePaneStyle}>
+                      <div
+                        className="project-editor-outline-pane"
+                        style={outlinePaneStyle}
+                        onContextMenu={(event) => {
+                          if (activeFilePath) {
+                            openContextMenu(event, { path: activeFilePath, type: 'file', source: 'outline' })
+                          }
+                        }}
+                      >
                         {isMarkdownFile ? (
                           <OutlinePanel
                             symbols={outlineSymbols}
@@ -11431,7 +11560,36 @@ export function ProjectEditor({
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9 1H3.5A1.5 1.5 0 0 0 2 2.5v11A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V6h-4a1 1 0 0 1-1-1V1zm1 0v4h4L10 1z" /><path d="M8.5 9a.5.5 0 0 0-.894-.447l-2 4a.5.5 0 1 0 .894.447l2-4z" /></svg>
                   <span>{t('common.copyAbsolutePath')}</span>
                 </button>
-                {contextMenu.targetType === 'file' && (
+                <div className="project-editor-context-separator" />
+                <button
+                  className="project-editor-context-item"
+                  data-testid="file-entry-open-default"
+                  disabled={fileEntryOsItemState(undefined, entryOnDisk).disabled}
+                  onClick={() => {
+                    const surface = contextMenu.source as FileEntryOsSurface
+                    const targetPath = contextMenu.targetPath ?? ''
+                    closeContextMenu()
+                    void openWithDefaultApp(surface, resolveAbsolutePath(targetPath))
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fillRule="evenodd" d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z" /><path fillRule="evenodd" d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z" /></svg>
+                  <span>{t('common.openWithDefaultApp')}</span>
+                </button>
+                <button
+                  className="project-editor-context-item"
+                  data-testid="file-entry-reveal"
+                  disabled={fileEntryOsItemState(undefined, entryOnDisk).disabled}
+                  onClick={() => {
+                    const surface = contextMenu.source as FileEntryOsSurface
+                    const targetPath = contextMenu.targetPath ?? ''
+                    closeContextMenu()
+                    void revealInFileManager(surface, resolveAbsolutePath(targetPath))
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14V3.5zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.374 3.334 5.82 3 5.264 3H2.5a.5.5 0 0 0-.5.5V6zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7H1.633z" /></svg>
+                  <span>{revealLabel}</span>
+                </button>
+                {contextMenu.targetType === 'file' && contextMenu.source !== 'outline' && (
                   <button
                     className="project-editor-context-item"
                     onClick={() => {

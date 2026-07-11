@@ -20,6 +20,8 @@ interface SearchPanelProps {
   buildFileIndex: () => Promise<string[]>
   getFileIndex: () => string[]
   searchInputRef?: RefObject<HTMLInputElement>
+  /** Right-click on a result row (file header or filename item), repo-relative path. */
+  onFileContextMenu?: (event: React.MouseEvent, filePath: string) => void
 }
 
 function getBaseName(path: string): string {
@@ -71,7 +73,8 @@ export function SearchPanel({
   onClose,
   buildFileIndex,
   getFileIndex,
-  searchInputRef: externalInputRef
+  searchInputRef: externalInputRef,
+  onFileContextMenu
 }: SearchPanelProps) {
   const { t } = useI18n()
   const [searchType, setSearchType] = useState<SearchType>(initialSearchType)
@@ -393,7 +396,11 @@ export function SearchPanel({
               const { name, dir } = splitPath(group.file)
               return (
                 <div key={group.file}>
-                  <div className="global-search-file-header" onClick={() => toggleCollapse(groupIndex)}>
+                  <div
+                    className="global-search-file-header"
+                    onClick={() => toggleCollapse(groupIndex)}
+                    onContextMenu={(event) => onFileContextMenu?.(event, group.file)}
+                  >
                     <svg
                       className={`global-search-file-chevron ${group.isCollapsed ? 'collapsed' : ''}`}
                       width="14"
@@ -444,6 +451,7 @@ export function SearchPanel({
                   key={filePath}
                   className={`global-search-filename-item ${index === filenameActiveIndex ? 'active' : ''}`}
                   onClick={() => handleFilenameSelect(filePath)}
+                  onContextMenu={(event) => onFileContextMenu?.(event, filePath)}
                   onMouseEnter={() => setFilenameActiveIndex(index)}
                 >
                   <span className="global-search-filename-name">{name}</span>
