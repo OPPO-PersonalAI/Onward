@@ -58,6 +58,78 @@ export function withHtmlPreviewReloadKey(previewUrl: string | null | undefined, 
   }
 }
 
+/**
+ * Query params that are cache-busting/reload plumbing rather than part of the
+ * document identity. Stripped when comparing "is the preview still on the
+ * originally opened file" for the Home button's disabled state.
+ */
+export const HTML_PREVIEW_TRANSIENT_QUERY_PARAMS = ['mtime', 'onwardHtmlReload'] as const
+
+export function normalizeHtmlPreviewDocumentUrl(rawUrl: string | null | undefined): string | null {
+  if (!rawUrl) return null
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  for (const param of HTML_PREVIEW_TRANSIENT_QUERY_PARAMS) {
+    url.searchParams.delete(param)
+  }
+  url.searchParams.sort()
+  // Use the parser's already-percent-encoded pathname verbatim: it canonicalises
+  // equivalent spellings (a raw space and %20 both encode to %20, a raw unicode
+  // char and its %-escapes to the same bytes) while keeping a '#'/'?' that is part
+  // of a FILE NAME encoded as %23/%3F — so it can never collide with a structural
+  // hash/query delimiter.
+  // Decoding the segments (the previous approach) made 'a.html%23sec' (a real file)
+  // compare equal to 'a.html#sec' (a different file at an anchor).
+  const segments = url.pathname.split('/')
+  // Windows drive letters are case-insensitive (file:///C:/ === file:///c:/);
+  // every other segment keeps its case because POSIX paths are case-sensitive.
+  if (segments.length > 1 && /^[a-zA-Z]:$/.test(segments[1])) {
+    segments[1] = segments[1].toLowerCase()
+  }
+  const pathname = segments.join('/')
+  const search = url.searchParams.toString()
+  // The hash is kept on purpose: an in-page anchor click pushes a history
+  // entry and enables Back, so Home must stay enabled symmetrically.
+  return `${url.protocol}//${url.host}${pathname}${search ? `?${search}` : ''}${url.hash}`
+}
+
+export function isSameHtmlPreviewDocument(
+  currentUrl: string | null | undefined,
+  homeUrl: string | null | undefined
+): boolean {
+  const normalizedCurrent = normalizeHtmlPreviewDocumentUrl(currentUrl)
+  const normalizedHome = normalizeHtmlPreviewDocumentUrl(homeUrl)
+  if (normalizedCurrent === null || normalizedHome === null) return false
+  return normalizedCurrent === normalizedHome
+}
+
+export interface HtmlPreviewNavButtonState {
+  backEnabled: boolean
+  forwardEnabled: boolean
+  reloadEnabled: boolean
+  homeEnabled: boolean
+}
+
+export function deriveHtmlPreviewNavButtonState(input: {
+  ready: boolean
+  canGoBack: boolean
+  canGoForward: boolean
+  currentUrl: string | null
+  homeUrl: string | null
+}): HtmlPreviewNavButtonState {
+  const { ready, canGoBack, canGoForward, currentUrl, homeUrl } = input
+  return {
+    backEnabled: ready && canGoBack,
+    forwardEnabled: ready && canGoForward,
+    reloadEnabled: ready,
+    homeEnabled: ready && homeUrl !== null && !isSameHtmlPreviewDocument(currentUrl, homeUrl)
+  }
+}
+
 function readNonNegativeNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
 }

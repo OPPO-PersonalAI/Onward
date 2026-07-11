@@ -1,0 +1,21 @@
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTML Preview Iframe Child</title>
+  </head>
+  <body>
+    <p>IFRAME_CHILD_MARKER</p>
+    <script>
+      // On load, perform an in-page navigation INSIDE this subframe. This fires
+      // did-navigate-in-page with isMainFrame=false on the top WebContents. The
+      // top-level URL bar / Home button must NOT react to a subframe navigation.
+      history.pushState({}, '', '#child-moved');
+      location.hash = 'child-anchor';
+    </script>
+  </body>
+</html>

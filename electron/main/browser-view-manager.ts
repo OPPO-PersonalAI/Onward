@@ -243,10 +243,14 @@ class BrowserViewManager {
     return true
   }
 
-  reload(id: string): boolean {
+  reload(id: string, options?: { ignoreCache?: boolean }): boolean {
     const info = this.views.get(id)
     if (!info || info.view.webContents.isDestroyed()) return false
-    info.view.webContents.reload()
+    if (options?.ignoreCache) {
+      info.view.webContents.reloadIgnoringCache()
+    } else {
+      info.view.webContents.reload()
+    }
     return true
   }
 
@@ -578,7 +582,12 @@ class BrowserViewManager {
       this.sendNavState(id)
     })
 
-    wc.on('did-navigate-in-page', (_event, url) => {
+    wc.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+      // Only the top-level frame owns the address bar / nav state. Without this
+      // guard a subframe (iframe) hash change or history.pushState would rewrite
+      // the URL and flip the Home button's "same document" check, even though the
+      // top document never moved. did-navigate above is already main-frame-only.
+      if (!isMainFrame) return
       send(IPC.BROWSER_URL_CHANGED, url)
       this.sendNavState(id)
     })

@@ -9,6 +9,29 @@ const DEFAULT_HTML_FIXTURE_PATH = 'html-preview/regularization_landscape.html'
 const DEFAULT_EXPECTED_TITLE = 'HTML Preview Autotest'
 const DEFAULT_EXPECTED_TEXT = 'INITIAL_HTML_MARKER'
 const UPDATED_MARKER = 'UPDATED_HTML_MARKER'
+const SECOND_PAGE_TITLE = 'HTML Preview Nav Second Page'
+const SECOND_PAGE_MARKER = 'SECOND_PAGE_MARKER'
+const NAV_TEMP_MUTATION = 'NAV_TEMP_MUTATION'
+const SAVE_REMOUNT_MARKER = 'NAV_SAVE_REMOUNT_MARKER'
+const SCROLL_GUARD_MARKER = 'NAV_SCROLL_GUARD_MARKER'
+const IFRAME_HOST_FIXTURE_PATH = 'html-preview/nav-iframe-host.html'
+const IFRAME_HOST_TITLE = 'HTML Preview Iframe Host'
+const IFRAME_HOST_MARKER = 'IFRAME_HOST_MARKER'
+const NAV_BUTTON_KINDS = ['back', 'forward', 'reload', 'home'] as const
+
+type NavButtonKind = (typeof NAV_BUTTON_KINDS)[number]
+
+type NavStateSnapshot = {
+  browserId: string | null
+  url: string | null
+  homeUrl: string | null
+  canGoBack: boolean
+  canGoForward: boolean
+  backEnabled: boolean
+  forwardEnabled: boolean
+  reloadEnabled: boolean
+  homeEnabled: boolean
+}
 
 type HtmlDocumentState = {
   success: boolean
@@ -90,6 +113,76 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
     return { ok: false, state: lastState }
   }
 
+  const waitForNavState = async (
+    label: string,
+    predicate: (state: NavStateSnapshot) => boolean,
+    timeoutMs = 10000
+  ): Promise<{ ok: boolean; state: NavStateSnapshot | null }> => {
+    const start = performance.now()
+    let lastState: NavStateSnapshot | null = null
+    while (performance.now() - start < timeoutMs) {
+      const state = getApi()?.getHtmlPreviewNavState?.() ?? null
+      if (state) {
+        lastState = state
+        if (predicate(state)) {
+          return { ok: true, state }
+        }
+      }
+      await sleep(100)
+    }
+    ctx.log('html-preview-nav-timeout', { label, lastState })
+    return { ok: false, state: lastState }
+  }
+
+  const navButton = (kind: NavButtonKind) =>
+    document.querySelector<HTMLButtonElement>(`.project-editor-html-nav-${kind}-btn`)
+
+  const domNavDisabledMatches = (state: NavStateSnapshot): boolean => {
+    const back = navButton('back')
+    const forward = navButton('forward')
+    const reload = navButton('reload')
+    const home = navButton('home')
+    if (!back || !forward || !reload || !home) return false
+    return back.disabled === !state.backEnabled &&
+      forward.disabled === !state.forwardEnabled &&
+      reload.disabled === !state.reloadEnabled &&
+      home.disabled === !state.homeEnabled
+  }
+
+  const injectDomMutation = async (marker: string): Promise<boolean> => {
+    const browserId = getApi()?.getHtmlReaderState?.()?.browserId
+    if (!browserId) return false
+    const result = await window.electronAPI.browser.evaluateForTest(browserId, `(() => {
+      const el = document.createElement('p');
+      el.textContent = ${JSON.stringify(marker)};
+      document.body.appendChild(el);
+      return true;
+    })()`)
+    return Boolean(result.success)
+  }
+
+  const clickPreviewLink = async (linkId: string): Promise<boolean> => {
+    const browserId = getApi()?.getHtmlReaderState?.()?.browserId
+    if (!browserId) return false
+    const result = await window.electronAPI.browser.evaluateForTest(browserId, `(() => {
+      const link = document.getElementById(${JSON.stringify(linkId)});
+      if (!link) return false;
+      link.click();
+      return true;
+    })()`)
+    return Boolean(result.success) && result.value === true
+  }
+
+  const dispatchRefreshShortcut = () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'r',
+      metaKey: window.electronAPI.platform === 'darwin',
+      ctrlKey: window.electronAPI.platform !== 'darwin'
+    }))
+  }
+
   const fixture = await window.electronAPI.project.readFile(ctx.rootPath, fixturePath)
   record('PHTML-00-fixture-exists', fixture.success, {
     path: fixturePath,
@@ -167,36 +260,36 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
   if (!assetsReady.ok || cancelled()) return results
 
   getApi()?.setMarkdownEditorVisible?.(false)
-  const forceRefreshVisibleWithoutEditor = await waitFor(
-    'phtml-force-refresh-visible-without-editor',
+  const navReloadVisibleWithoutEditor = await waitFor(
+    'phtml-nav-reload-visible-without-editor',
     () => {
       return Boolean(
         getApi()?.isMarkdownEditorVisible?.() === false &&
-        document.querySelector('.project-editor-html-force-refresh-btn') &&
+        document.querySelector('.project-editor-html-nav-reload-btn') &&
         getApi()?.isHtmlReaderVisible?.()
       )
     },
     5000,
     100
   )
-  record('PHTML-06-force-refresh-visible-without-editor', forceRefreshVisibleWithoutEditor, {
+  record('PHTML-06-nav-reload-visible-without-editor', navReloadVisibleWithoutEditor, {
     editorVisible: getApi()?.isMarkdownEditorVisible?.() ?? null,
-    hasButton: Boolean(document.querySelector('.project-editor-html-force-refresh-btn')),
-    buttonText: document.querySelector('.project-editor-html-force-refresh-btn')?.textContent?.trim() ?? null,
+    hasButton: Boolean(document.querySelector('.project-editor-html-nav-reload-btn')),
+    buttonText: document.querySelector('.project-editor-html-nav-reload-btn')?.textContent?.trim() ?? null,
     readerVisible: getApi()?.isHtmlReaderVisible?.() ?? false
   })
-  const forceRefreshButtonText = document.querySelector('.project-editor-html-force-refresh-btn')?.textContent?.trim() ?? ''
-  record('PHTML-06b-force-refresh-is-icon-only', forceRefreshButtonText === '', {
-    buttonText: forceRefreshButtonText
+  const navReloadButtonText = document.querySelector('.project-editor-html-nav-reload-btn')?.textContent?.trim() ?? ''
+  record('PHTML-06b-nav-reload-is-icon-only', navReloadButtonText === '', {
+    buttonText: navReloadButtonText
   })
-  const forceRefreshButtonTitle = document.querySelector('.project-editor-html-force-refresh-btn')?.getAttribute('title') ?? ''
+  const navReloadButtonTitle = document.querySelector('.project-editor-html-nav-reload-btn')?.getAttribute('title') ?? ''
   const expectedRefreshShortcut = window.electronAPI.platform === 'darwin' ? '⌘R' : 'Ctrl+R'
-  const forceRefreshShortcutTitleOk = forceRefreshButtonTitle.includes(expectedRefreshShortcut)
-  record('PHTML-06c-force-refresh-title-shows-shortcut', forceRefreshShortcutTitleOk, {
-    title: forceRefreshButtonTitle,
+  const navReloadShortcutTitleOk = navReloadButtonTitle.includes(expectedRefreshShortcut)
+  record('PHTML-06c-nav-reload-title-shows-shortcut', navReloadShortcutTitleOk, {
+    title: navReloadButtonTitle,
     expectedRefreshShortcut
   })
-  if (!forceRefreshVisibleWithoutEditor || forceRefreshButtonText !== '' || !forceRefreshShortcutTitleOk || cancelled()) return results
+  if (!navReloadVisibleWithoutEditor || navReloadButtonText !== '' || !navReloadShortcutTitleOk || cancelled()) return results
 
   getApi()?.setMarkdownEditorVisible?.(true)
   const editorRestored = await waitFor(
@@ -263,9 +356,9 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
   })
   if (!htmlSearchOpen || !htmlSearchFocusedOnOpen || !htmlSearchMatches || cancelled()) return results
 
-  document.querySelector<HTMLElement>('.project-editor-html-force-refresh-btn')?.focus()
+  document.querySelector<HTMLElement>('.project-editor-html-nav-reload-btn')?.focus()
   await sleep(120)
-  const focusMovedAway = document.activeElement?.classList.contains('project-editor-html-force-refresh-btn') === true
+  const focusMovedAway = document.activeElement?.classList.contains('project-editor-html-nav-reload-btn') === true
   apiForSearch?.setHtmlPreviewSearchOpen?.(true)
   const htmlSearchRefocused = await waitFor(
     'phtml-html-search-refocused-on-reopen',
@@ -428,37 +521,366 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
   if (!saveRerenderedAndRestored || cancelled()) return results
 
   const beforeShortcutReader = getApi()?.getHtmlReaderState?.() ?? null
-  document.dispatchEvent(new KeyboardEvent('keydown', {
-    bubbles: true,
-    cancelable: true,
-    key: 'r',
-    metaKey: window.electronAPI.platform === 'darwin',
-    ctrlKey: window.electronAPI.platform !== 'darwin'
-  }))
-  const reloadedByShortcut = await waitFor(
-    'phtml-html-refresh-shortcut',
-    () => {
-      const reader = getApi()?.getHtmlReaderState?.()
-      return Boolean(
-        beforeShortcutReader &&
-        reader &&
-        reader.reloadKey > beforeShortcutReader.reloadKey &&
-        reader.browserId !== beforeShortcutReader.browserId
-      )
-    },
-    15000,
-    100
+  const shortcutMutationInjected = await injectDomMutation(NAV_TEMP_MUTATION)
+  const shortcutMutationVisible = await waitForDocumentState(
+    'phtml-refresh-shortcut-mutation-visible',
+    (state) => Boolean(state.bodyText?.includes(NAV_TEMP_MUTATION)),
+    5000
   )
+  dispatchRefreshShortcut()
   const shortcutRendered = await waitForDocumentState(
     'phtml-refresh-shortcut-rendered',
-    (state) => state.title === expectedTitle && Boolean(state.bodyText?.includes(UPDATED_MARKER)),
+    (state) => state.title === expectedTitle &&
+      Boolean(state.bodyText?.includes(UPDATED_MARKER)) &&
+      !state.bodyText?.includes(NAV_TEMP_MUTATION),
     10000
   )
-  record('PHTML-16-html-preview-refresh-shortcut-reloads', Boolean(reloadedByShortcut && shortcutRendered.ok), {
+  const afterShortcutReader = getApi()?.getHtmlReaderState?.() ?? null
+  // Cmd/Ctrl+R is a hard reload of the current page IN PLACE: no remount, so
+  // browserId and reloadKey must both stay unchanged.
+  const shortcutReloadedInPlace = Boolean(
+    beforeShortcutReader &&
+    afterShortcutReader &&
+    afterShortcutReader.browserId === beforeShortcutReader.browserId &&
+    afterShortcutReader.reloadKey === beforeShortcutReader.reloadKey
+  )
+  record('PHTML-16-refresh-shortcut-hard-reloads-in-place', Boolean(
+    shortcutMutationInjected && shortcutMutationVisible.ok && shortcutRendered.ok && shortcutReloadedInPlace
+  ), {
+    shortcutMutationInjected,
+    mutationVisibleBeforeReload: shortcutMutationVisible.ok,
     beforeShortcutReader,
-    afterShortcutReader: getApi()?.getHtmlReaderState?.() ?? null,
+    afterShortcutReader,
     renderedTitle: shortcutRendered.state?.title ?? null,
     hasUpdatedMarker: Boolean(shortcutRendered.state?.bodyText?.includes(UPDATED_MARKER))
+  })
+  if (!shortcutMutationInjected || !shortcutRendered.ok || !shortcutReloadedInPlace || cancelled()) return results
+
+  const initialNav = await waitForNavState(
+    'phtml-nav-initial-state',
+    (state) => Boolean(state.browserId) &&
+      !state.backEnabled && !state.forwardEnabled && state.reloadEnabled && !state.homeEnabled
+  )
+  const navButtonsPresent = NAV_BUTTON_KINDS.every((kind) => Boolean(navButton(kind)))
+  const navButtonsIconOnly = NAV_BUTTON_KINDS.every((kind) => (navButton(kind)?.textContent?.trim() ?? 'missing') === '')
+  const navButtonsTitled = NAV_BUTTON_KINDS.every((kind) => Boolean(navButton(kind)?.getAttribute('title')))
+  const domMatchesInitial = initialNav.ok && initialNav.state ? domNavDisabledMatches(initialNav.state) : false
+  record('PHTML-17-nav-buttons-initial-state', Boolean(
+    initialNav.ok && navButtonsPresent && navButtonsIconOnly && navButtonsTitled && domMatchesInitial
+  ), {
+    navState: initialNav.state,
+    navButtonsPresent,
+    navButtonsIconOnly,
+    navButtonsTitled,
+    domMatchesInitial
+  })
+  if (!initialNav.ok || !navButtonsPresent || !domMatchesInitial || cancelled()) return results
+
+  const linkClicked = await clickPreviewLink('nav-second-link')
+  const secondRendered = await waitForDocumentState(
+    'phtml-nav-second-page-rendered',
+    (state) => state.title === SECOND_PAGE_TITLE && Boolean(state.bodyText?.includes(SECOND_PAGE_MARKER))
+  )
+  const navAfterLink = await waitForNavState(
+    'phtml-nav-after-link',
+    (state) => state.backEnabled && !state.forwardEnabled && state.homeEnabled
+  )
+  const domMatchesAfterLink = navAfterLink.ok && navAfterLink.state ? domNavDisabledMatches(navAfterLink.state) : false
+  record('PHTML-18-link-click-enables-back', Boolean(
+    linkClicked && secondRendered.ok && navAfterLink.ok && domMatchesAfterLink
+  ), {
+    linkClicked,
+    renderedTitle: secondRendered.state?.title ?? null,
+    navState: navAfterLink.state,
+    domMatchesAfterLink
+  })
+  if (!linkClicked || !secondRendered.ok || !navAfterLink.ok || cancelled()) return results
+
+  navButton('back')?.click()
+  const backRendered = await waitForDocumentState(
+    'phtml-nav-back-rendered',
+    (state) => state.title === expectedTitle && Boolean(state.bodyText?.includes(UPDATED_MARKER))
+  )
+  const navAfterBack = await waitForNavState(
+    'phtml-nav-after-back',
+    (state) => !state.backEnabled && state.forwardEnabled && !state.homeEnabled
+  )
+  record('PHTML-19-back-returns-to-opened-file', Boolean(backRendered.ok && navAfterBack.ok), {
+    renderedTitle: backRendered.state?.title ?? null,
+    navState: navAfterBack.state
+  })
+  if (!backRendered.ok || !navAfterBack.ok || cancelled()) return results
+
+  navButton('forward')?.click()
+  const forwardRendered = await waitForDocumentState(
+    'phtml-nav-forward-rendered',
+    (state) => state.title === SECOND_PAGE_TITLE && Boolean(state.bodyText?.includes(SECOND_PAGE_MARKER))
+  )
+  const navAfterForward = await waitForNavState(
+    'phtml-nav-after-forward',
+    (state) => state.backEnabled && !state.forwardEnabled && state.homeEnabled
+  )
+  record('PHTML-20-forward-re-enters-second-page', Boolean(forwardRendered.ok && navAfterForward.ok), {
+    renderedTitle: forwardRendered.state?.title ?? null,
+    navState: navAfterForward.state
+  })
+  if (!forwardRendered.ok || !navAfterForward.ok || cancelled()) return results
+
+  const beforeReloadReader = getApi()?.getHtmlReaderState?.() ?? null
+  const reloadMutationInjected = await injectDomMutation(NAV_TEMP_MUTATION)
+  const reloadMutationVisible = await waitForDocumentState(
+    'phtml-nav-reload-mutation-visible',
+    (state) => Boolean(state.bodyText?.includes(NAV_TEMP_MUTATION)),
+    5000
+  )
+  navButton('reload')?.click()
+  const reloadRendered = await waitForDocumentState(
+    'phtml-nav-reload-rendered',
+    (state) => state.title === SECOND_PAGE_TITLE &&
+      Boolean(state.bodyText?.includes(SECOND_PAGE_MARKER)) &&
+      !state.bodyText?.includes(NAV_TEMP_MUTATION)
+  )
+  const afterReloadReader = getApi()?.getHtmlReaderState?.() ?? null
+  const reloadInPlace = Boolean(
+    beforeReloadReader &&
+    afterReloadReader &&
+    afterReloadReader.browserId === beforeReloadReader.browserId &&
+    afterReloadReader.reloadKey === beforeReloadReader.reloadKey
+  )
+  record('PHTML-21-reload-discards-in-page-mutation', Boolean(
+    reloadMutationInjected && reloadMutationVisible.ok && reloadRendered.ok && reloadInPlace
+  ), {
+    reloadMutationInjected,
+    mutationVisibleBeforeReload: reloadMutationVisible.ok,
+    renderedTitle: reloadRendered.state?.title ?? null,
+    beforeReloadReader,
+    afterReloadReader
+  })
+  if (!reloadMutationInjected || !reloadRendered.ok || !reloadInPlace || cancelled()) return results
+
+  const beforeShortcutOnSecondReader = getApi()?.getHtmlReaderState?.() ?? null
+  const secondMutationInjected = await injectDomMutation(NAV_TEMP_MUTATION)
+  const secondMutationVisible = await waitForDocumentState(
+    'phtml-nav-shortcut-second-mutation-visible',
+    (state) => Boolean(state.bodyText?.includes(NAV_TEMP_MUTATION)),
+    5000
+  )
+  dispatchRefreshShortcut()
+  const shortcutOnSecondRendered = await waitForDocumentState(
+    'phtml-nav-shortcut-second-rendered',
+    (state) => state.title === SECOND_PAGE_TITLE &&
+      Boolean(state.bodyText?.includes(SECOND_PAGE_MARKER)) &&
+      !state.bodyText?.includes(NAV_TEMP_MUTATION)
+  )
+  const afterShortcutOnSecondReader = getApi()?.getHtmlReaderState?.() ?? null
+  // Locks the requirement: Cmd/Ctrl+R on a navigated-away page reloads THAT
+  // page and must NOT jump back to the opened file.
+  const shortcutOnSecondInPlace = Boolean(
+    beforeShortcutOnSecondReader &&
+    afterShortcutOnSecondReader &&
+    afterShortcutOnSecondReader.browserId === beforeShortcutOnSecondReader.browserId &&
+    afterShortcutOnSecondReader.reloadKey === beforeShortcutOnSecondReader.reloadKey
+  )
+  record('PHTML-21b-reload-shortcut-stays-on-navigated-page', Boolean(
+    secondMutationInjected && secondMutationVisible.ok && shortcutOnSecondRendered.ok && shortcutOnSecondInPlace
+  ), {
+    secondMutationInjected,
+    mutationVisibleBeforeReload: secondMutationVisible.ok,
+    renderedTitle: shortcutOnSecondRendered.state?.title ?? null,
+    beforeShortcutOnSecondReader,
+    afterShortcutOnSecondReader
+  })
+  if (!secondMutationInjected || !shortcutOnSecondRendered.ok || !shortcutOnSecondInPlace || cancelled()) return results
+
+  navButton('home')?.click()
+  const homeRendered = await waitForDocumentState(
+    'phtml-nav-home-rendered',
+    (state) => state.title === expectedTitle && Boolean(state.bodyText?.includes(UPDATED_MARKER))
+  )
+  const navAfterHome = await waitForNavState(
+    'phtml-nav-after-home',
+    (state) => state.backEnabled && !state.homeEnabled
+  )
+  record('PHTML-22-home-returns-and-pushes-history', Boolean(homeRendered.ok && navAfterHome.ok), {
+    renderedTitle: homeRendered.state?.title ?? null,
+    navState: navAfterHome.state
+  })
+  if (!homeRendered.ok || !navAfterHome.ok || cancelled()) return results
+
+  navButton('back')?.click()
+  const backToSecondRendered = await waitForDocumentState(
+    'phtml-nav-back-after-home-rendered',
+    (state) => state.title === SECOND_PAGE_TITLE && Boolean(state.bodyText?.includes(SECOND_PAGE_MARKER))
+  )
+  const navAfterBackFromHome = await waitForNavState(
+    'phtml-nav-after-back-from-home',
+    (state) => state.forwardEnabled && state.homeEnabled
+  )
+  record('PHTML-23-back-after-home-returns-to-second-page', Boolean(
+    backToSecondRendered.ok && navAfterBackFromHome.ok
+  ), {
+    renderedTitle: backToSecondRendered.state?.title ?? null,
+    navState: navAfterBackFromHome.state
+  })
+  if (!backToSecondRendered.ok || !navAfterBackFromHome.ok || cancelled()) return results
+
+  const beforeSaveNavReader = getApi()?.getHtmlReaderState?.() ?? null
+  const contentForRemount = getApi()?.getEditorContent?.() ?? ''
+  const remountChanged = contentForRemount.includes(UPDATED_MARKER)
+    ? getApi()?.setEditorContent?.(contentForRemount.replace(UPDATED_MARKER, SAVE_REMOUNT_MARKER)) === true
+    : false
+  const remountSaved = remountChanged ? (await getApi()?.triggerToolbarSave?.()) === true : false
+  const remounted = await waitForDocumentState(
+    'phtml-nav-save-remount',
+    (state) => {
+      const reader = getApi()?.getHtmlReaderState?.()
+      return Boolean(
+        state.bodyText?.includes(SAVE_REMOUNT_MARKER) &&
+        reader &&
+        beforeSaveNavReader &&
+        reader.browserId !== beforeSaveNavReader.browserId &&
+        reader.reloadKey > beforeSaveNavReader.reloadKey
+      )
+    },
+    15000
+  )
+  const navAfterRemount = await waitForNavState(
+    'phtml-nav-after-save-remount',
+    (state) => !state.backEnabled && !state.forwardEnabled && !state.homeEnabled && state.reloadEnabled
+  )
+  // Locks the v1 decision: saving the source while navigated away remounts the
+  // preview at the opened file and wipes the browsing history.
+  record('PHTML-24-save-remount-resets-nav-history', Boolean(
+    remountChanged && remountSaved && remounted.ok && navAfterRemount.ok
+  ), {
+    remountChanged,
+    remountSaved,
+    beforeSaveNavReader,
+    afterReader: getApi()?.getHtmlReaderState?.() ?? null,
+    navState: navAfterRemount.state
+  })
+  if (!remountChanged || !remountSaved || !remounted.ok || !navAfterRemount.ok || cancelled()) return results
+
+  const blockedClicked = await clickPreviewLink('nav-blocked-link')
+  await sleep(800)
+  const afterBlockedState = await getApi()?.getHtmlPreviewDocumentState?.()
+  const navAfterBlocked = getApi()?.getHtmlPreviewNavState?.() ?? null
+  record('PHTML-25-blocked-nav-keeps-state', Boolean(
+    blockedClicked &&
+    afterBlockedState?.success &&
+    afterBlockedState.bodyText?.includes(SAVE_REMOUNT_MARKER) &&
+    navAfterBlocked &&
+    !navAfterBlocked.backEnabled &&
+    !navAfterBlocked.forwardEnabled &&
+    !navAfterBlocked.homeEnabled
+  ), {
+    blockedClicked,
+    hasHomeMarker: Boolean(afterBlockedState?.bodyText?.includes(SAVE_REMOUNT_MARKER)),
+    navState: navAfterBlocked
+  })
+  if (!blockedClicked || cancelled()) return results
+
+  // ADV-12: save while navigated away must NOT transplant the foreign page's
+  // scroll offset onto the remounted home document — home renders from the top.
+  const scrollGuardLinkClicked = await clickPreviewLink('nav-second-link')
+  const scrollGuardSecondRendered = await waitForDocumentState(
+    'phtml-scroll-guard-second-rendered',
+    (state) => state.title === SECOND_PAGE_TITLE && Boolean(state.bodyText?.includes(SECOND_PAGE_MARKER))
+  )
+  await getApi()?.setHtmlPreviewScrollForTest?.(900)
+  const secondScrolled = await waitForDocumentState(
+    'phtml-scroll-guard-second-scrolled',
+    (state) => (state.scrollY ?? 0) >= 600,
+    5000
+  )
+  const beforeScrollGuardReader = getApi()?.getHtmlReaderState?.() ?? null
+  const scrollGuardContent = getApi()?.getEditorContent?.() ?? ''
+  const scrollGuardChanged = scrollGuardContent.includes(SAVE_REMOUNT_MARKER)
+    ? getApi()?.setEditorContent?.(scrollGuardContent.replace(SAVE_REMOUNT_MARKER, SCROLL_GUARD_MARKER)) === true
+    : false
+  const scrollGuardSaved = scrollGuardChanged ? (await getApi()?.triggerToolbarSave?.()) === true : false
+  const scrollGuardRemounted = await waitForDocumentState(
+    'phtml-scroll-guard-remounted-home',
+    (state) => {
+      const reader = getApi()?.getHtmlReaderState?.()
+      return Boolean(
+        state.title === expectedTitle &&
+        state.bodyText?.includes(SCROLL_GUARD_MARKER) &&
+        reader && beforeScrollGuardReader && reader.browserId !== beforeScrollGuardReader.browserId
+      )
+    },
+    15000
+  )
+  // Give any (buggy) scroll-restore path its ~50ms + settle window to act.
+  await sleep(600)
+  const homeScrollState = await getApi()?.getHtmlPreviewDocumentState?.()
+  const homeAtTop = (homeScrollState?.scrollY ?? 0) < 150
+  record('PHTML-26-save-while-navigated-does-not-transplant-scroll', Boolean(
+    scrollGuardLinkClicked && scrollGuardSecondRendered.ok && secondScrolled.ok &&
+    scrollGuardChanged && scrollGuardSaved && scrollGuardRemounted.ok && homeAtTop
+  ), {
+    secondScrolledY: secondScrolled.state?.scrollY ?? null,
+    homeScrollY: homeScrollState?.scrollY ?? null,
+    homeAtTop
+  })
+  if (!scrollGuardRemounted.ok || cancelled()) return results
+
+  // ADV-21: rapid successive Reload clicks are idempotent — a hard reload in
+  // place, no remount, no accumulated state.
+  const beforeRapidReader = getApi()?.getHtmlReaderState?.() ?? null
+  navButton('reload')?.click()
+  navButton('reload')?.click()
+  navButton('reload')?.click()
+  const rapidReloadRendered = await waitForDocumentState(
+    'phtml-rapid-reload-rendered',
+    (state) => state.title === expectedTitle && Boolean(state.bodyText?.includes(SCROLL_GUARD_MARKER))
+  )
+  const afterRapidReader = getApi()?.getHtmlReaderState?.() ?? null
+  const rapidReloadInPlace = Boolean(
+    beforeRapidReader && afterRapidReader &&
+    afterRapidReader.browserId === beforeRapidReader.browserId &&
+    afterRapidReader.reloadKey === beforeRapidReader.reloadKey
+  )
+  record('PHTML-27-rapid-reload-clicks-are-idempotent', Boolean(rapidReloadRendered.ok && rapidReloadInPlace), {
+    beforeRapidReader,
+    afterRapidReader,
+    renderedTitle: rapidReloadRendered.state?.title ?? null
+  })
+  if (cancelled()) return results
+
+  // ADV-04: a subframe (iframe) in-page navigation must NOT hijack the top-level
+  // URL / nav state — Home stays disabled because the TOP document is still home.
+  await openFileInEditor(IFRAME_HOST_FIXTURE_PATH)
+  const iframeOpened = await waitFor(
+    'phtml-iframe-host-open',
+    () => getApi()?.getActiveFilePath?.() === IFRAME_HOST_FIXTURE_PATH &&
+      Boolean(getApi()?.isHtmlReaderVisible?.() && getApi()?.getHtmlReaderState?.()?.browserId),
+    10000,
+    100
+  )
+  const iframeHostRendered = await waitForDocumentState(
+    'phtml-iframe-host-rendered',
+    (state) => state.title === IFRAME_HOST_TITLE && Boolean(state.bodyText?.includes(IFRAME_HOST_MARKER))
+  )
+  // Let the child frame load and run its in-page pushState/hash navigation.
+  await sleep(1200)
+  const navAfterIframe = getApi()?.getHtmlPreviewNavState?.() ?? null
+  const topDocState = await getApi()?.getHtmlPreviewDocumentState?.()
+  const topStillHost = topDocState?.title === IFRAME_HOST_TITLE && Boolean(topDocState?.bodyText?.includes(IFRAME_HOST_MARKER))
+  // The precise ADV-04 signal: the top-level url still points at the host doc, so
+  // Home stays disabled (top doc IS home). If the subframe's pushState/hash had
+  // leaked into state.url, isSameHtmlPreviewDocument(child, host) would be false
+  // and Home would wrongly light up.
+  const urlStillHost = Boolean(navAfterIframe?.url?.includes('nav-iframe-host')) &&
+    !navAfterIframe?.url?.includes('child')
+  record('PHTML-28-subframe-nav-does-not-hijack-top-state', Boolean(
+    iframeOpened && iframeHostRendered.ok && topStillHost &&
+    navAfterIframe && !navAfterIframe.homeEnabled && urlStillHost
+  ), {
+    iframeOpened,
+    topStillHost,
+    urlStillHost,
+    navState: navAfterIframe
   })
 
   // ── HTML scroll persistence (FileViewMemory.htmlScrollX/Y) ──

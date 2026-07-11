@@ -242,6 +242,7 @@ export const PERF_TRACE_EVENT = {
   RENDERER_PROJECT_HTML_PREVIEW_RELOAD: 'renderer:project.html-preview-reload',
   RENDERER_PROJECT_HTML_PREVIEW_SEARCH: 'renderer:project.html-preview-search',
   RENDERER_PROJECT_HTML_PREVIEW_ZOOM: 'renderer:project.html-preview-zoom',
+  RENDERER_PROJECT_HTML_PREVIEW_NAV: 'renderer:project.html-preview-nav',
   RENDERER_PROJECT_FILE_BROWSER_COLLAPSE: 'renderer:project.file-browser-collapse',
   RENDERER_PROJECT_EDITOR_REOPEN_RESTORE: 'renderer:project.editor-reopen-restore',
   RENDERER_PROJECT_SUBPAGE_NAVIGATE: 'renderer:project.subpage-navigate',

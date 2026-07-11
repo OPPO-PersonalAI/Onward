@@ -17,6 +17,8 @@ export type HtmlReaderState = {
   isLoading: boolean
   loadCount: number
   reloadKey: number
+  canGoBack: boolean
+  canGoForward: boolean
   error: string | null
 }
 
@@ -119,6 +121,8 @@ export function HtmlReader({
       isLoading: true,
       loadCount: 0,
       reloadKey,
+      canGoBack: false,
+      canGoForward: false,
       error: null
     }
     stateRef.current = initialState
@@ -132,6 +136,13 @@ export function HtmlReader({
         return
       }
       updateState({ ready: true })
+      // Seed nav state once; onNavStateChanged keeps it fresh afterwards.
+      void window.electronAPI.browser.getNavState(id).then((nav) => {
+        if (browserIdRef.current !== id || !nav) return
+        updateState({ canGoBack: nav.canGoBack, canGoForward: nav.canGoForward })
+      }).catch(() => {
+        // Nav state stays at its safe default (both disabled) on failure.
+      })
       requestAnimationFrame(() => {
         syncBounds()
         requestAnimationFrame(syncBounds)
@@ -203,6 +214,10 @@ export function HtmlReader({
         }
       }
     })
+    const unsubNav = window.electronAPI.browser.onNavStateChanged((id, navState) => {
+      if (id !== browserIdRef.current) return
+      updateState({ canGoBack: navState.canGoBack, canGoForward: navState.canGoForward })
+    })
     const unsubEscape = window.electronAPI.browser.onEscapePressed((id) => {
       if (id !== browserIdRef.current) return
       onEscape()
@@ -212,6 +227,7 @@ export function HtmlReader({
       unsubUrl()
       unsubTitle()
       unsubLoading()
+      unsubNav()
       unsubEscape()
     }
   }, [onEscape, updateState])

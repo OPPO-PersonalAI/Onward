@@ -64,12 +64,14 @@ import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } 
 import { usePathCopy } from '../../hooks/usePathCopy'
 import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
 import {
+  deriveHtmlPreviewNavButtonState,
   formatHtmlPreviewZoomPercent,
   HTML_PREVIEW_DEFAULT_ZOOM_FACTOR,
   HTML_PREVIEW_MAX_ZOOM_FACTOR,
   HTML_PREVIEW_MIN_ZOOM_FACTOR,
   isHtmlPreviewRefreshShortcut,
   isHtmlPath,
+  isSameHtmlPreviewDocument,
   normalizeHtmlPreviewScrollState,
   normalizeHtmlPreviewZoomFactor,
   stepHtmlPreviewZoomFactor,
@@ -1228,16 +1230,25 @@ export function ProjectEditor({
     htmlPreviewScrollStateRef.current = state
     setHtmlPreviewScrollState(state)
   }, [])
-  const requestHtmlPreviewReload = useCallback(async (reason: 'save' | 'external-change' | 'manual-refresh' = 'manual-refresh') => {
+  const requestHtmlPreviewReload = useCallback(async (reason: 'save' | 'external-change') => {
     const targetPath = activeFilePathRef.current
     if (!targetPath || !isHtmlPath(targetPath) || !htmlPreviewUrlRef.current) return
-    const browserId = htmlReaderStateRef.current?.browserId
-    if (browserId) {
+    const reader = htmlReaderStateRef.current
+    const browserId = reader?.browserId
+    // Only preserve scroll when the live view is still on the originally opened
+    // document. If the user navigated away via a link, capturing here would
+    // transplant the foreign page's offset onto the freshly remounted home
+    // document; instead let the home document render from the top.
+    const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
+    const onHomeDocument = isSameHtmlPreviewDocument(reader?.url ?? null, homeUrl)
+    if (browserId && onHomeDocument) {
       const scrollResult = await window.electronAPI.browser.getScrollState(browserId)
       if (activeFilePathRef.current !== targetPath) return
       updateHtmlPreviewScrollState(scrollResult.success
         ? normalizeHtmlPreviewScrollState(scrollResult.state)
         : null)
+    } else {
+      updateHtmlPreviewScrollState(null)
     }
     const nextKey = Date.now()
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_RELOAD, {
@@ -1250,6 +1261,41 @@ export function ProjectEditor({
     setHtmlPreviewReloadKey(nextKey)
     updateHtmlReaderState(null)
   }, [updateHtmlPreviewScrollState, updateHtmlReaderState])
+  const handleHtmlPreviewNav = useCallback(async (
+    action: 'back' | 'forward' | 'reload' | 'home',
+    source: 'toolbar' | 'shortcut' = 'toolbar'
+  ): Promise<boolean> => {
+    const reader = htmlReaderStateRef.current
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_NAV, {
+      action,
+      source,
+      hasBrowser: Boolean(reader?.browserId),
+      canGoBack: reader?.canGoBack ?? false,
+      canGoForward: reader?.canGoForward ?? false
+    })
+    const browserId = reader?.browserId
+    if (!browserId) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_NAV, { action, source, rejected: 'no-browser' })
+      return false
+    }
+    let ok = false
+    if (action === 'back') {
+      ok = await window.electronAPI.browser.goBack(browserId)
+    } else if (action === 'forward') {
+      ok = await window.electronAPI.browser.goForward(browserId)
+    } else if (action === 'reload') {
+      // Hard reload: inherits the removed force-refresh button's guarantee of
+      // fresh disk content (CSS/JS subresources included).
+      ok = await window.electronAPI.browser.reload(browserId, { ignoreCache: true })
+    } else {
+      const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
+      ok = homeUrl ? await window.electronAPI.browser.navigate(browserId, homeUrl) : false
+    }
+    if (!ok) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_NAV, { action, source, rejected: 'ipc-false' })
+    }
+    return ok
+  }, [])
   const updateHtmlPreviewSearchResult = useCallback((result: HtmlPreviewSearchResult) => {
     htmlPreviewSearchResultRef.current = result
     setHtmlPreviewSearchResult(result)
@@ -2237,6 +2283,13 @@ export function ProjectEditor({
   }, [htmlPreviewReloadKey, htmlPreviewUrl, isHtmlPreviewVisible])
   const htmlPreviewZoomPercent = useMemo(() => formatHtmlPreviewZoomPercent(htmlPreviewZoomFactor), [htmlPreviewZoomFactor])
   const htmlPreviewRefreshShortcutLabel = window.electronAPI.platform === 'darwin' ? '⌘R' : 'Ctrl+R'
+  const htmlPreviewNav = useMemo(() => deriveHtmlPreviewNavButtonState({
+    ready: Boolean(htmlReaderState?.ready && !htmlReaderState.error),
+    canGoBack: htmlReaderState?.canGoBack ?? false,
+    canGoForward: htmlReaderState?.canGoForward ?? false,
+    currentUrl: htmlReaderState?.url ?? null,
+    homeUrl: htmlPreviewUrlWithReload
+  }), [htmlPreviewUrlWithReload, htmlReaderState])
   const isMarkdownRenderAllowed = isMarkdownPreviewVisible && isMarkdownRenderEnabled
   const isMarkdownWorkerActive = isOpen && isMarkdownRenderAllowed
   const isPreviewContentVisible =
@@ -3749,10 +3802,10 @@ export function ProjectEditor({
   useEffect(() => {
     const unsubscribe = window.electronAPI.browser.onReloadShortcutPressed((id) => {
       if (id !== htmlReaderStateRef.current?.browserId) return
-      void requestHtmlPreviewReload('manual-refresh')
+      void handleHtmlPreviewNav('reload', 'shortcut')
     })
     return unsubscribe
-  }, [requestHtmlPreviewReload])
+  }, [handleHtmlPreviewNav])
 
   useEffect(() => {
     const unsubscribe = window.electronAPI.browser.onZoomFactorChanged((id, zoomFactor, source) => {
@@ -8438,8 +8491,29 @@ export function ProjectEditor({
           isLoading: state.isLoading,
           loadCount: state.loadCount,
           reloadKey: state.reloadKey,
+          canGoBack: state.canGoBack,
+          canGoForward: state.canGoForward,
           error: state.error,
           preservedScrollState: htmlPreviewScrollStateRef.current
+        }
+      },
+      getHtmlPreviewNavState: () => {
+        if (!activeFilePathRef.current || !isHtmlRef.current) return null
+        const state = htmlReaderStateRef.current
+        const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
+        return {
+          browserId: state?.browserId ?? null,
+          url: state?.url ?? null,
+          homeUrl,
+          canGoBack: state?.canGoBack ?? false,
+          canGoForward: state?.canGoForward ?? false,
+          ...deriveHtmlPreviewNavButtonState({
+            ready: Boolean(state?.ready && !state.error),
+            canGoBack: state?.canGoBack ?? false,
+            canGoForward: state?.canGoForward ?? false,
+            currentUrl: state?.url ?? null,
+            homeUrl
+          })
         }
       },
       getHtmlPreviewDocumentState: async () => {
@@ -9307,7 +9381,7 @@ export function ProjectEditor({
       if (isHtmlPreviewVisible && isHtmlPreviewRefreshShortcut(event)) {
         event.preventDefault()
         event.stopPropagation()
-        void requestHtmlPreviewReload('manual-refresh')
+        void handleHtmlPreviewNav('reload', 'shortcut')
         return
       }
 
@@ -9355,7 +9429,7 @@ export function ProjectEditor({
 
     document.addEventListener('keydown', handleKeyDown, true)
     return () => document.removeEventListener('keydown', handleKeyDown, true)
-  }, [dialog, handleOpenSearch, isHtmlPreviewVisible, isMarkdownPreviewVisible, isOpen, openHtmlPreviewSearch, openPreviewSearch, requestHtmlPreviewReload, searchOpen, setFileBrowserCollapsedState, stepHtmlPreviewZoom])
+  }, [dialog, handleHtmlPreviewNav, handleOpenSearch, isHtmlPreviewVisible, isMarkdownPreviewVisible, isOpen, openHtmlPreviewSearch, openPreviewSearch, searchOpen, setFileBrowserCollapsedState, stepHtmlPreviewZoom])
 
   useSubpageEscape({ isOpen, onEscape: handleEscape })
 
@@ -10934,7 +11008,65 @@ export function ProjectEditor({
                           </div>
                           <div className="project-editor-html-preview-actions">
                             <div
+                              className="project-editor-html-nav-controls"
+                              role="group"
+                              aria-label={t('projectEditor.htmlPreviewNavControls')}
+                            >
+                              <button
+                                type="button"
+                                className="project-editor-preview-refresh-btn project-editor-html-nav-btn project-editor-html-nav-back-btn"
+                                title={t('projectEditor.htmlPreviewBack')}
+                                aria-label={t('projectEditor.htmlPreviewBack')}
+                                disabled={!htmlPreviewNav.backEnabled}
+                                onClick={() => void handleHtmlPreviewNav('back')}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                  <path fillRule="evenodd" d="M11.354 1.646a.5.5 0 0 1 0 .708L5.707 8l5.647 5.646a.5.5 0 0 1-.708.708l-6-6a.5.5 0 0 1 0-.708l6-6a.5.5 0 0 1 .708 0z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                className="project-editor-preview-refresh-btn project-editor-html-nav-btn project-editor-html-nav-forward-btn"
+                                title={t('projectEditor.htmlPreviewForward')}
+                                aria-label={t('projectEditor.htmlPreviewForward')}
+                                disabled={!htmlPreviewNav.forwardEnabled}
+                                onClick={() => void handleHtmlPreviewNav('forward')}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                  <path fillRule="evenodd" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                className="project-editor-preview-refresh-btn project-editor-html-nav-btn project-editor-html-nav-reload-btn"
+                                title={t('projectEditor.htmlPreviewReloadShortcut', {
+                                  key: htmlPreviewRefreshShortcutLabel
+                                })}
+                                aria-label={t('projectEditor.htmlPreviewReload')}
+                                disabled={!htmlPreviewNav.reloadEnabled}
+                                onClick={() => void handleHtmlPreviewNav('reload')}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                  <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-7.068 2H.534a.25.25 0 0 0-.192.41l1.966 2.36a.25.25 0 0 0 .384 0l1.966-2.36A.25.25 0 0 0 4.466 9z" />
+                                  <path d="M8 3a5 5 0 0 1 4.546 2.914.5.5 0 1 0 .908-.428A6 6 0 0 0 2.11 5.84L1.58 4.39A.5.5 0 0 0 .64 4.61l1.2 3.6a.5.5 0 0 0 .638.316l3.6-1.2a.5.5 0 1 0-.316-.948L3.9 7.077A5 5 0 0 1 8 3zm6.42 5.39a.5.5 0 0 0-.638-.316l-3.6 1.2a.5.5 0 1 0 .316.948l1.862-.62A5 5 0 0 1 8 13a5 5 0 0 1-4.546-2.914.5.5 0 0 0-.908.428A6 6 0 0 0 13.89 10.16l.53 1.45a.5.5 0 1 0 .94-.22l-1.2-3.6a.5.5 0 0 0-.26-.28z" />
+                                </svg>
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              className="project-editor-preview-refresh-btn project-editor-html-nav-btn project-editor-html-nav-home-btn"
+                              title={t('projectEditor.htmlPreviewHome')}
+                              aria-label={t('projectEditor.htmlPreviewHome')}
+                              disabled={!htmlPreviewNav.homeEnabled}
+                              onClick={() => void handleHtmlPreviewNav('home')}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M8 1.5 14.5 7.42l-1.02 1.16-.98-.86V13.5a1 1 0 0 1-1 1H9.25V10.5h-2.5v4H4.5a1 1 0 0 1-1-1V7.72l-.98.86L1.5 7.42 8 1.5Z" />
+                              </svg>
+                            </button>
+                            <div
                               className="project-editor-html-zoom-controls"
+                              role="group"
                               aria-label={t('projectEditor.htmlPreviewZoomControls')}
                             >
                               <button
@@ -10992,19 +11124,6 @@ export function ProjectEditor({
                             >
                               <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                                 <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l2.956 2.956a1 1 0 0 0 1.415-1.414l-2.974-2.94ZM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0Z" />
-                              </svg>
-                            </button>
-                            <button
-                              type="button"
-                              className="project-editor-preview-refresh-btn project-editor-html-force-refresh-btn"
-                              title={t('projectEditor.forceRefreshPreviewShortcut', {
-                                key: htmlPreviewRefreshShortcutLabel
-                              })}
-                              aria-label={t('projectEditor.forceRefreshPreview')}
-                              onClick={() => void requestHtmlPreviewReload('manual-refresh')}
-                            >
-                              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                                <path d="M13.65 2.35a8 8 0 1 0 1.77 5.15.75.75 0 0 0-1.5-.1 6.5 6.5 0 1 1-1.45-4.15H10.5a.75.75 0 0 0 0 1.5h4a.75.75 0 0 0 .75-.75v-4a.75.75 0 0 0-1.5 0v2.15l-.1.1Z" />
                               </svg>
                             </button>
                           </div>

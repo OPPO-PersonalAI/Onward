@@ -1373,7 +1373,7 @@ export interface BrowserAPI {
   navigate: (id: string, url: string) => Promise<boolean>
   goBack: (id: string) => Promise<boolean>
   goForward: (id: string) => Promise<boolean>
-  reload: (id: string) => Promise<boolean>
+  reload: (id: string, options?: { ignoreCache?: boolean }) => Promise<boolean>
   stop: (id: string) => Promise<boolean>
   setBounds: (id: string, rect: { x: number; y: number; width: number; height: number }) => Promise<boolean>
   show: (id: string) => Promise<boolean>
@@ -2325,8 +2325,8 @@ const browserAPI: BrowserAPI = {
   goForward: (id: string) => {
     return ipcRenderer.invoke(IPC.BROWSER_GO_FORWARD, id)
   },
-  reload: (id: string) => {
-    return ipcRenderer.invoke(IPC.BROWSER_RELOAD, id)
+  reload: (id: string, options?: { ignoreCache?: boolean }) => {
+    return ipcRenderer.invoke(IPC.BROWSER_RELOAD, id, options)
   },
   stop: (id: string) => {
     return ipcRenderer.invoke(IPC.BROWSER_STOP, id)

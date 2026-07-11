@@ -1488,6 +1488,19 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
   min-width: 0;
 }
 
+/*
+ * The actions row (nav + zoom + search) is flex-shrink:0, so on a narrow preview
+ * pane (down to the 240px splitter clamp) the title must yield first: truncate it
+ * with an ellipsis instead of wrapping the header or overflowing the row. Works in
+ * every supported language regardless of the translated title length.
+ */
+.project-editor-preview-header-main > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
 .project-editor-preview-pending {
   color: var(--text-4);
 }
@@ -1523,6 +1536,22 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
   margin-left: 0;
 }
 
+.project-editor-html-nav-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.project-editor-html-nav-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.project-editor-html-nav-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-3);
+}
+
 .project-editor-html-zoom-controls {
   display: inline-flex;
   align-items: center;
@@ -1554,10 +1583,6 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
 .project-editor-html-zoom-level-btn:hover {
   background-color: color-mix(in srgb, var(--accent) 15%, transparent);
   color: var(--text-1);
-}
-
-.project-editor-html-force-refresh-btn {
-  margin-left: 0;
 }
 
 .project-editor-preview-body {

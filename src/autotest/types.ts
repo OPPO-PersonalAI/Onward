@@ -520,6 +520,8 @@ export interface ProjectEditorDebugApi {
     isLoading: boolean
     loadCount: number
     reloadKey: number
+    canGoBack: boolean
+    canGoForward: boolean
     error: string | null
     preservedScrollState?: {
       x: number
@@ -529,6 +531,17 @@ export interface ProjectEditorDebugApi {
       clientWidth: number
       clientHeight: number
     } | null
+  } | null
+  getHtmlPreviewNavState?: () => {
+    browserId: string | null
+    url: string | null
+    homeUrl: string | null
+    canGoBack: boolean
+    canGoForward: boolean
+    backEnabled: boolean
+    forwardEnabled: boolean
+    reloadEnabled: boolean
+    homeEnabled: boolean
   } | null
   getHtmlPreviewDocumentState?: () => Promise<{
     success: boolean

@@ -1608,8 +1608,8 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return browserViewManager.goForward(id)
   })
 
-  ipcMain.handle(IPC.BROWSER_RELOAD, (_, id: string) => {
-    return browserViewManager.reload(id)
+  ipcMain.handle(IPC.BROWSER_RELOAD, (_, id: string, options?: { ignoreCache?: boolean }) => {
+    return browserViewManager.reload(id, options)
   })
 
   ipcMain.handle(IPC.BROWSER_STOP, (_, id: string) => {

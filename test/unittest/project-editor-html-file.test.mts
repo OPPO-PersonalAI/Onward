@@ -7,10 +7,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  deriveHtmlPreviewNavButtonState,
   formatHtmlPreviewZoomPercent,
   getHtmlFileExtension,
   isHtmlPreviewRefreshShortcut,
   isHtmlPath,
+  isSameHtmlPreviewDocument,
+  normalizeHtmlPreviewDocumentUrl,
   normalizeHtmlPreviewScrollState,
   normalizeHtmlPreviewZoomFactor,
   stepHtmlPreviewZoomFactor,
@@ -108,4 +111,125 @@ test('PEHTML-U-10 detects browser-aligned HTML preview refresh shortcuts', () =>
   assert.equal(isHtmlPreviewRefreshShortcut({ key: 'r', ctrlKey: true, altKey: true }), false)
   assert.equal(isHtmlPreviewRefreshShortcut({ key: 'r' }), false)
   assert.equal(isHtmlPreviewRefreshShortcut({ key: 'f', metaKey: true }), false)
+})
+
+test('PEHTML-U-11 same document regardless of transient query params', () => {
+  assert.equal(isSameHtmlPreviewDocument(
+    'file:///p/a.html?mtime=1&onwardHtmlReload=5',
+    'file:///p/a.html?mtime=999&onwardHtmlReload=0'
+  ), true)
+  assert.equal(isSameHtmlPreviewDocument(
+    'file:///p/a.html?onwardHtmlReload=5',
+    'file:///p/a.html'
+  ), true)
+})
+
+test('PEHTML-U-12 different paths and POSIX case differences are different documents', () => {
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html?mtime=1', 'file:///p/b.html?mtime=1'), false)
+  assert.equal(isSameHtmlPreviewDocument('file:///tmp/A.html', 'file:///tmp/a.html'), false)
+})
+
+test('PEHTML-U-13 hash counts as a different location', () => {
+  // An in-page anchor click pushes a history entry and enables Back, so Home
+  // must stay enabled (i.e. #hash is treated as navigated away from home).
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html?mtime=1#section', 'file:///p/a.html?mtime=2'), false)
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html#s', 'file:///p/a.html#s'), true)
+})
+
+test('PEHTML-U-14 windows drive letter case is insensitive', () => {
+  assert.equal(isSameHtmlPreviewDocument(
+    'file:///C:/Proj/a.html?mtime=1',
+    'file:///c:/Proj/a.html?onwardHtmlReload=2'
+  ), true)
+  assert.equal(isSameHtmlPreviewDocument('file:///C:/Proj/a.html', 'file:///c:/proj/a.html'), false)
+})
+
+test('PEHTML-U-15 encoded path characters compare decoded and malformed escapes never throw', () => {
+  assert.equal(isSameHtmlPreviewDocument('file:///tmp/my%20page.html?mtime=1', 'file:///tmp/my page.html'), true)
+  assert.equal(isSameHtmlPreviewDocument('file:///tmp/%E4%B8%AD.html', 'file:///tmp/中.html'), true)
+  assert.doesNotThrow(() => normalizeHtmlPreviewDocumentUrl('file:///tmp/bad%zz.html'))
+  assert.equal(isSameHtmlPreviewDocument('file:///tmp/bad%zz.html', 'file:///tmp/bad%zz.html'), true)
+})
+
+test('PEHTML-U-16 null, empty, and unparseable inputs normalize to null and never match', () => {
+  assert.equal(normalizeHtmlPreviewDocumentUrl(null), null)
+  assert.equal(normalizeHtmlPreviewDocumentUrl(undefined), null)
+  assert.equal(normalizeHtmlPreviewDocumentUrl(''), null)
+  assert.equal(normalizeHtmlPreviewDocumentUrl('not a url at all'), null)
+  assert.equal(isSameHtmlPreviewDocument(null, 'file:///p/a.html'), false)
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html', null), false)
+  assert.equal(isSameHtmlPreviewDocument(null, null), false)
+})
+
+test('PEHTML-U-17 real query params are preserved and order-insensitive', () => {
+  assert.equal(isSameHtmlPreviewDocument(
+    'file:///p/a.html?x=1&y=2&mtime=3',
+    'file:///p/a.html?y=2&x=1'
+  ), true)
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html?x=1', 'file:///p/a.html?x=2'), false)
+})
+
+test('PEHTML-U-18 derives nav button state', () => {
+  const atHome = {
+    ready: true,
+    canGoBack: false,
+    canGoForward: false,
+    currentUrl: 'file:///p/a.html?mtime=1&onwardHtmlReload=2',
+    homeUrl: 'file:///p/a.html?mtime=9&onwardHtmlReload=0'
+  }
+  assert.deepEqual(deriveHtmlPreviewNavButtonState(atHome), {
+    backEnabled: false,
+    forwardEnabled: false,
+    reloadEnabled: true,
+    homeEnabled: false
+  })
+  assert.deepEqual(deriveHtmlPreviewNavButtonState({ ...atHome, ready: false }), {
+    backEnabled: false,
+    forwardEnabled: false,
+    reloadEnabled: false,
+    homeEnabled: false
+  })
+  assert.deepEqual(deriveHtmlPreviewNavButtonState({
+    ...atHome,
+    canGoBack: true,
+    canGoForward: true,
+    currentUrl: 'file:///p/other.html'
+  }), {
+    backEnabled: true,
+    forwardEnabled: true,
+    reloadEnabled: true,
+    homeEnabled: true
+  })
+  assert.deepEqual(deriveHtmlPreviewNavButtonState({ ...atHome, canGoBack: true, homeUrl: null }), {
+    backEnabled: true,
+    forwardEnabled: false,
+    reloadEnabled: true,
+    homeEnabled: false
+  })
+})
+
+test('PEHTML-U-19 a decoded delimiter in a filename never collides with a structural hash/query', () => {
+  // A file literally named 'a.html#sec' (URL 'a.html%23sec') is a DIFFERENT
+  // document from 'a.html' viewed at the '#sec' anchor. Same for '?'.
+  assert.equal(isSameHtmlPreviewDocument('file:///tmp/a.html%23sec', 'file:///tmp/a.html#sec'), false)
+  assert.equal(isSameHtmlPreviewDocument('file:///tmp/a.html%3Fx=1', 'file:///tmp/a.html?x=1'), false)
+  // ...but a file named 'a.html#sec' still equals itself across transient params.
+  assert.equal(isSameHtmlPreviewDocument('file:///tmp/a.html%23sec?mtime=1', 'file:///tmp/a.html%23sec?mtime=2'), true)
+})
+
+test('PEHTML-U-20 duplicated query keys are handled deterministically', () => {
+  // Transient keys are deleted even when repeated.
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html?mtime=1&mtime=2&x=9', 'file:///p/a.html?x=9'), true)
+  // Repeated real keys keep their value order, so a re-ordered pair differs.
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html?x=1&x=2', 'file:///p/a.html?x=1&x=2'), true)
+  assert.equal(isSameHtmlPreviewDocument('file:///p/a.html?x=1&x=2', 'file:///p/a.html?x=2&x=1'), false)
+})
+
+test('PEHTML-U-21 pathological URLs normalize without throwing', () => {
+  const longUrl = 'file:///tmp/' + 'x'.repeat(9000) + '.html?' +
+    Array.from({ length: 400 }, (_, i) => `k${i}=1`).join('&')
+  assert.doesNotThrow(() => normalizeHtmlPreviewDocumentUrl(longUrl))
+  assert.equal(typeof normalizeHtmlPreviewDocumentUrl(longUrl), 'string')
+  assert.equal(isSameHtmlPreviewDocument(longUrl, longUrl), true)
+  assert.equal(isSameHtmlPreviewDocument(longUrl, 'file:///tmp/a.html'), false)
 })

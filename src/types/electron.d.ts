@@ -1150,7 +1150,7 @@ export interface BrowserAPI {
   navigate: (id: string, url: string) => Promise<boolean>
   goBack: (id: string) => Promise<boolean>
   goForward: (id: string) => Promise<boolean>
-  reload: (id: string) => Promise<boolean>
+  reload: (id: string, options?: { ignoreCache?: boolean }) => Promise<boolean>
   stop: (id: string) => Promise<boolean>
   setBounds: (id: string, rect: { x: number; y: number; width: number; height: number }) => Promise<boolean>
   show: (id: string) => Promise<boolean>
