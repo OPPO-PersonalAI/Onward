@@ -1,0 +1,12 @@
+<h1>Onward Daily Build v2.1.0-daily.20260711.1</h1>
+<p>Changes since <code>v2.1.0-daily.20260629.1</code>.</p>
+<h2>Bug Fixes</h2>
+<ul>
+<li>Git History: Branch, remote, and tag labels now refresh right after a <code>git push</code> that advances a remote without moving HEAD, fixing the &quot;phantom fork&quot; where a remote branch appeared several commits behind its local branch.</li>
+<li>Git Diff: Opening the diff on Windows with endpoint-security software no longer shows a long spinner (up to ~16s). File rows now appear immediately while their details load in the background.</li>
+<li>Git Diff: The file list and terminal Git status now update reliably after a commit or <code>git init</code>, even when the file watcher misses changes to the <code>.git</code> folder.</li>
+<li>Git Diff: Fixed a case where the diff could keep showing the previous file contents after an edit. Cached content is now re-validated on read, so a change the watcher missed can no longer serve a stale diff.</li>
+<li>Git Diff: Line selection is no longer cleared when the diff content refreshes, so keep/discard actions on a selected range work reliably.</li>
+<li>Terminal: Fixed garbled glyphs that could appear across multiple Tasks under heavy output when terminals shared a rendering texture atlas.</li>
+<li>Stability: Fixed a rare crash that could occur when quitting the app while background Git or terminal work was still finishing.</li>
+</ul>
