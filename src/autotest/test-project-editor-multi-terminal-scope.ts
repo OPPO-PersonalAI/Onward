@@ -97,6 +97,7 @@ export async function testProjectEditorMultiTerminalScope(ctx: AutotestContext):
   }
   const tempPathA = `onward-autotest-multi-terminal-a-${Date.now()}.md`
   const tempPathB = `onward-autotest-multi-terminal-b-${Date.now()}.md`
+  let driftSubdirName: string | null = null
   const contentA = Array.from({ length: 40 }, (_, idx) => `terminal-a-line-${idx + 1}`).join('\n')
   const contentB = Array.from({ length: 40 }, (_, idx) => `terminal-b-line-${idx + 1}`).join('\n')
 
@@ -274,11 +275,171 @@ export async function testProjectEditorMultiTerminalScope(ctx: AutotestContext):
       stateKeyB,
       activeFilePath: stateB?.activeFilePath ?? null
     })
+
+    // ── Per-Task POSITION restore (not just file identity) ──
+    // Editor is currently open for terminal B showing file B. Seed B's
+    // cursor, close, then seed A's cursor + preview scroll, and verify each
+    // Task restores its OWN position after the other Task used the editor.
+    const cursorB = { lineNumber: 10, column: 2 }
+    const cursorA = { lineNumber: 25, column: 3 }
+    const previewScrollTolerance = 80
+
+    const seededCursorB = Boolean(getApi()?.setCursorPosition?.(cursorB.lineNumber, cursorB.column))
+    _assert('PEMS-21-seed-cursor-b', seededCursorB, { cursorB })
+    if (!seededCursorB || cancelled()) return results
+
+    await sleep(240)
+    dispatchEscape()
+    const closedBAfterSeed = await waitForEditorClosedOrReset('phase0.7-close-b-after-seed')
+    if (!closedBAfterSeed || cancelled()) return results
+
+    window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId: terminalA } }))
+    await waitFor('phase0.7-reopen-a-for-seed', () => getApi()?.getActiveFilePath?.() === tempPathA, 8000)
+    const seededCursorA = Boolean(getApi()?.setCursorPosition?.(cursorA.lineNumber, cursorA.column))
+    getApi()?.scrollPreviewToFraction?.(0.6)
+    const previewSeededA = await waitFor(
+      'phase0.7-seed-preview-a',
+      () => (getApi()?.getPreviewScrollTop?.() ?? 0) > 0,
+      8000
+    )
+    const savedPreviewScrollA = getApi()?.getPreviewScrollTop?.() ?? 0
+    _assert('PEMS-22-seed-position-a', seededCursorA && previewSeededA, {
+      cursorA,
+      savedPreviewScrollA: Math.round(savedPreviewScrollA)
+    })
+    if (!seededCursorA || cancelled()) return results
+
+    await sleep(240)
+    dispatchEscape()
+    const closedAAfterSeed = await waitForEditorClosedOrReset('phase0.7-close-a-after-seed')
+    if (!closedAAfterSeed || cancelled()) return results
+
+    // Reopen B: its own cursor must come back, not A's (same-root two-Task
+    // position isolation — the D5 contamination detector).
+    window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId: terminalB } }))
+    await waitFor('phase0.7-reopen-b-position', () => getApi()?.getActiveFilePath?.() === tempPathB, 8000)
+    const cursorBRestored = await waitFor(
+      'phase0.7-restore-b-cursor',
+      () => Math.abs((getApi()?.getCursorPosition?.()?.lineNumber ?? -1) - cursorB.lineNumber) <= 1,
+      8000
+    )
+    _assert('PEMS-23-reopen-b-cursor-restored', cursorBRestored, {
+      expected: cursorB.lineNumber,
+      actual: getApi()?.getCursorPosition?.()?.lineNumber ?? null
+    })
+    const bCursorNotContaminated =
+      Math.abs((getApi()?.getCursorPosition?.()?.lineNumber ?? -1) - cursorA.lineNumber) > 1
+    _assert('PEMS-24-b-cursor-not-contaminated-by-a', bCursorNotContaminated, {
+      disallowed: cursorA.lineNumber,
+      actual: getApi()?.getCursorPosition?.()?.lineNumber ?? null
+    })
+
+    await sleep(240)
+    dispatchEscape()
+    const closedBAfterCheck = await waitForEditorClosedOrReset('phase0.7-close-b-after-check')
+    if (!closedBAfterCheck || cancelled()) return results
+
+    // Reopen A after B interleaved: cursor + preview scroll restore, and the
+    // reopen must take the retained-view fast path (the old single-slot
+    // snapshot was destroyed by B's open and forced 'persisted-state').
+    window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId: terminalA } }))
+    await waitFor('phase0.7-reopen-a-position', () => getApi()?.getActiveFilePath?.() === tempPathA, 8000)
+    const cursorARestored = await waitFor(
+      'phase0.7-restore-a-cursor',
+      () => Math.abs((getApi()?.getCursorPosition?.()?.lineNumber ?? -1) - cursorA.lineNumber) <= 1,
+      8000
+    )
+    _assert('PEMS-25-reopen-a-cursor-restored', cursorARestored, {
+      expected: cursorA.lineNumber,
+      actual: getApi()?.getCursorPosition?.()?.lineNumber ?? null
+    })
+    const previewARestored = await waitFor(
+      'phase0.7-restore-a-preview-scroll',
+      () => Math.abs((getApi()?.getPreviewScrollTop?.() ?? -10_000) - savedPreviewScrollA) <= previewScrollTolerance,
+      8000
+    )
+    _assert('PEMS-26-reopen-a-preview-scroll-restored', previewARestored, {
+      expected: Math.round(savedPreviewScrollA),
+      actual: Math.round(getApi()?.getPreviewScrollTop?.() ?? -1),
+      tolerance: previewScrollTolerance
+    })
+    const reopenRestoreA = getApi()?.getLastProjectEditorReopenRestore?.() ?? null
+    _assert(
+      'PEMS-27-reopen-a-retained-view-after-interleave',
+      reopenRestoreA?.cause === 'retained-view',
+      {
+        cause: reopenRestoreA?.cause ?? null,
+        markdownCacheMode: reopenRestoreA?.markdownCacheMode ?? null,
+        durationMs: reopenRestoreA?.durationMs ?? null
+      }
+    )
+
+    // ── cwd drift: `cd` into a subdir between two editor visits must not
+    // change the per-Task state key (scope is normalized to the repo root) ──
+    await sleep(240)
+    dispatchEscape()
+    const closedBeforeDrift = await waitForEditorClosedOrReset('phase0.7-close-before-drift')
+    if (!closedBeforeDrift || cancelled()) return results
+
+    driftSubdirName = `onward-autotest-pems-subdir-${Date.now()}`
+    const subdirName = driftSubdirName
+    const createSubdir = await window.electronAPI.project.createFolder(rootPath, subdirName)
+    if (createSubdir.success) {
+      const subdirAbs = `${rootPath.replace(/[\\/]+$/, '')}/${subdirName}`
+      const cdSubdirCommand = buildChangeDirectoryCommand(platform, subdirAbs, shellKindA)
+      await window.electronAPI.terminal.write(terminalA, cdSubdirCommand)
+      await window.electronAPI.git.notifyTerminalActivity(terminalA)
+      const driftedCwd = await waitForTerminalCwd(terminalA, subdirAbs, sleep)
+      if (driftedCwd) {
+        window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId: terminalA } }))
+        await waitFor('phase0.7-reopen-a-after-drift', () => Boolean(getApi()?.isOpen?.()), 8000)
+        const rootStable = await waitFor(
+          'phase0.7-drift-root-stable',
+          () => normalizePath(getApi()?.getRootPath?.() ?? '') === normalizedRoot,
+          8000
+        )
+        _assert('PEMS-28-cwd-drift-root-stable', rootStable, {
+          expected: normalizedRoot,
+          actual: getApi()?.getRootPath?.() ?? null
+        })
+        const fileRestoredAfterDrift = await waitFor(
+          'phase0.7-drift-file-restored',
+          () => getApi()?.getActiveFilePath?.() === tempPathA,
+          8000
+        )
+        _assert('PEMS-29-cwd-drift-file-restored', fileRestoredAfterDrift, {
+          expected: tempPathA,
+          actual: getApi()?.getActiveFilePath?.() ?? null
+        })
+        await sleep(240)
+        dispatchEscape()
+        await waitForEditorClosedOrReset('phase0.7-close-after-drift')
+        const appStateAfterDrift = await window.electronAPI.appState.load()
+        const subdirKey = JSON.stringify([terminalA, normalizePath(subdirAbs)])
+        const hasSubdirKey = Boolean(appStateAfterDrift.projectEditorStates?.[subdirKey])
+        _assert('PEMS-30-cwd-drift-no-subdir-key', !hasSubdirKey, {
+          subdirKey,
+          presentKeys: Object.keys(appStateAfterDrift.projectEditorStates ?? {}).filter((key) => key.includes(terminalA))
+        })
+        // Restore terminal A's cwd for any later suites sharing the session.
+        const cdBackCommand = buildChangeDirectoryCommand(platform, rootPath, shellKindA)
+        await window.electronAPI.terminal.write(terminalA, cdBackCommand)
+        await window.electronAPI.git.notifyTerminalActivity(terminalA)
+        await waitForTerminalCwd(terminalA, rootPath, sleep)
+      } else {
+        _assert('PEMS-28-cwd-drift-root-stable', false, { reason: 'terminal A never reported the subdir cwd' })
+      }
+    } else {
+      _assert('PEMS-28-cwd-drift-root-stable', false, { reason: 'subdir fixture creation failed', error: createSubdir.error })
+    }
   } finally {
     dispatchEscape()
     await sleep(200)
     await window.electronAPI.project.deletePath(rootPath, tempPathA)
     await window.electronAPI.project.deletePath(rootPath, tempPathB)
+    if (driftSubdirName) {
+      await window.electronAPI.project.deletePath(rootPath, driftSubdirName)
+    }
     const singleLayoutButton = document.querySelector<HTMLButtonElement>('button[title="Single terminal"]')
     singleLayoutButton?.click()
     log('phase0.7:cleanup', { tempPathA, tempPathB, resetLayout: true })

@@ -4,7 +4,7 @@
  */
 
 import type { FileViewMemory, ProjectEditorState } from '../../types/tab.d.ts'
-import { DEFAULT_LOCALE, translate, type AppLocale } from '../../i18n/core'
+import { DEFAULT_LOCALE, translate, type AppLocale } from '../../i18n/core.ts'
 
 export function normalizeProjectEditorRootPath(value: string): string {
   return value.replace(/\\/g, '/')
@@ -13,17 +13,39 @@ export function normalizeProjectEditorRootPath(value: string): string {
 export function resolveStoredProjectEditorState(
   rootPath: string,
   terminalStored: ProjectEditorState | null,
-  rootScopedStored: ProjectEditorState | null
+  rootScopedStored: ProjectEditorState | null,
+  platform: string = ''
 ): ProjectEditorState | null {
-  const normalizedRootPath = normalizeProjectEditorRootPath(rootPath)
+  // win32 paths are case-insensitive; a legacy-adopted entry may differ from
+  // the resolved repo root only by drive-letter / path case.
+  const fold = (value: string): string => (platform === 'win32' ? value.toLowerCase() : value)
+  const normalizedRootPath = fold(normalizeProjectEditorRootPath(rootPath))
   if (rootScopedStored) {
     return rootScopedStored
   }
   if (!terminalStored) return null
   if (!terminalStored.rootPath) return terminalStored
-  return normalizeProjectEditorRootPath(terminalStored.rootPath) === normalizedRootPath
+  return fold(normalizeProjectEditorRootPath(terminalStored.rootPath)) === normalizedRootPath
     ? terminalStored
     : null
+}
+
+/**
+ * Cross-Task contamination guard: an active file may only be persisted into a
+ * scope's state when it was opened under that scope. The single shared
+ * ProjectEditor instance can still be displaying scope X's file while scope Y
+ * persists (same-root Task switch with no stored state for Y) — persisting
+ * X's file under Y's key would corrupt Y's memory.
+ */
+export function resolvePersistableActiveFile(args: {
+  activeFilePath: string | null
+  activeFileScopeKey: string | null
+  persistScopeKey: string | null
+}): string | null {
+  if (!args.activeFilePath) return null
+  if (!args.persistScopeKey) return null
+  if (!args.activeFileScopeKey) return null
+  return args.activeFileScopeKey === args.persistScopeKey ? args.activeFilePath : null
 }
 
 export function buildPendingCursor(

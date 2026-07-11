@@ -58,6 +58,7 @@ import { focusCoordinator, type TerminalFocusRestoreReason } from './terminal/fo
 import { registerTerminalFocusDebugApi } from './terminal/focus-debug-api'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from './utils/terminal-command'
 import { performanceTrace } from './utils/performance-trace'
+import { findStickyProjectEditorRoot } from './utils/projectEditorStateKey'
 import './App.css'
 import './styles/form-controls.css'
 
@@ -1464,11 +1465,51 @@ function AppContent({
       const resolvedTerminalCwd = requestedRepoRoot
         ? requestedRepoRoot
         : await window.electronAPI.git.getTerminalCwd(terminalId)
-      const resolvedCwd = resolvedTerminalCwd || immediateCwd || persistedCwd
+      // Normalize the editor scope so a `cd` between two editor visits cannot
+      // drift the per-Task state key. Two-step: (1) sticky root — this
+      // terminal's newest persisted editor session whose root still contains
+      // the cwd keeps its root (covers non-git projects and dirs nested in a
+      // bigger repo); (2) otherwise resolve the cwd's git repo root (non-git
+      // cwds resolve to themselves). Deep links (requestedRepoRoot) already
+      // carry a repo root — skip both for them.
+      let resolvedRoot = resolvedTerminalCwd
+      if (resolvedTerminalCwd && !requestedRepoRoot) {
+        const resolveStart = performance.now()
+        let fellBack = false
+        const stickyRoot = findStickyProjectEditorRoot(
+          state.projectEditorStates,
+          terminalId,
+          resolvedTerminalCwd,
+          window.electronAPI.platform
+        )
+        if (stickyRoot) {
+          resolvedRoot = stickyRoot
+        } else {
+          try {
+            resolvedRoot = (await window.electronAPI.git.resolveRepoRoot(resolvedTerminalCwd)) || resolvedTerminalCwd
+          } catch {
+            resolvedRoot = resolvedTerminalCwd
+            fellBack = true
+          }
+        }
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_SCOPE_ROOT_RESOLVED, {
+          ph: 'X',
+          durationMs: Math.round(performance.now() - resolveStart),
+          sticky: Boolean(stickyRoot),
+          drifted: resolvedRoot !== resolvedTerminalCwd,
+          fellBack
+        })
+      }
+      const rawTerminalCwd = resolvedTerminalCwd || immediateCwd || persistedCwd
+      const resolvedCwd = resolvedRoot || immediateCwd || persistedCwd
       if (projectEditorOpenTokenRef.current !== openToken) return
       if (resolvedCwd) {
         lastProjectEditorOpenScopeRef.current = { terminalId, cwd: resolvedCwd }
-        setTerminalLastCwd(terminalId, resolvedCwd)
+      }
+      if (rawTerminalCwd) {
+        // lastCwd keeps the RAW terminal cwd (other consumers: auto-follow
+        // naming, persisted-cwd fallback) — only the editor scope uses the root.
+        setTerminalLastCwd(terminalId, rawTerminalCwd)
       }
       setProjectEditorCwd(resolvedCwd)
       setProjectEditorOpen(true)
@@ -1498,7 +1539,7 @@ function AppContent({
         diffRepoRoot: options.diffRepoRoot ?? null
       })
     }
-  }, [activeTab, projectEditorOpen, projectEditorTerminalId, projectEditorDirty, setLastFocusedTerminalId, setTerminalLastCwd, state.tabs, t, updateActiveTab])
+  }, [activeTab, projectEditorOpen, projectEditorTerminalId, projectEditorDirty, setLastFocusedTerminalId, setTerminalLastCwd, state.projectEditorStates, state.tabs, t, updateActiveTab])
 
   // Debug profile: Automatically execute ProjectEditor <-> Git Diff loop to facilitate CPU sampling
   useEffect(() => {

@@ -767,7 +767,41 @@ export const PERF_TRACE_EVENT = {
   WORKER_GIT_STATE_MIRROR_REVALIDATE: 'worker:git-state-mirror.revalidate',
   // Worker: a recompute detected a non-git → git transition and re-attached the
   // FS watcher for the newly-created repo (the BattleProject class).
-  WORKER_GIT_STATE_MIRROR_WATCHER_REATTACHED: 'worker:git-state-mirror.watcher-reattached'
+  WORKER_GIT_STATE_MIRROR_WATCHER_REATTACHED: 'worker:git-state-mirror.watcher-reattached',
+
+  // ───────── 2026-07-10 per-Task Project Editor view memory (multi-terminal cache-loss fix) ─────────
+  // Root cause cluster: the editor scope key drifted with the terminal's live
+  // cwd, the soft-close "instant reopen" snapshot was a single slot cleared by
+  // any other Task's open, the markdown session cache had a 7-entry global
+  // budget with no per-Task protection, and HTML scroll was never persisted.
+  //
+  // Renderer: editor open resolved the terminal cwd to a repo root (ph=X,
+  // durationMs; payload: drifted=cwd!=root, fellBack=resolve failed).
+  RENDERER_PROJECT_EDITOR_SCOPE_ROOT_RESOLVED: 'renderer:project-editor.scope-root-resolved',
+  // Renderer: exact state-key miss adopted a legacy [terminalId, old-cwd] entry.
+  RENDERER_PROJECT_EDITOR_SCOPE_STATE_LEGACY_ADOPTED: 'renderer:project-editor.scope-state-legacy-adopted',
+  // Renderer: soft-close snapshot stored into the per-scope LRU map (ph=i).
+  RENDERER_PROJECT_EDITOR_SNAPSHOT_STORED: 'renderer:project-editor.snapshot-stored',
+  // Renderer: reopen found (and applied) this scope's soft-close snapshot.
+  RENDERER_PROJECT_EDITOR_SNAPSHOT_APPLIED: 'renderer:project-editor.snapshot-applied',
+  // Renderer: reopen had no snapshot for this scope (falls to persisted state).
+  RENDERER_PROJECT_EDITOR_SNAPSHOT_MISSED: 'renderer:project-editor.snapshot-missed',
+  // Renderer: LRU cap evicted another scope's snapshot on store.
+  RENDERER_PROJECT_EDITOR_SNAPSHOT_EVICTED: 'renderer:project-editor.snapshot-evicted',
+  // Renderer: markdown session cache evicted an entry (payload: size, limit,
+  // protectedCount; file basename only).
+  RENDERER_PROJECT_EDITOR_MD_CACHE_EVICTED: 'renderer:project-editor.md-cache-evicted',
+  // Renderer: a scope's protected markdown-cache key was set/cleared.
+  RENDERER_PROJECT_EDITOR_MD_CACHE_PROTECTED_SET_UPDATED: 'renderer:project-editor.md-cache-protected-set-updated',
+  // Renderer: HTML preview scroll captured into FileViewMemory (ph=i).
+  RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED: 'renderer:project-editor.html-scroll-captured',
+  // Renderer: persisted HTML scroll seeded back into the preview on reopen.
+  RENDERER_PROJECT_EDITOR_HTML_SCROLL_RESTORED: 'renderer:project-editor.html-scroll-restored',
+  // Renderer: persist refused to write an active file that was opened under a
+  // different scope (cross-Task contamination guard; site=snapshot|restore-null).
+  RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED: 'renderer:project-editor.persist-active-file-guarded',
+  // Renderer: a token-cancelled (non-user) restore was re-run for the still-open scope.
+  RENDERER_PROJECT_EDITOR_RESTORE_RERUN_AFTER_CANCEL: 'renderer:project-editor.restore-rerun-after-cancel'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

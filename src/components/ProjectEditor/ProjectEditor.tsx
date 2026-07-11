@@ -15,7 +15,7 @@ import { useAppState } from '../../hooks/useAppState'
 import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { useI18n } from '../../i18n/useI18n'
-import { perfTrace } from '../../utils/perf-trace'
+import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { shouldRetainProjectEditorViewOnClose } from './utils/projectEditorCloseRetention'
 import { isPreviewWorkPending, shouldRevealSettledPreview } from './utils/previewRestoreSettle'
@@ -29,9 +29,12 @@ import {
   buildMissingFileNotice,
   buildPendingCursor,
   clampCursorPosition,
+  resolvePersistableActiveFile,
   resolveStoredProjectEditorState,
   shouldKeepPendingRestoreState
 } from './projectEditorRestoreUtils'
+import { LruSnapshotStore, SOFT_CLOSE_SNAPSHOT_CAP } from './utils/softCloseSnapshotStore'
+import { selectMarkdownSessionCacheEvictions } from './utils/markdownSessionCacheEviction'
 import { SubpagePanelButton, SubpagePanelShell, SubpageSwitcher, type SubpagePanelShellState } from '../SubpageSwitcher'
 import { OutlinePanel, type OutlineTarget } from './Outline/OutlinePanel'
 import { countSymbols } from './Outline/outlineParser'
@@ -288,11 +291,14 @@ const PROGRAMMATIC_EDITOR_PREVIEW_SYNC_SUPPRESS_MS = 1200
 const MAX_PINNED_FILES = Infinity
 const MAX_RECENT_FILES = 10
 const MAX_PERSISTED_FILE_STATES = 20
-const MARKDOWN_SESSION_CACHE_DEFAULT_LIMIT = 7
+// 12 (was 7): with several Tasks sharing the global [root,file]-keyed budget,
+// 7 entries let one Task's browsing evict another Task's instant-reopen cache.
+const MARKDOWN_SESSION_CACHE_DEFAULT_LIMIT = 12
 const MARKDOWN_SESSION_CACHE_MIN_LIMIT = 1
 const MARKDOWN_SESSION_CACHE_MAX_LIMIT = 20
 const MARKDOWN_SESSION_CACHE_RECENCY_HALF_LIFE_MS = 30 * 60 * 1000
 const QUICK_FILE_DRAG_MIME = 'application/x-onward-quick-file'
+const HTML_SCROLL_TRACK_INTERVAL_MS = 2000
 const LARGE_FILE_CHUNK_BYTES = 512 * 1024
 const BINARY_VIEWER_BYTES_PER_LINE = 16
 const BINARY_DEFAULT_RADIX: BinaryRadix = 16
@@ -495,34 +501,68 @@ function getMarkdownSessionCacheKey(rootPath: string | null, filePath: string | 
   return JSON.stringify([normalizePath(rootPath), normalizePath(filePath)])
 }
 
-function getMarkdownSessionCacheScore(entry: MarkdownSessionCacheEntry, maxDwellMs: number, maxOpenCount: number, now: number): number {
-  const dwellScore = maxDwellMs > 0 ? entry.dwellMs / maxDwellMs : 0
-  const openScore = maxOpenCount > 0 ? entry.openCount / maxOpenCount : 0
-  const activityScore = dwellScore * 0.7 + openScore * 0.3
-  const ageMs = Math.max(0, now - entry.lastAccessedAt)
-  const recencyDecay = 1 / (1 + ageMs / MARKDOWN_SESSION_CACHE_RECENCY_HALF_LIFE_MS)
-  return activityScore * recencyDecay
+// Per-scope protected markdown-cache keys: each active Task's last markdown
+// file is exempt from eviction so other Tasks' browsing cannot destroy its
+// instant-reopen cache. LRU-capped alongside the snapshot store — a Task that
+// falls out of the last 4 scopes loses protection (not the cache entry
+// itself). There is no renderer-visible terminal-close event to hook, so the
+// cap is what bounds staleness.
+const MAX_PROTECTED_MARKDOWN_SCOPES = 4
+const protectedMarkdownCacheKeysByScope = new Map<string, string>()
+
+function setScopeProtectedMarkdownCacheKey(scopeKey: string | null, cacheKey: string | null): void {
+  if (!scopeKey) return
+  const previous = protectedMarkdownCacheKeysByScope.get(scopeKey) ?? null
+  if (previous === cacheKey) {
+    if (cacheKey !== null) {
+      // Refresh recency.
+      protectedMarkdownCacheKeysByScope.delete(scopeKey)
+      protectedMarkdownCacheKeysByScope.set(scopeKey, cacheKey)
+    }
+    return
+  }
+  protectedMarkdownCacheKeysByScope.delete(scopeKey)
+  if (cacheKey !== null) {
+    protectedMarkdownCacheKeysByScope.set(scopeKey, cacheKey)
+    while (protectedMarkdownCacheKeysByScope.size > MAX_PROTECTED_MARKDOWN_SCOPES) {
+      const oldestKey = protectedMarkdownCacheKeysByScope.keys().next().value
+      if (oldestKey === undefined) break
+      protectedMarkdownCacheKeysByScope.delete(oldestKey)
+    }
+  }
+  perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_CACHE_PROTECTED_SET_UPDATED, {
+    ph: 'i',
+    cleared: cacheKey === null,
+    protectedCount: protectedMarkdownCacheKeysByScope.size
+  })
 }
 
 function pruneMarkdownSessionCache(protectedKey?: string | null): void {
   const limit = getMarkdownSessionCacheLimit()
-  while (markdownSessionCacheStore.size > limit) {
-    const entries = Array.from(markdownSessionCacheStore.values())
-    const now = Date.now()
-    const maxDwellMs = Math.max(0, ...entries.map((entry) => entry.dwellMs))
-    const maxOpenCount = Math.max(0, ...entries.map((entry) => entry.openCount))
-    let evictKey: string | null = null
-    let evictScore = Number.POSITIVE_INFINITY
-    for (const entry of entries) {
-      if (entry.key === protectedKey && markdownSessionCacheStore.size > 1) continue
-      const score = getMarkdownSessionCacheScore(entry, maxDwellMs, maxOpenCount, now)
-      if (score < evictScore) {
-        evictScore = score
-        evictKey = entry.key
-      }
+  const protectedKeys = new Set(protectedMarkdownCacheKeysByScope.values())
+  if (protectedKey) protectedKeys.add(protectedKey)
+  const evictions = selectMarkdownSessionCacheEvictions(
+    Array.from(markdownSessionCacheStore.values(), (entry) => ({
+      key: entry.key,
+      dwellMs: entry.dwellMs,
+      openCount: entry.openCount,
+      lastAccessedAt: entry.lastAccessedAt
+    })),
+    {
+      limit,
+      protectedKeys,
+      now: Date.now(),
+      recencyHalfLifeMs: MARKDOWN_SESSION_CACHE_RECENCY_HALF_LIFE_MS
     }
-    if (!evictKey) return
+  )
+  for (const evictKey of evictions) {
     markdownSessionCacheStore.delete(evictKey)
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_MD_CACHE_EVICTED, {
+      ph: 'i',
+      size: markdownSessionCacheStore.size,
+      limit,
+      protectedCount: protectedKeys.size
+    })
   }
 }
 
@@ -1476,10 +1516,18 @@ export function ProjectEditor({
   const pendingViewStatePathRef = useRef<string | null>(null)
   const pendingViewStateFallbackRef = useRef<{ path: string; line: number } | null>(null)
   const pendingCursorRef = useRef<{ lineNumber: number; column: number } | null>(null)
+  // Scope that seeded the pending view state / cursor. Applying is refused
+  // when the editor has since switched to another Task's scope — same-root,
+  // same-file Task interleaving must not replay a foreign cursor.
+  const pendingViewStateScopeKeyRef = useRef<string | null>(null)
   const fileFirstVisibleLineRef = useRef<Map<string, number>>(new Map())
   const projectStateSaveTimerRef = useRef<number | null>(null)
   const hasRestoredStateRef = useRef(false)
   const restoringStateRef = useRef(false)
+  // True when the in-flight restore was cancelled by THIS Task's user
+  // navigation (which must win); false for interleaved cross-Task transitions,
+  // whose cancellation re-arms the restore instead of silently dropping it.
+  const restoreCancelledByUserRef = useRef(false)
   const restoredStateRef = useRef<ProjectEditorState | null>(null)
   const lastEditorScopeRef = useRef<ProjectEditorScope | null>(null)
   const wasOpenRef = useRef(false)
@@ -1487,12 +1535,17 @@ export function ProjectEditor({
   const projectEditorReopenStartedAtRef = useRef<number | null>(null)
   const lastProjectEditorReopenRestoreRef = useRef<ProjectEditorReopenRestoreDebug | null>(null)
   const skipClosePersistRef = useRef(false)
-  // Unified soft-close snapshot. ESC retain-view and Editor -> Diff/History
-  // switching both preserve the same state shape; `kind` only records why the
-  // snapshot exists. The content field keeps Monaco populated while the async
-  // reopen pipeline catches up, so cursor/view-state restoration has real
-  // document lines to target.
-  const editorSoftCloseSnapshotRef = useRef<ProjectEditorSoftCloseSnapshot | null>(null)
+  // Unified soft-close snapshots, one slot per editor scope (LRU, cap 4).
+  // ESC retain-view and Editor -> Diff/History switching both preserve the
+  // same state shape; `kind` only records why the snapshot exists. The
+  // content field keeps Monaco populated while the async reopen pipeline
+  // catches up. Per-scope keying means one Task's open can no longer clobber
+  // another Task's retained "instant reopen" view.
+  const editorSoftCloseSnapshotsRef = useRef(new LruSnapshotStore<ProjectEditorSoftCloseSnapshot>(SOFT_CLOSE_SNAPSHOT_CAP))
+  // Scope key that OPENED the current active file. The single shared editor
+  // instance can display scope X's file while scope Y is current (same-root
+  // Task switch); persist must never write X's file under Y's key.
+  const activeFileScopeKeyRef = useRef<string | null>(null)
   const previewActiveSlugRef = useRef<string | null>(null)
   const [previewActiveSlug, setPreviewActiveSlug] = useState<string | null>(null)
   const previewScrollMemoryRef = useRef<Map<string, PreviewScrollMemory>>(new Map())
@@ -2557,12 +2610,53 @@ export function ProjectEditor({
 	    }
 	  }, [upsertFileMemory])
 
+  /**
+   * Capture the HTML preview's scroll offset into fileMemoryRef. Async
+   * because the offset lives in the embedded browser view (IPC read) —
+   * saveCurrentFileMemory is sync and cannot pick it up. `site` 'poll' rides
+   * the opt-in trace channel (0.5 Hz background tracker); every other site is
+   * a user-action-scale diagnostic breadcrumb.
+   */
+  const captureHtmlPreviewScrollMemory = useCallback(async (
+    site: 'open-file' | 'close' | 'subpage-leave' | 'before-leave' | 'poll'
+  ): Promise<void> => {
+    const filePath = activeFilePathRef.current
+    const browserId = htmlReaderStateRef.current?.browserId
+    if (!filePath || !isHtmlRef.current || !browserId) return
+    let scrollState: HtmlPreviewScrollState | null = null
+    try {
+      const scrollResult = await window.electronAPI.browser.getScrollState(browserId)
+      if (!scrollResult.success) return
+      scrollState = normalizeHtmlPreviewScrollState(scrollResult.state)
+    } catch {
+      return
+    }
+    if (!scrollState) return
+    // The active file may have changed while the IPC round-trip was in
+    // flight — never write one file's offset into another file's memory.
+    if (activeFilePathRef.current !== filePath) return
+    htmlPreviewScrollStateRef.current = scrollState
+    const entry: FileViewMemory = {
+      ...(fileMemoryRef.current.get(filePath) ?? {}),
+      htmlScrollX: scrollState.x,
+      htmlScrollY: scrollState.y
+    }
+    upsertFileMemory(filePath, entry)
+    const payload = { ph: 'i', site, scrollY: Math.round(scrollState.y) }
+    if (site === 'poll') {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED, payload)
+    } else {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED, payload)
+    }
+  }, [upsertFileMemory])
+
   /** Restore ALL position/view state for a file from fileMemoryRef. */
   const restoreFileMemory = useCallback((filePath: string) => {
     pendingViewStateRef.current = null
     pendingViewStatePathRef.current = null
     pendingCursorRef.current = null
     pendingViewStateFallbackRef.current = null
+    pendingViewStateScopeKeyRef.current = null
 
     const mem = fileMemoryRef.current.get(filePath)
     if (!mem) return
@@ -2587,6 +2681,7 @@ export function ProjectEditor({
     if (mem.editorViewState) {
       pendingViewStateRef.current = mem.editorViewState as import('monaco-editor').editor.ICodeEditorViewState
       pendingViewStatePathRef.current = filePath
+      pendingViewStateScopeKeyRef.current = getScrollScopeKey(lastEditorScopeRef.current)
       if (typeof mem.cursorLine === 'number' && mem.cursorLine > 1) {
         pendingCursorRef.current = { lineNumber: mem.cursorLine, column: mem.cursorColumn ?? 1 }
         pendingViewStateFallbackRef.current = { path: filePath, line: mem.cursorLine }
@@ -2594,6 +2689,7 @@ export function ProjectEditor({
     } else if (typeof mem.cursorLine === 'number') {
       pendingCursorRef.current = { lineNumber: mem.cursorLine, column: mem.cursorColumn ?? 1 }
       pendingViewStatePathRef.current = filePath
+      pendingViewStateScopeKeyRef.current = getScrollScopeKey(lastEditorScopeRef.current)
     }
 
     // 3. Preview scroll → real-time tracker (applied during preview restore cycle)
@@ -2621,17 +2717,49 @@ export function ProjectEditor({
         }
       }
     }
-  }, [])
+
+    // 5. HTML preview scroll → restoreScrollState pipeline (applied by
+    // HtmlReader once the browser view finishes loading)
+    if (isHtmlPath(filePath) && typeof mem.htmlScrollY === 'number') {
+      updateHtmlPreviewScrollState({
+        x: mem.htmlScrollX ?? 0,
+        y: mem.htmlScrollY,
+        scrollWidth: 0,
+        scrollHeight: 0,
+        clientWidth: 0,
+        clientHeight: 0
+      })
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_RESTORED, {
+        ph: 'i',
+        scrollY: Math.round(mem.htmlScrollY)
+      })
+    }
+  }, [updateHtmlPreviewScrollState])
 
   // ─── End unified per-file memory ───
 
   const buildProjectEditorStateSnapshot = useCallback((scope: ProjectEditorScope) => {
     const currentRootPath = rootRef.current ?? rootPath ?? null
-    const currentActiveFilePath = activeFilePathRef.current
+    const rawActiveFilePath = activeFilePathRef.current
+    // Cross-Task contamination guard: only persist the active file if it was
+    // opened under the scope being persisted (same-root Task switches leave
+    // the shared instance displaying the previous Task's file).
+    const currentActiveFilePath = resolvePersistableActiveFile({
+      activeFilePath: rawActiveFilePath,
+      activeFileScopeKey: activeFileScopeKeyRef.current,
+      persistScopeKey: getScrollScopeKey(scope)
+    })
     const normalizedRootPath = currentRootPath ? normalizePath(currentRootPath) : null
 
-    // Snapshot the current active file's state into fileMemoryRef
-    saveCurrentFileMemory()
+    if (rawActiveFilePath && !currentActiveFilePath) {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED, {
+        ph: 'i',
+        site: 'snapshot'
+      })
+    } else {
+      // Snapshot the current active file's state into fileMemoryRef
+      saveCurrentFileMemory()
+    }
 
     // Capture tree scroll
     const treeKey = getScrollScopeKey(scope)
@@ -2949,6 +3077,21 @@ export function ProjectEditor({
     if (!editor) return false
     const model = editor.getModel()
     if (!model) return false
+    const pendingScopeKey = pendingViewStateScopeKeyRef.current
+    if (pendingScopeKey && pendingScopeKey !== getScrollScopeKey(lastEditorScopeRef.current)) {
+      // The pendings were seeded for another Task's scope — discard rather
+      // than replaying a foreign cursor into this Task's view of the file.
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED, {
+        ph: 'i',
+        site: 'pending-discard'
+      })
+      pendingViewStateRef.current = null
+      pendingCursorRef.current = null
+      pendingViewStatePathRef.current = null
+      pendingViewStateFallbackRef.current = null
+      pendingViewStateScopeKeyRef.current = null
+      return false
+    }
     const pendingPath = pendingViewStatePathRef.current
     if (pendingPath && !isEditorModelMatchingPath(pendingPath)) {
       return false
@@ -3109,6 +3252,7 @@ export function ProjectEditor({
     setSelectedPath(null)
     if (!preserveContent) {
       setActiveFilePathValue(null)
+      activeFileScopeKeyRef.current = null
     }
     // NOTE: pinnedFiles and recentFiles are persistent metadata scoped to the
     // editor session — they must NOT be cleared here.  Callers that genuinely
@@ -3185,7 +3329,7 @@ export function ProjectEditor({
     scope: ProjectEditorScope | null
   ): ProjectEditorSoftCloseSnapshot | null => {
     if (!scope) {
-      editorSoftCloseSnapshotRef.current = null
+      // No scope to key by — leave other scopes' snapshots untouched.
       return null
     }
     const snapshot: ProjectEditorSoftCloseSnapshot = {
@@ -3203,13 +3347,36 @@ export function ProjectEditor({
       isMarkdownEditorVisible: isMarkdownEditorVisibleRef.current,
       outlineTarget: outlineTargetRef.current
     }
-    editorSoftCloseSnapshotRef.current = snapshot
+    const scopeKey = getScrollScopeKey(scope)
+    const evicted = editorSoftCloseSnapshotsRef.current.set(scopeKey, snapshot)
+    if (snapshot.path && isMarkdownPath(snapshot.path)) {
+      // Refresh the protected-key recency so an actively-cycled Task keeps
+      // its markdown cache protection.
+      setScopeProtectedMarkdownCacheKey(scopeKey, getMarkdownSessionCacheKey(scope.cwd, snapshot.path))
+    }
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_SNAPSHOT_STORED, {
+      ph: 'i',
+      kind,
+      size: editorSoftCloseSnapshotsRef.current.size
+    })
+    for (const evictedKey of evicted) {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_SNAPSHOT_EVICTED, {
+        ph: 'i',
+        cap: SOFT_CLOSE_SNAPSHOT_CAP,
+        evictedKeyLength: evictedKey.length
+      })
+    }
     return snapshot
   }, [])
 
   const applyEditorSoftCloseSnapshot = useCallback((snapshot: ProjectEditorSoftCloseSnapshot): boolean => {
     if (!snapshot.path) return false
     setActiveFilePathValue(snapshot.path)
+    activeFileScopeKeyRef.current = getScrollScopeKey(snapshot.scope)
+    setScopeProtectedMarkdownCacheKey(
+      activeFileScopeKeyRef.current,
+      isMarkdownPath(snapshot.path) ? getMarkdownSessionCacheKey(snapshot.scope.cwd, snapshot.path) : null
+    )
     fileContentRef.current = snapshot.content
     setFileContent(snapshot.content)
     markdownRenderSourceRef.current = snapshot.content
@@ -3237,6 +3404,12 @@ export function ProjectEditor({
     }
     return true
   }, [setActiveFilePathValue])
+
+  // The retained live DOM/HTML always belongs to the currently-active file;
+  // its snapshot (if any) is keyed by the scope that opened that file.
+  const peekActiveFileSoftCloseSnapshot = useCallback((): ProjectEditorSoftCloseSnapshot | null => {
+    return editorSoftCloseSnapshotsRef.current.peek(activeFileScopeKeyRef.current)
+  }, [])
 
   const clearActiveFileState = useCallback((options?: { preserveMissingNotice?: boolean }) => {
     cancelFileTreeRestoreFrame()
@@ -3274,6 +3447,7 @@ export function ProjectEditor({
     markdownWorkerQueuedRef.current = false
     setSelectedPath(null)
     setActiveFilePathValue(null)
+    activeFileScopeKeyRef.current = null
     setFileContent('')
     setIsBinary(false)
     setIsImage(false)
@@ -3539,6 +3713,19 @@ export function ProjectEditor({
     }
   }, [closeHtmlPreviewSearch, isHtmlPreviewVisible, updateHtmlPreviewScrollState])
 
+  // Backstop tracker for the HTML preview scroll offset: the browser view has
+  // no scroll callback, so hard-quit / crash paths would otherwise lose the
+  // position (beforeunload flushes whatever this poll last captured).
+  useEffect(() => {
+    if (!isHtmlPreviewVisible) return
+    const timer = window.setInterval(() => {
+      void captureHtmlPreviewScrollMemory('poll')
+    }, HTML_SCROLL_TRACK_INTERVAL_MS)
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [captureHtmlPreviewScrollMemory, isHtmlPreviewVisible])
+
   useEffect(() => {
     const unsubscribe = window.electronAPI.browser.onFoundInPage((id, result) => {
       if (id !== htmlReaderStateRef.current?.browserId) return
@@ -3665,7 +3852,7 @@ export function ProjectEditor({
       // worker-deactivate event so the cache-hit fast path on the next reopen
       // can short-circuit `applyMarkdownSessionCacheHit` -> `beginPreviewRestore`
       // and avoid the waiting-html opacity flicker.
-      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+      const softCloseSnapshot = peekActiveFileSoftCloseSnapshot()
       // A retained-close shortcut reopen briefly re-enters this deactivate
       // branch on the reopen's FIRST render: `isOpen` has already flipped true,
       // but the retained-view restore effect (which calls
@@ -3774,7 +3961,7 @@ export function ProjectEditor({
         // blank the HTML in the reopen-in-flight window: if a retained-close
         // snapshot for THIS file says the preserved render is still valid, keep
         // it on screen so the restore effect takes the zero-flash path.
-        const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+        const softCloseSnapshot = peekActiveFileSoftCloseSnapshot()
         const preserveDuringReopen =
           Boolean(markdownRenderedHtmlRef.current) &&
           shouldPreserveRetainedPreviewDuringReopen({
@@ -3903,6 +4090,7 @@ export function ProjectEditor({
     cancelMarkdownIdle,
     isMarkdownWorkerActive,
     isOpen,
+    peekActiveFileSoftCloseSnapshot,
     resetPreviewRestoreState,
     scheduleMarkdownApply,
     sendMarkdownRenderRequest
@@ -3957,7 +4145,7 @@ export function ProjectEditor({
       if (markdownRenderTimerRef.current) {
         window.clearTimeout(markdownRenderTimerRef.current)
       }
-      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+      const softCloseSnapshot = peekActiveFileSoftCloseSnapshot()
       const preserveClosedPreview = Boolean(
         softCloseSnapshot &&
         (softCloseSnapshot.kind === 'subpage-return' || !isOpen)
@@ -3970,7 +4158,7 @@ export function ProjectEditor({
     }
 
     scheduleMarkdownRender()
-  }, [activeFilePath, isMarkdownWorkerActive, isOpen, scheduleMarkdownRender])
+  }, [activeFilePath, isMarkdownWorkerActive, isOpen, peekActiveFileSoftCloseSnapshot, scheduleMarkdownRender])
 
   useEffect(() => {
     if (!isMarkdownWorkerActive || !markdownRootPath) return
@@ -4781,18 +4969,21 @@ export function ProjectEditor({
     if (source === 'user') {
       // User manual navigation has the highest priority, canceling any ongoing recovery process to avoid being "pulled back to old files".
       restoreTokenRef.current += 1
+      restoreCancelledByUserRef.current = true
       hasRestoredStateRef.current = true
       restoringStateRef.current = false
       pendingViewStateRef.current = null
       pendingViewStatePathRef.current = null
       pendingViewStateFallbackRef.current = null
       pendingCursorRef.current = null
+      pendingViewStateScopeKeyRef.current = null
       if (options?.cursorPosition) {
         pendingViewStatePathRef.current = path
         pendingCursorRef.current = {
           lineNumber: options.cursorPosition.lineNumber,
           column: options.cursorPosition.column ?? 1
         }
+        pendingViewStateScopeKeyRef.current = getScrollScopeKey(lastEditorScopeRef.current)
       }
     }
 
@@ -4886,6 +5077,7 @@ export function ProjectEditor({
           lineNumber: options.cursorPosition.lineNumber,
           column: options.cursorPosition.column ?? 1
         }
+        pendingViewStateScopeKeyRef.current = getScrollScopeKey(lastEditorScopeRef.current)
         applyPendingCursorPosition()
         scheduleProjectStateSave()
       }
@@ -4896,8 +5088,11 @@ export function ProjectEditor({
       setDiffJumpTargetValue(null)
     }
 
-    // Save ALL state for the old file in one call
+    // Save ALL state for the old file in one call. The HTML scroll offset
+    // lives in the embedded browser view (async IPC) and must be captured
+    // while the old file's view still exists.
     if (currentActiveFilePath) {
+      await captureHtmlPreviewScrollMemory('open-file')
       saveCurrentFileMemory()
     }
 
@@ -4973,6 +5168,9 @@ export function ProjectEditor({
           clearActiveFileState({ preserveMissingNotice: true })
         } else {
           setActiveFilePathValue(path)
+          activeFileScopeKeyRef.current = getScrollScopeKey(
+            lastEditorScopeRef.current ?? buildProjectEditorScope(_terminalId, rootRef.current ?? cwd ?? null)
+          )
           setSelectedPath(path)
           setIsBinary(false)
           isBinaryRef.current = false
@@ -5050,6 +5248,14 @@ export function ProjectEditor({
       suppressNextRevealRef.current = true
     }
     setActiveFilePathValue(path)
+    activeFileScopeKeyRef.current = getScrollScopeKey(
+      lastEditorScopeRef.current ?? buildProjectEditorScope(_terminalId, rootRef.current ?? cwd ?? null)
+    )
+    // Protect this Task's last markdown file from cross-Task cache eviction.
+    setScopeProtectedMarkdownCacheKey(
+      activeFileScopeKeyRef.current,
+      isMarkdownPath(path) ? getMarkdownSessionCacheKey(root, path) : null
+    )
     setSelectedPath(path)
     if (source === 'user' && options?.trackRecent) {
       touchRecentFile(path)
@@ -5085,7 +5291,26 @@ export function ProjectEditor({
     htmlPreviewUrlRef.current = nextHtmlPreviewUrl
     setHtmlPreviewReloadKey(0)
     htmlPreviewReloadKeyRef.current = 0
-    updateHtmlPreviewScrollState(null)
+    // Seed the HTML preview scroll from this file's persisted memory so
+    // HtmlReader's restoreScrollState pipeline lands on the last-read
+    // position once the view loads (parallel to PDF initialState below).
+    const htmlMemory = htmlFile ? fileMemoryRef.current.get(path) : undefined
+    if (htmlFile && typeof htmlMemory?.htmlScrollY === 'number') {
+      updateHtmlPreviewScrollState({
+        x: htmlMemory.htmlScrollX ?? 0,
+        y: htmlMemory.htmlScrollY,
+        scrollWidth: 0,
+        scrollHeight: 0,
+        clientWidth: 0,
+        clientHeight: 0
+      })
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_RESTORED, {
+        ph: 'i',
+        scrollY: Math.round(htmlMemory.htmlScrollY)
+      })
+    } else {
+      updateHtmlPreviewScrollState(null)
+    }
     closeHtmlPreviewSearch()
     updateHtmlReaderState(null)
     let markdownCacheEntry: MarkdownSessionCacheEntry | null = null
@@ -5433,7 +5658,13 @@ export function ProjectEditor({
 	      debugLog('root:effect', { isOpen, cwd })
 	    }
 	    if (!isOpen) {
-	      const retainClosedView = Boolean(editorSoftCloseSnapshotRef.current)
+	      // Retain the live view only when the scope that just closed (or the
+	      // scope owning the on-screen file) has a retained snapshot — another
+	      // scope's snapshot must not keep a foreign file mounted.
+	      const retainClosedView = Boolean(
+	        editorSoftCloseSnapshotsRef.current.peek(getScrollScopeKey(lastEditorScopeRef.current)) ??
+	        editorSoftCloseSnapshotsRef.current.peek(activeFileScopeKeyRef.current)
+	      )
       gitDiffOpenRef.current = false
       debugAutoOpenRef.current = false
       restoringStateRef.current = false
@@ -5507,7 +5738,8 @@ export function ProjectEditor({
 	      : null)
 
 	    if (!effectiveCwd) {
-	      editorSoftCloseSnapshotRef.current = null
+	      // Drop only this terminal's snapshots — other Tasks keep theirs.
+	      editorSoftCloseSnapshotsRef.current.deleteWhere((_key, snapshot) => snapshot.scope.terminalId === _terminalId)
 	      setRootError(t('projectEditor.error.noWorkingDirectory'))
       setRootPath(null)
       setPinnedFiles([])
@@ -5526,7 +5758,8 @@ export function ProjectEditor({
         debugLog('root:changed', { previousRoot, nextRoot: normalizedCwd })
 	      }
 	      restoreTokenRef.current += 1
-	      editorSoftCloseSnapshotRef.current = null
+	      // Root change resets the LIVE state below; per-scope snapshots stay in
+	      // the store so the previous root's Task can still instant-reopen.
 	      hasRestoredStateRef.current = false
       restoringStateRef.current = false
       resetActiveFileState()
@@ -5547,7 +5780,7 @@ export function ProjectEditor({
     rootRef.current = effectiveCwd
     setSearchResults([])
     void loadRoot(effectiveCwd)
-  }, [closeHtmlPreviewSearch, closePreviewSearch, cwd, isOpen, loadRoot, resetActiveFileState, setActiveFilePathValue, t, updateHtmlPreviewScrollState, updateHtmlReaderState])
+  }, [_terminalId, closeHtmlPreviewSearch, closePreviewSearch, cwd, isOpen, loadRoot, resetActiveFileState, setActiveFilePathValue, t, updateHtmlPreviewScrollState, updateHtmlReaderState])
 
   useEffect(() => {
     if (!isOpen || !rootPath) return
@@ -5579,14 +5812,16 @@ export function ProjectEditor({
 
     if (!openRequest.filePath) {
       const currentScope = buildProjectEditorScope(_terminalId, rootRef.current ?? cwd ?? null)
-      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+      const currentScopeKey = getScrollScopeKey(currentScope)
+      const softCloseSnapshot = editorSoftCloseSnapshotsRef.current.peek(currentScopeKey)
       const hasSubpageReturnSnapshot = isProjectEditorSoftCloseSnapshotForScope(
         softCloseSnapshot,
         currentScope,
         'subpage-return'
       )
       if (hasSubpageReturnSnapshot) {
-        editorSoftCloseSnapshotRef.current = null
+        // Subpage-return snapshots are one-shot: consume on apply.
+        editorSoftCloseSnapshotsRef.current.delete(currentScopeKey)
         applyEditorSoftCloseSnapshot(softCloseSnapshot)
         if (
           softCloseSnapshot.path &&
@@ -5740,28 +5975,72 @@ export function ProjectEditor({
       // Soft-close fast path: surface the previous active file immediately
       // so state restoration does not wait for the full tree + AppState
       // pipeline. The snapshot also keeps Monaco populated before
-      // applyPendingViewState runs.
-      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
-      const scopedSoftCloseSnapshot = isProjectEditorSoftCloseSnapshotForScope(
-        softCloseSnapshot,
-        currentScope
-      )
-        ? softCloseSnapshot
-        : null
-      if (softCloseSnapshot && !scopedSoftCloseSnapshot) {
-        editorSoftCloseSnapshotRef.current = null
-      }
+      // applyPendingViewState runs. Per-scope store: another scope's open no
+      // longer clears this scope's snapshot.
+      const currentScopeKey = getScrollScopeKey(currentScope)
+      const scopedSoftCloseSnapshot = editorSoftCloseSnapshotsRef.current.get(currentScopeKey)
       const hadSubpageReturnSnapshot = scopedSoftCloseSnapshot?.kind === 'subpage-return'
       if (hadSubpageReturnSnapshot) {
-        editorSoftCloseSnapshotRef.current = null
+        // Subpage-return snapshots are one-shot: consume on apply.
+        editorSoftCloseSnapshotsRef.current.delete(currentScopeKey)
         applyEditorSoftCloseSnapshot(scopedSoftCloseSnapshot)
       }
       if (scopeChanged || !wasOpenRef.current) {
+        // Ownership reconciliation for the same-root Task switch: the live
+        // DOM may still show the PREVIOUS scope's file. A retained snapshot
+        // for THIS scope revives instantly when the file's content travels in
+        // the snapshot (markdown / plain text). URL-backed viewers (PDF /
+        // EPUB / HTML / image / sqlite) cannot be revived from the snapshot —
+        // their preview URLs belong to the foreign file — so reset and let
+        // the persisted-state restore remount them with this scope's memory.
+        const liveViewIsForeign = Boolean(
+          activeFilePathRef.current &&
+          activeFileScopeKeyRef.current !== null &&
+          currentScopeKey !== null &&
+          activeFileScopeKeyRef.current !== currentScopeKey
+        )
+        if (scopedSoftCloseSnapshot?.kind === 'retained-close' && liveViewIsForeign) {
+          const snapshotIsContentBacked = Boolean(
+            scopedSoftCloseSnapshot.path &&
+            !scopedSoftCloseSnapshot.isBinary &&
+            !scopedSoftCloseSnapshot.isImage &&
+            !scopedSoftCloseSnapshot.isSqlite &&
+            !scopedSoftCloseSnapshot.isPdf &&
+            !scopedSoftCloseSnapshot.isEpub &&
+            !scopedSoftCloseSnapshot.isHtml
+          )
+          if (snapshotIsContentBacked) {
+            // The on-screen rendered HTML belongs to the other file — blank it
+            // so the markdown branch below takes the idempotent session-cache
+            // re-apply arm instead of trusting the foreign zero-flash DOM.
+            markdownRenderedHtmlRef.current = ''
+            setMarkdownRenderedHtml('')
+            applyEditorSoftCloseSnapshot(scopedSoftCloseSnapshot)
+          } else {
+            resetActiveFileState()
+          }
+        } else if (liveViewIsForeign && !hadSubpageReturnSnapshot) {
+          // No snapshot for this scope: never keep a foreign file on screen.
+          resetActiveFileState()
+        }
         const hasRetainedViewForScope = Boolean(
           scopedSoftCloseSnapshot?.kind === 'retained-close' &&
           activeFilePathRef.current &&
-          rootRef.current
+          rootRef.current &&
+          (activeFileScopeKeyRef.current === null || activeFileScopeKeyRef.current === currentScopeKey)
         )
+        if (!wasOpenRef.current) {
+          perfTraceDiagnostic(
+            scopedSoftCloseSnapshot
+              ? PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_SNAPSHOT_APPLIED
+              : PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_SNAPSHOT_MISSED,
+            {
+              ph: 'i',
+              kind: scopedSoftCloseSnapshot?.kind ?? null,
+              retained: hasRetainedViewForScope
+            }
+          )
+        }
         restoredStateRef.current = getProjectEditorState(currentScope)
         hasRestoredStateRef.current = false
         restoringStateRef.current = false
@@ -6003,6 +6282,7 @@ export function ProjectEditor({
     getProjectEditorState,
     isOpen,
     persistProjectEditorState,
+    resetActiveFileState,
     resetPreviewRestoreState,
     validateRetainedActiveFileFreshness,
     _terminalId
@@ -6321,7 +6601,7 @@ export function ProjectEditor({
     debugLog('restore:trigger', { rootPath, treeLength: tree.length })
 
     const terminalStored = restoredStateRef.current
-    const stored = resolveStoredProjectEditorState(rootPath, terminalStored, null)
+    const stored = resolveStoredProjectEditorState(rootPath, terminalStored, null, window.electronAPI.platform)
     const restoredPinnedFiles = normalizeQuickFilePaths(stored?.pinnedFiles, MAX_PINNED_FILES)
     const restoredRecentFiles = normalizeQuickFilePaths(stored?.recentFiles, MAX_RECENT_FILES)
     setPinnedFiles(restoredPinnedFiles)
@@ -6333,6 +6613,24 @@ export function ProjectEditor({
       })
     }
     if (!stored) {
+      // Per-Task independence: a scope with no persisted state must show a
+      // clean empty editor — without this, a same-root Task switch leaves the
+      // previous Task's file on screen (and a later persist would write it
+      // into THIS scope's key).
+      const currentScopeKey = getScrollScopeKey(lastEditorScopeRef.current)
+      if (
+        activeFilePathRef.current &&
+        activeFileScopeKeyRef.current !== null &&
+        currentScopeKey !== null &&
+        activeFileScopeKeyRef.current !== currentScopeKey
+      ) {
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED, {
+          ph: 'i',
+          site: 'restore-null'
+        })
+        resetActiveFileState()
+        setSelectedPath(null)
+      }
       hasRestoredStateRef.current = true
       restoringStateRef.current = false
       return
@@ -6442,6 +6740,7 @@ export function ProjectEditor({
             pendingViewStateRef.current = stored.editorViewState as import('monaco-editor').editor.ICodeEditorViewState | null
             pendingViewStatePathRef.current = stored.activeFilePath
             pendingCursorRef.current = buildPendingCursor(stored.cursorLine, stored.cursorColumn)
+            pendingViewStateScopeKeyRef.current = getScrollScopeKey(lastEditorScopeRef.current)
             if (typeof stored.cursorLine === 'number' && stored.cursorLine > 1) {
               pendingViewStateFallbackRef.current = {
                 path: stored.activeFilePath,
@@ -6471,9 +6770,25 @@ export function ProjectEditor({
       } finally {
         if (token === restoreTokenRef.current) {
           restoringStateRef.current = false
+        } else if (
+          !restoreCancelledByUserRef.current &&
+          isOpenRef.current &&
+          getScrollScopeKey(lastEditorScopeRef.current) === applyScopeKey
+        ) {
+          // The restore was cancelled by an interleaved transition (another
+          // Task's open/close bumping the token), NOT by this Task's user —
+          // and this scope is still the open one. Re-arm the restore effect;
+          // the re-run is idempotent (openFile early-returns on same path).
+          restoringStateRef.current = false
+          hasRestoredStateRef.current = false
+          perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_RESTORE_RERUN_AFTER_CANCEL, {
+            ph: 'i'
+          })
         }
       }
     }
+    const applyScopeKey = getScrollScopeKey(lastEditorScopeRef.current)
+    restoreCancelledByUserRef.current = false
     const token = restoreTokenRef.current + 1
     restoreTokenRef.current = token
     void apply(token)
@@ -6484,6 +6799,7 @@ export function ProjectEditor({
     isOpen,
     openFile,
     queueFileTreeScrollRestore,
+    resetActiveFileState,
     restoreFileMemory,
     finalizeProjectEditorReopenRestore,
     rootError,
@@ -7644,13 +7960,17 @@ export function ProjectEditor({
 	        fileTreeScrollTopRef.current.set(treeKey, treeEl.scrollTop)
 	      }
 	      capturePreviewScrollMemory()
+	      await captureHtmlPreviewScrollMemory('close')
 	      captureMarkdownSessionCacheRef.current(retainViewOnClose ? 'close-retain' : 'close')
 	      persistProjectEditorState(scope, { flush: true })
 	    }
 	    if (retainViewOnClose) {
 	      captureEditorSoftCloseSnapshot('retained-close', scope)
 	    } else {
-	      editorSoftCloseSnapshotRef.current = null
+	      // Non-retained close invalidates only THIS scope's snapshot and its
+	      // markdown cache protection.
+	      editorSoftCloseSnapshotsRef.current.delete(getScrollScopeKey(scope))
+	      setScopeProtectedMarkdownCacheKey(getScrollScopeKey(scope), null)
 	    }
 	    skipClosePersistRef.current = true
 	    if (!retainViewOnClose) {
@@ -7718,11 +8038,13 @@ export function ProjectEditor({
     if (!canClose) return
     if (lastEditorScopeRef.current) {
       capturePreviewScrollMemory()
+      await captureHtmlPreviewScrollMemory('subpage-leave')
       captureMarkdownSessionCacheRef.current('subpage-before-leave')
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
       captureEditorSoftCloseSnapshot('subpage-return', lastEditorScopeRef.current)
     } else {
-      editorSoftCloseSnapshotRef.current = null
+      // No scope to key by — drop only this terminal's snapshots.
+      editorSoftCloseSnapshotsRef.current.deleteWhere((_key, snapshot) => snapshot.scope.terminalId === _terminalId)
     }
     skipClosePersistRef.current = true
     gitDiffOpenRef.current = true
@@ -7806,11 +8128,13 @@ export function ProjectEditor({
     if (!canClose) return
     if (lastEditorScopeRef.current) {
       capturePreviewScrollMemory()
+      await captureHtmlPreviewScrollMemory('subpage-leave')
       captureMarkdownSessionCacheRef.current('subpage-before-leave')
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
       captureEditorSoftCloseSnapshot('subpage-return', lastEditorScopeRef.current)
     } else {
-      editorSoftCloseSnapshotRef.current = null
+      // No scope to key by — drop only this terminal's snapshots.
+      editorSoftCloseSnapshotsRef.current.deleteWhere((_key, snapshot) => snapshot.scope.terminalId === _terminalId)
     }
     skipClosePersistRef.current = true
     resetActiveFileState({ preserveSoftCloseContent: true })
@@ -9539,20 +9863,24 @@ export function ProjectEditor({
           hasUnsavedChanges: dirtyRef.current,
           hasMissingFileNotice: Boolean(missingFileNoticeRef.current)
         })
+        const scopeSnapshot = editorSoftCloseSnapshotsRef.current.peek(getScrollScopeKey(scope))
         let softCloseSnapshot = isProjectEditorSoftCloseSnapshotForScope(
-          editorSoftCloseSnapshotRef.current,
+          scopeSnapshot,
           scope,
           snapshotKind
         )
-          ? editorSoftCloseSnapshotRef.current
+          ? scopeSnapshot
           : null
         if (!softCloseSnapshot && scope && shouldCaptureSoftClose) {
           capturePreviewScrollMemory()
+          // Fire-and-forget: beforeLeave is sync; the offset lands in
+          // fileMemoryRef for the next persist (2s poll is the backstop).
+          void captureHtmlPreviewScrollMemory('before-leave')
           captureMarkdownSessionCacheRef.current('subpage-before-leave')
           persistProjectEditorState(scope, { flush: true })
           softCloseSnapshot = captureEditorSoftCloseSnapshot(snapshotKind, scope)
         } else if (!shouldCaptureSoftClose) {
-          editorSoftCloseSnapshotRef.current = null
+          editorSoftCloseSnapshotsRef.current.delete(getScrollScopeKey(scope))
         }
         return {
           subpage: 'editor',

@@ -461,5 +461,133 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
     hasUpdatedMarker: Boolean(shortcutRendered.state?.bodyText?.includes(UPDATED_MARKER))
   })
 
+  // ── HTML scroll persistence (FileViewMemory.htmlScrollX/Y) ──
+  // Switching to another file destroys the browser view; returning must
+  // restore the offset from per-file memory, not from live DOM retention.
+  const HTML_SCROLL_TARGET_Y = 600
+  const htmlScrollTolerance = 80
+  const detourPath = `onward-autotest-phtml-detour-${Date.now()}.md`
+  const detourCreated = await window.electronAPI.project.createFile(
+    ctx.rootPath,
+    detourPath,
+    '# detour\n\nphtml scroll persistence detour file\n'
+  )
+  try {
+    // PHTML-16's Cmd+R reload restores its captured scroll on the FIRST
+    // load-finish — and the fixture's external HTTP script can keep `loading`
+    // true well past the rendered-DOM check. Seeding before that deferred
+    // restore lands would get stomped back to the old offset (real product
+    // race, pre-existing; see the 50ms apply in HtmlReader.onLoadingChanged).
+    // Structurally bypass it: wait until the reader fully settles, THEN seed.
+    await waitFor(
+      'phtml-scroll-persist-reader-settled',
+      () => {
+        const reader = getApi()?.getHtmlReaderState?.()
+        return Boolean(reader && !reader.isLoading && reader.loadCount >= 1)
+      },
+      15000,
+      100
+    )
+    await sleep(300)
+    const scrollSeeded = await (getApi()?.setHtmlPreviewScrollForTest?.(HTML_SCROLL_TARGET_Y) ?? Promise.resolve(false))
+    const scrollSeededReady = await waitForDocumentState(
+      'phtml-scroll-persist-seed',
+      (state) => Math.abs((state.scrollY ?? 0) - HTML_SCROLL_TARGET_Y) <= htmlScrollTolerance,
+      10000
+    )
+    // Give the 2s backstop poll one cycle so the offset lands in file memory
+    // even if no capture-triggering navigation has happened yet.
+    await sleep(2400)
+
+    await openFileInEditor(detourPath)
+    const detourOpened = await waitFor(
+      'phtml-scroll-persist-detour',
+      () => getApi()?.getActiveFilePath?.() === detourPath,
+      10000,
+      100
+    )
+    await openFileInEditor(fixturePath)
+    const backOnFixture = await waitFor(
+      'phtml-scroll-persist-return',
+      () => getApi()?.getActiveFilePath?.() === fixturePath,
+      10000,
+      100
+    )
+    const restoredAfterSwitch = await waitForDocumentState(
+      'phtml-scroll-persist-restored',
+      (state) => Math.abs((state.scrollY ?? 0) - HTML_SCROLL_TARGET_Y) <= htmlScrollTolerance,
+      15000
+    )
+    record('PHTML-17-html-scroll-survives-file-switch', Boolean(
+      detourCreated.success && scrollSeeded && scrollSeededReady.ok && detourOpened && backOnFixture && restoredAfterSwitch.ok
+    ), {
+      target: HTML_SCROLL_TARGET_Y,
+      seededScrollY: scrollSeededReady.state?.scrollY ?? null,
+      restoredScrollY: restoredAfterSwitch.state?.scrollY ?? null,
+      tolerance: htmlScrollTolerance
+    })
+    if (cancelled()) return results
+
+    // Close (ESC) and reopen the editor: position must survive the round-trip.
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true
+    }))
+    const closed = await waitFor(
+      'phtml-scroll-persist-close',
+      () => !(getApi()?.isOpen?.() ?? false),
+      10000,
+      100
+    )
+    const reopened = await ctx.reopenProjectEditor('phtml-scroll-persist-reopen')
+    const fixtureBackAfterReopen = await waitFor(
+      'phtml-scroll-persist-reopen-file',
+      () => getApi()?.getActiveFilePath?.() === fixturePath,
+      10000,
+      100
+    )
+    const restoredAfterReopen = await waitForDocumentState(
+      'phtml-scroll-persist-reopen-scroll',
+      (state) => Math.abs((state.scrollY ?? 0) - HTML_SCROLL_TARGET_Y) <= htmlScrollTolerance,
+      15000
+    )
+    record('PHTML-18-html-scroll-survives-close-reopen', Boolean(
+      closed && reopened && fixtureBackAfterReopen && restoredAfterReopen.ok
+    ), {
+      target: HTML_SCROLL_TARGET_Y,
+      restoredScrollY: restoredAfterReopen.state?.scrollY ?? null,
+      tolerance: htmlScrollTolerance
+    })
+
+    // Persisted round-trip: some projectEditorStates entry must carry the
+    // htmlScrollY for the fixture (locks the storage whitelist end-to-end).
+    let persistedHtmlScrollY: number | null = null
+    let persistedFound = false
+    const persistPollStartedAt = performance.now()
+    while (performance.now() - persistPollStartedAt < 10000) {
+      const appState = await window.electronAPI.appState.load()
+      for (const entry of Object.values(appState.projectEditorStates ?? {})) {
+        const memory = entry?.fileStates?.[fixturePath]
+        if (memory && typeof memory.htmlScrollY === 'number' && memory.htmlScrollY > 0) {
+          persistedHtmlScrollY = memory.htmlScrollY
+          persistedFound = true
+          break
+        }
+      }
+      if (persistedFound) break
+      await sleep(200)
+    }
+    record('PHTML-19-html-scroll-persisted-in-appstate', persistedFound, {
+      fixturePath,
+      persistedHtmlScrollY
+    })
+  } finally {
+    if (detourCreated.success) {
+      await window.electronAPI.project.deletePath(ctx.rootPath, detourPath)
+    }
+  }
+
   return results
 }

@@ -32,8 +32,8 @@ if ($content -match "\[AutoTest\] FAIL") {
   exit 1
 }
 
-if ($content -notmatch "PEMS-20-state-key-b-persisted") {
-  Write-Host "Missing PEMS-20-state-key-b-persisted result. Log: $LogFile" -ForegroundColor Red
+if ($content -notmatch "PEMS-30-cwd-drift-no-subdir-key") {
+  Write-Host "Missing PEMS-30-cwd-drift-no-subdir-key result. Log: $LogFile" -ForegroundColor Red
   Get-Content $LogFile -Tail 160
   exit 1
 }

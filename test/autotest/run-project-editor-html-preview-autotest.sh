@@ -82,8 +82,8 @@ if grep -Eq "totalFailed: [1-9]" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "PHTML-15-save-rerenders-fresh-document-and-restores-scroll" "$LOG_FILE"; then
-  echo "Missing PHTML-15 result; the test may not have executed correctly" >&2
+if ! grep -q "PHTML-19-html-scroll-persisted-in-appstate" "$LOG_FILE"; then
+  echo "Missing PHTML-19 result; the test may not have executed correctly" >&2
   tail -n 40 "$LOG_FILE" >&2
   exit 1
 fi

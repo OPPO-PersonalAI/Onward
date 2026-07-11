@@ -123,6 +123,11 @@ export interface FileViewMemory {
   pdfPageNumber?: number
   pdfScrollTop?: number
   pdfScale?: string
+  // HTML-preview scroll offset inside the embedded browser view (aligned with
+  // the PDF / EPUB fields above) so reopening the same HTML file restores the
+  // reading position instead of jumping back to the top.
+  htmlScrollX?: number
+  htmlScrollY?: number
 }
 
 /**

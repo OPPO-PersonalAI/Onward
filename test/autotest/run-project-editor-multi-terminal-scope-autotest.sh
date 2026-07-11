@@ -31,8 +31,8 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "PEMS-20-state-key-b-persisted" "$LOG_FILE"; then
-  echo "Missing PEMS-20-state-key-b-persisted result. Log: $LOG_FILE" >&2
+if ! grep -q "PEMS-30-cwd-drift-no-subdir-key" "$LOG_FILE"; then
+  echo "Missing PEMS-30-cwd-drift-no-subdir-key result. Log: $LOG_FILE" >&2
   tail -n 160 "$LOG_FILE" >&2
   exit 1
 fi

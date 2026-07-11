@@ -9,7 +9,13 @@ import { findTerminalNameState, type TerminalNameState } from '../utils/terminal
 import type { Prompt } from '../types/electron.d.ts'
 import type { CustomLayoutPreset } from '../types/prompt'
 import { normalizeProjectCwd as normalizeProjectCwdImpl } from '../utils/pathNormalize'
-import { perfTrace } from '../utils/perf-trace'
+import {
+  buildProjectEditorStateKey,
+  collectLegacyProjectEditorStateKeys,
+  findLegacyProjectEditorStateEntry
+} from '../utils/projectEditorStateKey'
+import { perfTrace, perfTraceDiagnostic } from '../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
 import { migrateLayoutMode, DEFAULT_LAYOUT_MODE } from '../utils/layout-mode'
 import { isValidCustomLayoutCells } from '../utils/custom-layout-validator'
 import { canonicalizeTerminalCwdForPersist } from '../utils/terminal-cwd-osc'
@@ -151,12 +157,8 @@ function isStringArrayEqual(a: string[], b: string[]): boolean {
   return true
 }
 
-function buildProjectEditorStateKey(scope: ProjectEditorScope): string | null {
-  const terminalId = typeof scope.terminalId === 'string' ? scope.terminalId.trim() : ''
-  const cwd = typeof scope.cwd === 'string' ? scope.cwd.trim() : ''
-  if (!terminalId || !cwd) return null
-  return JSON.stringify([terminalId, normalizeProjectCwd(cwd)])
-}
+// buildProjectEditorStateKey now lives in src/utils/projectEditorStateKey.ts
+// (pure module) so Node unit tests can exercise the key scheme directly.
 
 function isProjectEditorStateEqual(
   prev: ProjectEditorState | null | undefined,
@@ -199,7 +201,24 @@ function applyProjectEditorStateUpdate(
   const nextStates = { ...(prev.projectEditorStates ?? {}) }
   const previousState = nextStates[stateKey] ?? null
   if (normalizedState) {
-    if (isProjectEditorStateEqual(previousState, normalizedState)) {
+    // Write-time migration: drop sibling legacy keys (same terminal, same
+    // resolved root under an older cwd-based key) so an adopted entry
+    // re-homes to the canonical repo-root key instead of forking.
+    let droppedLegacyKey = false
+    if (normalizedState.rootPath && scope.terminalId) {
+      const legacyKeys = collectLegacyProjectEditorStateKeys(
+        nextStates,
+        scope.terminalId,
+        normalizedState.rootPath,
+        stateKey,
+        window.electronAPI?.platform ?? ''
+      )
+      for (const legacyKey of legacyKeys) {
+        delete nextStates[legacyKey]
+        droppedLegacyKey = true
+      }
+    }
+    if (!droppedLegacyKey && isProjectEditorStateEqual(previousState, normalizedState)) {
       return prev
     }
     nextStates[stateKey] = normalizedState
@@ -1444,7 +1463,25 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const getProjectEditorState = useCallback((scope: ProjectEditorScope): ProjectEditorState | null => {
     const stateKey = buildProjectEditorStateKey(scope)
     if (!stateKey) return null
-    return stateRef.current.projectEditorStates?.[stateKey] ?? null
+    const exact = stateRef.current.projectEditorStates?.[stateKey] ?? null
+    if (exact) return exact
+    // Legacy adoption: entries persisted before the repo-root scope
+    // normalization live under [terminalId, old-cwd] keys. Match them by the
+    // entry's own rootPath; the next persist re-homes them (write-time
+    // migration in applyProjectEditorStateUpdate).
+    if (!scope.terminalId || !scope.cwd) return null
+    const legacy = findLegacyProjectEditorStateEntry(
+      stateRef.current.projectEditorStates,
+      scope.terminalId,
+      scope.cwd,
+      window.electronAPI?.platform ?? ''
+    )
+    if (legacy) {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_SCOPE_STATE_LEGACY_ADOPTED, {
+        ph: 'i'
+      })
+    }
+    return legacy?.state ?? null
   }, [])
 
   const setProjectEditorState = useCallback((scope: ProjectEditorScope, projectState: ProjectEditorState | null) => {
