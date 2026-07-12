@@ -235,6 +235,15 @@ if group_has model-sync; then
   require_marker "GDS-44-trace-marker-stable-status-fingerprint-expected"
 fi
 
+# EXACT match, deliberately NOT group_has: the missed-watch repro group is
+# explicit-only (the TS gates it on gdsGroup === 'missed-watch', excluded from
+# the '' whole-suite default because it needs the GSM_*_SILENT env pair its
+# dedicated runner sets), so requiring its markers under '' would always fail.
+if [[ "$GDS_GROUP" == "missed-watch" ]]; then
+  require_marker "GDS-50-missed-watch-reopen-surfaces-new-file"
+  require_marker "GDS-51-missed-watch-reopen-refreshes-selected-body"
+fi
+
 # ---------------------------------------------------------------------------
 # GDS-11/12: post-mortem trace inspection. Verify the new trace events
 # actually fired during the test session.

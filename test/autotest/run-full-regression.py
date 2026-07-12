@@ -114,6 +114,19 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-diff-ux-presentation-autotest.sh",
     "test/autotest/run-git-diff-ux-tree-autotest.sh",
     "test/autotest/run-git-diff-model-sync-autotest.sh",
+    # EXPLICIT-ONLY 8th GDS group (excluded from GDS_GROUP=''): reopen freshness
+    # under a fully-silenced mirror (GSM watcher + reconcile heartbeat muted via
+    # env) — GDS-50/51 lock the mirror attach-lifecycle recovery contract.
+    # ~20s measured.
+    "test/autotest/run-git-diff-missed-watch-autotest.sh",
+    # USER-PERSPECTIVE contract suite for the Agent Coding First workload: an
+    # external chaos-writer process mutates the repo CONCURRENTLY with UI
+    # interaction (seed-fixed random bursts), then quiesces; the UI must
+    # converge to on-disk truth (file set + bodies) within the SLO with no
+    # manual refresh. Catches the write-during-read staleness class the
+    # serialized GDS mechanism suites structurally cannot construct
+    # (2026-07-12 TOCTOU bundle). ~60s measured (3 cycles x 12s burst).
+    "test/autotest/run-git-diff-chaos-convergence-autotest.sh",
     "test/autotest/run-git-diff-nested-gitlink-autotest.sh",
     "test/autotest/run-git-large-file-confirmation-autotest.sh",
     # Split into -a (3 trials) + -b (2 trials): the whole 5-trial quit suite
@@ -275,6 +288,14 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     "test/autotest/run-git-diff-ux-presentation-autotest.sh": 280,
     "test/autotest/run-git-diff-ux-tree-autotest.sh": 280,
     "test/autotest/run-git-diff-model-sync-autotest.sh": 280,
+    # 8th (explicit-only) GDS group: ~20s measured app session, but it shares the
+    # family's 280s in-app watchdog, so the orchestrator fence sits above it like
+    # the other GDS slices instead of killing a wedged app mid-teardown at 180s.
+    "test/autotest/run-git-diff-missed-watch-autotest.sh": 280,
+    # Chaos-convergence: ~60s measured (3 x 12s burst + sub-second convergence);
+    # 280 aligns the orchestrator fence with the runner's own 280s watchdog so a
+    # wedged writer/app pair is killed by the in-app fence first.
+    "test/autotest/run-git-diff-chaos-convergence-autotest.sh": 280,
     # Nested-gitlink (no .gitmodules) suite: one app session + 3 IPC calls over a
     # tiny 1-parent + 2-gitlink fixture. Kept deliberately small/fast (NOT amended
     # into the 600s staleness suite); the 150s in-app watchdog caps a hang.

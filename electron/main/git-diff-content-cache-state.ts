@@ -242,6 +242,16 @@ export function createFetchFileContentWithCache<T extends CacheableFetchResult>(
     const generationAtFetchStart = deps.cache.getProjectGeneration(project)
 
     let readRevalidateStale = false
+    // Freshness token for the entry we may store below. MUST witness the
+    // working-tree state at/before the worker READ, never after: capturing it
+    // post-fetch let an external edit land between the worker's read and the
+    // stat, storing OLD content under the NEW token — an entry the read-path
+    // revalidation then validated as fresh forever (the 2026-07-12 bundle's
+    // "stale diff until manual refresh"; unit-pinned by the wiring test's
+    // "REPRO TOCTOU" case). The inverse race (edit between this stat and the
+    // worker read) stores NEW content under the OLD token, which merely costs
+    // one conservative refetch on the next read — never a stale serve.
+    let preFetchStaleToken: string | undefined
     const cachedEntry = force ? null : deps.cache.getEntry(project, key)
     if (cachedEntry) {
       // Stat-validate the working-tree side ON READ (not only on a watcher/mirror
@@ -262,6 +272,9 @@ export function createFetchFileContentWithCache<T extends CacheableFetchResult>(
       } catch {
         currentToken = undefined
       }
+      // Reuse as the pre-fetch token when this hit proves stale below: it was
+      // captured before any worker read, which is exactly the store contract.
+      preFetchStaleToken = currentToken
       if (decideContentCacheReadFreshness(cachedEntry.staleToken, currentToken) === 'fresh') {
         deps.recordHit?.({
           project,
@@ -298,23 +311,28 @@ export function createFetchFileContentWithCache<T extends CacheableFetchResult>(
       reason: missReason,
       force
     })
+    // No cached entry (first load / force) → the pre-fetch token was not
+    // captured above; take it NOW, before the worker read (see the TOCTOU
+    // comment at the top of this function).
+    if (!cachedEntry) {
+      try {
+        preFetchStaleToken = deps.computeStaleToken ? await deps.computeStaleToken(project, args.file) : undefined
+      } catch {
+        preFetchStaleToken = undefined
+      }
+    }
     const result = await deps.fetchFromWorker(args.cwd, args.file, args.repoRoot, args.options)
     let stored = false
     let bytes = 0
     let finalMissReason: GitDiffContentCacheMissReason = result.success ? missReason : 'worker-error'
     if (result.success) {
       bytes = deps.estimateBytes(result)
-      // Capture the file's freshness token (working-tree stat) so a later
-      // mirror-update can re-validate this entry and evict it ONLY if the file
-      // actually changed — instead of wiping the whole project bucket.
-      let staleToken: string | undefined
-      try {
-        staleToken = deps.computeStaleToken ? await deps.computeStaleToken(project, args.file) : undefined
-      } catch {
-        staleToken = undefined
-      }
+      // Store under the PRE-fetch freshness token (captured before the worker
+      // read — see the TOCTOU comment above) so a later mirror-update or
+      // read-path revalidation compares against the state the cached body was
+      // actually read from.
       if (deps.cache.isProjectGenerationCurrent(project, generationAtFetchStart)) {
-        stored = deps.cache.put(project, key, withoutCacheInfo(result), bytes, staleToken)
+        stored = deps.cache.put(project, key, withoutCacheInfo(result), bytes, preFetchStaleToken)
       } else {
         deps.recordSkipStaleGeneration?.({
           project,

@@ -32,6 +32,7 @@ import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
+import { testGitDiffChaosConvergence } from './test-git-diff-chaos-convergence'
 import { testGitDiffNestedGitlink } from './test-git-diff-nested-gitlink'
 import { testGitDiffClickLatency } from './test-git-diff-click-latency'
 import { testGitDiffIdenticalBlob } from './test-git-diff-identical-blob'
@@ -145,7 +146,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
           .filter(Boolean)
       )
     : null
-  const shouldRun = (suiteId: string) => !suiteAllowList || suiteAllowList.has(suiteId)
+  // `explicitOnly` suites need environment their dedicated runner provides (an
+  // external companion process, special env) — they run only when NAMED in the
+  // suite filter, never as part of an 'all' run.
+  const shouldRun = (suiteId: string, options?: { explicitOnly?: boolean }) => {
+    if (options?.explicitOnly) return Boolean(suiteAllowList?.has(suiteId))
+    return !suiteAllowList || suiteAllowList.has(suiteId)
+  }
   const runtimeErrors: Array<{ type: 'error' | 'unhandledrejection'; message: string; stack: string | null }> = []
   const handleWindowError = (event: ErrorEvent) => {
     const issue = event.error ?? event.message
@@ -698,6 +705,19 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase5.497:begin')
       const results = await testGitStateMirrorGitCommandFreshness(ctx)
       collectSuiteResults('GitStateMirrorGitCommandFreshness', results)
+      await sleep(300)
+    }
+
+    // Phase 5.498: Git Diff chaos-convergence — the user-perspective contract
+    // test for the Agent Coding First workload (an external writer process
+    // mutates the repo concurrently with UI interaction; the UI must converge
+    // to disk truth after each quiesce without a manual refresh). EXPLICIT-ONLY:
+    // requires its dedicated runner to spawn the chaos-writer process and its
+    // own fixture, so it never rides an 'all' run.
+    if (!ctx.cancelled() && shouldRun('git-diff-chaos-convergence', { explicitOnly: true })) {
+      log('phase5.498:begin')
+      const results = await testGitDiffChaosConvergence(ctx)
+      collectSuiteResults('GitDiffChaosConvergence', results)
       await sleep(300)
     }
 

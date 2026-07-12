@@ -664,3 +664,56 @@ test('parseCacheKey rejoins a filename that itself contains "::" (defensive)', (
   const f: ContentCacheFile = { filename: 'weird::name.txt', status: 'M', originalFilename: undefined, changeType: 'unstaged', isSubmoduleEntry: false }
   assert.equal(parseCacheKey(buildCacheKey(f)).filename, 'weird::name.txt')
 })
+
+// ---------------------------------------------------------------------------
+// REPRO TOCTOU (2026-07-12 diagnostic bundle, "diff shows stale content until
+// manual refresh") — now locking the FIX. The store path used to capture the
+// working-tree stat token AFTER `fetchFromWorker` resolved, so an external
+// edit landing while the fetch was in flight stored OLD content under the NEW
+// stat token; every later read then re-stat'ed the file, saw the token match,
+// and served the pre-edit body as a validated hit forever (only a manual
+// refresh recovered). The mirror never helps here: its state is CORRECT and
+// unchanged after the racing write, so no invalidation is ever pushed.
+//
+// Contract locked: the freshness token stored with an entry witnesses the
+// working-tree state the cached CONTENT was read from — captured at/before
+// the worker read — so a mid-fetch edit makes the very next read provably
+// stale and re-fetch fresh content.
+// ---------------------------------------------------------------------------
+
+test('REPRO TOCTOU: mid-fetch external edit must not poison the cache into serving pre-edit content as a validated hit', async () => {
+  // One mutable simulated file: content + its worktree stat token move together.
+  let fileContent = 'v1 body\n'
+  let fileToken = 'mtime:100:size:8'
+  const file = unstagedModify('Notes/study/doc.html')
+
+  const deps = makeDeps({
+    fetchFromWorker: async (_cwd, f) => {
+      // The worker reads the file NOW (content v1)...
+      const readContent = fileContent
+      // ...and the external edit lands while the fetch is still in flight,
+      // BEFORE the wiring's post-fetch computeStaleToken stat runs.
+      fileContent = 'v2 body\n'
+      fileToken = 'mtime:200:size:8'
+      return { success: true, filename: f.filename, modifiedContent: readContent }
+    }
+  })
+  deps.computeStaleToken = async () => fileToken
+
+  const fetchFileContent = createFetchFileContentWithCache(deps)
+
+  const first = await fetchFileContent({ cwd: '/repo', file })
+  // Serving what the worker read at fetch time is fine — the edit raced it.
+  assert.equal(first.modifiedContent, 'v1 body\n')
+
+  // A later click re-reads through the cache. On disk the file is v2 with
+  // token mtime:200. The entry holds v1 content; if its stored token is also
+  // mtime:200 (captured after the fetch), the read revalidation wrongly says
+  // "fresh" and v1 is served forever.
+  const second = await fetchFileContent({ cwd: '/repo', file })
+  assert.equal(
+    second.modifiedContent,
+    'v2 body\n',
+    'read served pre-edit content as a validated hit: staleToken was captured after the fetch (TOCTOU)'
+  )
+})

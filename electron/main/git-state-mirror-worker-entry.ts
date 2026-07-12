@@ -183,6 +183,16 @@ const autotestWatcherFailCallbackOnce =
 const autotestWatcherSilent =
   process.env.ONWARD_AUTOTEST === '1' &&
   process.env.ONWARD_AUTOTEST_GSM_WATCHER_SILENT === '1'
+// Companion to WATCHER_SILENT: also silence the always-on reconcile heartbeat,
+// leaving explicit `revalidate` / focus-resync / attach recomputes as the ONLY
+// freshness sources. WATCHER_SILENT alone models "watcher dropped events, the
+// heartbeat safety net still recovers"; the PAIR models "the mirror authority
+// missed the change entirely" — the watcher-missed staleness class from the
+// 2026-07-12 diagnostic bundle — deterministically, instead of a test racing
+// the heartbeat's 1-3 s cadence. Used by the git-diff missed-watch repro group.
+const autotestReconcileSilent =
+  process.env.ONWARD_AUTOTEST === '1' &&
+  process.env.ONWARD_AUTOTEST_GSM_RECONCILE_SILENT === '1'
 let autotestSubscribeFailurePending = autotestWatcherFailSubscribeOnce
 
 // Per-cwd MirrorState.generation counter. Bumped on every focus-resync
@@ -247,11 +257,12 @@ function log(
   emit({ kind: 'log', level, message, data })
 }
 
-if (autotestWatcherFailSubscribeOnce || autotestWatcherFailCallbackOnce || autotestWatcherSilent) {
+if (autotestWatcherFailSubscribeOnce || autotestWatcherFailCallbackOnce || autotestWatcherSilent || autotestReconcileSilent) {
   log('warn', 'autotest watcher failure injection active', {
     subscribeOnce: autotestWatcherFailSubscribeOnce,
     callbackOnce: autotestWatcherFailCallbackOnce,
-    silent: autotestWatcherSilent
+    silent: autotestWatcherSilent,
+    reconcileSilent: autotestReconcileSilent
   })
 }
 
@@ -843,6 +854,15 @@ function resolveFocusedRepoRootKey(cwd: string | null): string | null {
 }
 
 async function runGroupReconcile(group: MirrorWatcherGroup, reason: ReconcileReason): Promise<void> {
+  // Autotest: with the reconcile heartbeat silenced (paired with WATCHER_SILENT),
+  // no AUTOMATIC path can refresh this repo — only explicit revalidate /
+  // focus-resync / attach recomputes remain. Mark the scheduler cycle done so
+  // the tick loop keeps its cadence bookkeeping instead of re-queueing forever.
+  if (autotestReconcileSilent) {
+    reconcileScheduler.onReconcileStart(group.repoRootKey)
+    reconcileScheduler.onReconcileDone(group.repoRootKey, Date.now(), 0)
+    return
+  }
   reconcileScheduler.onReconcileStart(group.repoRootKey)
   const startedAt = Date.now()
   let changed = false

@@ -392,8 +392,17 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   //   'model-sync'          — open-view selected-body refresh + repeated same-file
   //                           refresh + external stable-status edits Monaco model
   //                           sync (GDS-19, 43, 44). ~119 s work.
-  //   ''                    — default: run every group so the suite stays runnable
-  //                           whole.
+  //   'missed-watch'        — EXPLICIT-ONLY (not part of ''): reproduction of the
+  //                           2026-07-12 diagnostic bundle's watcher-missed
+  //                           staleness (GDS-50, 51). Requires the mirror to be
+  //                           silenced via ONWARD_AUTOTEST_GSM_WATCHER_SILENT=1 +
+  //                           ONWARD_AUTOTEST_GSM_RECONCILE_SILENT=1, which only
+  //                           run-git-diff-missed-watch-autotest.sh sets; under a
+  //                           LIVE mirror the invalidation push would mask the
+  //                           defect and the cases would false-pass, so the group
+  //                           never rides the whole-suite default.
+  //   ''                    — default: run every group EXCEPT 'missed-watch' so
+  //                           the suite stays runnable whole.
   // GDS-00 (fixture) brackets every group; trace markers at the tail are gated
   // per group so each split runner only emits / requires its own group's markers.
   const gdsGroup = window.electronAPI.debug.autotestGdsGroup || ''
@@ -1108,6 +1117,144 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       N,
       note: 'freshCount===N: the immediate re-read after an external edit is fresh (the regression fails here); viaStatRevalidate>=1: the read-path fs.stat compare (not the watcher) surfaced it'
     })
+  }
+
+  // ═════ GDS-50 / GDS-51: missed-watch reopen freshness (2026-07-12 diagnostic bundle) ═════
+  // Authored as a reproduction attempt for the bundle's "stale until manual
+  // refresh" report — and the cases PASSED: in this fixture the Git Diff viewer
+  // is the cwd's only mirror subscriber, so the subpage close detaches the
+  // mirror entry and the reopen's re-attach runs a REAL `git status` (reason
+  // 'attach') whose delta fans out and force-reloads the view. The pass is the
+  // finding: the reopen path recovers via the attach lifecycle even with the
+  // mirror fully silenced, so the bundle's root cause is NOT a missed-event
+  // class — it is the content-cache staleToken TOCTOU pinned by
+  // test/unittest/git-diff-content-cache-wiring.test.mts "REPRO TOCTOU"
+  // (mirror state correct → no invalidation ever → poisoned entry served
+  // forever). These cases stay as GREEN locks on the attach-recovery contract.
+  //
+  // Model: the mirror authority (FS watcher + reconcile heartbeat) missed a
+  // change entirely. The runner silences both via
+  // ONWARD_AUTOTEST_GSM_WATCHER_SILENT=1 + ONWARD_AUTOTEST_GSM_RECONCILE_SILENT=1,
+  // so no watcher/heartbeat push can satisfy the assertions for the wrong
+  // reason. The mutation goes through debug.writeExternalFile (raw fs write,
+  // no IPC-save invalidation), the same watcher-missed primitive GDS-47 uses.
+  //
+  // Contract asserted (user-level, mechanism-agnostic): a same-cwd RE-OPEN of
+  // Git Diff must surface the on-disk truth WITHOUT a manual refresh.
+  // NB: a persistent second mirror subscriber on the cwd (a terminal badge in
+  // the user's real session) would keep the entry attached across the close,
+  // skip the attach recompute, and re-expose the reopen to any silent-mirror
+  // gap — if that topology ever needs locking too, hold an extra
+  // subscribeMirror(cleanRoot) across the case.
+  //
+  // Freshness window: NOT adaptiveDiffBudget() — its 90 s floor would burn
+  // 3 min of wall clock on the red path. This is a convergence bound, not a
+  // user-facing latency budget: post-fix the reopen chain needs one mirror
+  // recompute + one forced getDiff, both tracked by measuredDiffMs, so 3x the
+  // measured cost with a 15 s fast-host floor bounds it with wide slack while
+  // keeping the by-design-red wait affordable.
+  const missedWatchFreshnessBudget = (): number => {
+    if (measuredDiffMs === null) return 15_000
+    return Math.min(DIFF_LOAD_CAP_MS, Math.max(15_000, measuredDiffMs * 3))
+  }
+
+  // ─── GDS-50: reopen after a missed NEW-file creation must list the new file ───
+  if (!cancelled() && gdsGroup === 'missed-watch') {
+    await restoreBaseline()
+    const newRel = 'gds50_missed_watch_new_file.md'
+    // Dirty the baseline BEFORE opening: restoreBaseline() leaves the fixture
+    // repo clean (empty diff list), so a list-presence wait keyed on parentFile
+    // would never satisfy and would burn its whole budget (the authoring bug
+    // behind this runner's first 280 s watchdog kill — fileCount:0 in the log).
+    await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\nGDS-50 baseline dirty edit\n')
+    await sleep(280)
+    // First open: baseline list, warms every cache layer (request cache,
+    // content cache, renderer fileContents + lastDiff).
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-50-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-50-first-list', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
+    }, adaptiveDiffBudget())
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-50-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+
+    // NEW file lands while Diff is closed; the silenced mirror never reports it.
+    await window.electronAPI.debug.writeExternalFile({
+      root: cleanRoot,
+      relPath: newRel,
+      content: '# GDS-50\n\nCreated behind the silenced mirror; must surface on reopen.\n'
+    })
+    await sleep(300) // user-scale gap; nothing is being waited on — no push can come
+
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-50-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    const newFileListed = await waitFor('GDS-50-second-list-has-new-file', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === newRel))
+    }, missedWatchFreshnessBudget())
+    record('GDS-50-missed-watch-reopen-surfaces-new-file', newFileListed, {
+      newRel,
+      freshnessBudgetMs: missedWatchFreshnessBudget(),
+      visibleFiles: (window.__onwardGitDiffDebug?.getFileList() ?? []).map((f) => clampPath(f.filename)),
+      note: 'reopen after a mirror-missed file creation must list the new file without a manual refresh'
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-50-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+    await window.electronAPI.project.deletePath(cleanRoot, newRel)
+  }
+
+  // ─── GDS-51: reopen after a missed EDIT must show the fresh body, not renderer memory ───
+  if (!cancelled() && gdsGroup === 'missed-watch') {
+    await restoreBaseline()
+    const v1 = 'parent source line\nGDS-51 v1 body cached by the first open\n'
+    const v2 = 'parent source line\nGDS-51 v2 EXTERNAL edit the mirror missed\n'
+    await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, v1)
+    await sleep(280)
+
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-51-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-51-first-list', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
+    }, adaptiveDiffBudget())
+    const api1 = window.__onwardGitDiffDebug
+    if (api1 && api1.getSelectedFile()?.filename !== parentFile) {
+      api1.selectFileByPath(parentFile)
+    }
+    const firstFresh = await waitForSelectedContentAndModel('GDS-51-first-content-ready', v1, {
+      timeoutMs: adaptiveDiffBudget()
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-51-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+
+    // External edit while closed — raw write, silenced mirror: no invalidation
+    // push will EVER arrive, so the renderer's fileContents keeps the v1 body.
+    await window.electronAPI.debug.writeExternalFile({ root: cleanRoot, relPath: parentFile, content: v2 })
+    await sleep(300)
+
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-51-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-51-second-list', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
+    }, adaptiveDiffBudget())
+    const api2 = window.__onwardGitDiffDebug
+    if (api2 && api2.getSelectedFile()?.filename !== parentFile) {
+      api2.selectFileByPath(parentFile)
+    }
+    const secondFresh = await waitForSelectedContentAndModel('GDS-51-second-content-fresh', v2, {
+      timeoutMs: missedWatchFreshnessBudget()
+    })
+    record('GDS-51-missed-watch-reopen-refreshes-selected-body', Boolean(firstFresh && secondFresh), {
+      firstFresh,
+      secondFresh,
+      freshnessBudgetMs: missedWatchFreshnessBudget(),
+      selectedSnapshot: getSelectedFileContentSnapshot(),
+      note: 'reopen after a mirror-missed edit must show the on-disk body, not the previous open’s renderer memory'
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-51-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
   // ─────────────── GDS-18: re-entry latency trend is recorded ───────────────

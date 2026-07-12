@@ -3180,7 +3180,11 @@ export function GitDiffViewer({
       if (file && !isDraftDirtyRef.current) {
         await ensureFileContentRef.current?.(file, true, 'refresh')
       }
-      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MANUAL_REFRESH, {
+      // Diagnostic tier (prod default-on): the manual-refresh click count is
+      // THE user-pain signal in a staleness bundle (the 2026-07-12 report's
+      // 3-clicks-in-17s pattern was only recoverable from main-side force
+      // invalidations). User-click frequency — trivially within budget.
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MANUAL_REFRESH, {
         cwd,
         terminalId,
         result: 'success',
@@ -3188,7 +3192,7 @@ export function GitDiffViewer({
       })
       return true
     } catch (error) {
-      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MANUAL_REFRESH, {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MANUAL_REFRESH, {
         cwd,
         terminalId,
         result: 'exception',
@@ -3357,7 +3361,13 @@ export function GitDiffViewer({
         staleFileContentKeysRef.current.clear()
       }
       lastDiffRef.current = null
-      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_CACHE_INVALIDATION, {
+      // Diagnostic tier (prod default-on): whether the renderer RECEIVED and
+      // matched an invalidation push is the load-bearing breadcrumb for any
+      // "diff stays stale until manual refresh" bundle — the 2026-07-12
+      // analysis had to infer it indirectly because this rode the opt-in
+      // channel. Frequency is mirror-invalidation-scale (debounced), not
+      // per-frame, so it fits the diagnostic channel's budget.
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_CACHE_INVALIDATION, {
         cwd: targetCwd,
         terminalId,
         invalidatedCwd,
@@ -3700,7 +3710,10 @@ export function GitDiffViewer({
       // lengths so a "Git Diff shows stale/base content for a staged entry"
       // report (GDS-22/33) is root-causable — a staged hit whose modifiedLen
       // equals its originalLen (both == HEAD/base length) is a stale-slot hit.
-      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_LOAD_MEMORY_HIT, {
+      // Diagnostic tier (prod default-on): a click served from renderer memory
+      // WITHOUT any fetch is exactly the branch a "stale body" bundle needs to
+      // see — per-click frequency, small payload (lengths only, no content).
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_LOAD_MEMORY_HIT, {
         terminalId,
         fileKey,
         filename: file.filename,
