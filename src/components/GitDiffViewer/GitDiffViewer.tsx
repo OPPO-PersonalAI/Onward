@@ -19,6 +19,7 @@ import type {
 import { useSettings } from '../../contexts/SettingsContext'
 import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
+import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useGitStateMirror } from '../../hooks/useGitStateMirror'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
@@ -1340,6 +1341,12 @@ export function GitDiffViewer({
   const [isRefreshingChanges, setIsRefreshingChanges] = useState(false)
   const [termsPopoverOpen, setTermsPopoverOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetFile: GitFileStatus } | null>(null)
+  const contextMenuElRef = useRef<HTMLDivElement | null>(null)
+  const contextMenuPosition = useViewportMenuPosition(
+    contextMenuElRef,
+    contextMenu ? { x: contextMenu.x, y: contextMenu.y } : null,
+    { surface: 'git-diff-file' }
+  )
   const [fileListViewMode, setFileListViewModeState] = useState<GitDiffFileListViewMode>(() => {
     const prefs = getUIPreferences()
     if (isGitDiffFileListViewMode(prefs.gitDiffFileListViewMode)) return prefs.gitDiffFileListViewMode
@@ -7491,8 +7498,13 @@ export function GitDiffViewer({
         {/* right click menu */}
         {contextMenu && (
           <div
+            ref={contextMenuElRef}
             className="git-diff-context-menu"
-            style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y }}
+            style={{
+              position: 'fixed',
+              left: contextMenuPosition?.x ?? contextMenu.x,
+              top: contextMenuPosition?.y ?? contextMenu.y
+            }}
             onMouseDown={(e) => e.stopPropagation()}
           >
             <button

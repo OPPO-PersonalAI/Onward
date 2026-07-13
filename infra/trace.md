@@ -660,6 +660,12 @@ restore-in-place strategy.
 | `RENDERER_FILE_ENTRY_EXIST_CHECK` | `renderer:file-entry.exist-check` | `i` | Same hook — on-disk existence check run when a file-entry context menu opens (gates the disabled state of the two OS actions). Tagged `surface`, `exists`, `skipped` (git-status `deleted` entries skip the IPC), `durationMs`. |
 | `RENDERER_FILE_ENTRY_MONACO_ACTIONS_SKIPPED` | `renderer:file-entry.monaco-actions-skipped` | `i` | `ProjectEditor.tsx` Monaco action-registration effect — `editor.addAction` threw because the editor instance was already disposed (locale change while the `<Editor>` conditional is unmounted). Breadcrumb for "Monaco context-menu items missing" reports; next onMount re-registers. Tagged `reason`, `error`. |
 
+#### Popup placement (shared popup-position util, DIAGNOSTIC tier)
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `RENDERER_POPUP_POSITION_ADJUSTED` | `renderer:popup.position-adjusted` | `i` | `src/hooks/useViewportMenuPosition.ts` — emitted only when a cursor-anchored menu's placement was adjusted to stay inside the viewport (flip above the cursor / clamp against an edge). Payload `{ surface, flippedY, clampedX, clampedY, anchorX, anchorY, menuWidth, menuHeight }`. Surfaces: `git-history-file`, `git-diff-file`, `project-editor-entry`, `custom-layout-cell` (Prompt/terminal menus share the same math via `computeMenuPosition` but keep their pre-existing host-local trace events). Breadcrumb for "menu opens half off-screen" reports. |
+
 #### Background ops
 
 | Constant | Name | Phase | Call site |

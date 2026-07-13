@@ -10,6 +10,7 @@ import type { TerminalInfo } from '../../types/prompt'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { computeMenuPosition, computeSubmenuLayout } from '../../utils/popup-position'
 import './PromptEditorContextMenu.css'
 
 const PINNED_PRIMARY_LIMIT = 10
@@ -27,11 +28,6 @@ type SubmenuLayout = {
   minWidth: number
   maxWidth: number
   maxHeight: number
-}
-
-function clamp(value: number, min: number, max: number): number {
-  if (max < min) return min
-  return Math.min(Math.max(value, min), max)
 }
 
 export interface ContextMenuSnapshot {
@@ -135,20 +131,17 @@ export function PromptEditorContextMenu({
     const el = menuRef.current
     if (!el) return
     const rect = el.getBoundingClientRect()
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    const margin = MENU_VIEWPORT_MARGIN
-    let nx = position.x
-    let ny = position.y
-    if (nx + rect.width > vw - margin) {
-      nx = Math.max(margin, vw - rect.width - margin)
-    }
-    if (ny + rect.height > vh - margin) {
-      // Flip above the cursor first (preserves natural feel)
-      const flipped = position.y - rect.height
-      ny = flipped >= margin ? flipped : Math.max(margin, vh - rect.height - margin)
-    }
-    setEffectivePosition(prev => (prev.x === nx && prev.y === ny ? prev : { x: nx, y: ny }))
+    // Shared flip-then-clamp math (extracted from this component into
+    // popup-position.ts so every context menu places identically).
+    const result = computeMenuPosition({
+      anchor: { x: position.x, y: position.y },
+      menu: { width: rect.width, height: rect.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      margin: MENU_VIEWPORT_MARGIN
+    })
+    setEffectivePosition(prev => (
+      prev.x === result.x && prev.y === result.y ? prev : { x: result.x, y: result.y }
+    ))
   }, [position.x, position.y, viewportVersion])
 
   // Submenus stay nested in the menu DOM for outside-click containment, but
@@ -170,34 +163,31 @@ export function PromptEditorContextMenu({
     const submenuRect = el.getBoundingClientRect()
     const vw = window.innerWidth
     const vh = window.innerHeight
-    const margin = MENU_VIEWPORT_MARGIN + SUBMENU_LAYOUT_SAFETY_INSET
-    const availableWidth = Math.max(80, vw - margin * 2)
-    const availableHeight = Math.max(80, vh - margin * 2)
     const computedStyle = window.getComputedStyle(el)
     const computedWidth = Number.parseFloat(computedStyle.width) || 0
     const computedHeight = Number.parseFloat(computedStyle.height) || 0
     const naturalWidth = Math.ceil(Math.max(submenuRect.width, el.scrollWidth, computedWidth))
     const naturalHeight = Math.ceil(Math.max(submenuRect.height, el.scrollHeight, computedHeight))
-    const width = Math.min(naturalWidth, availableWidth)
-    const height = Math.min(naturalHeight, availableHeight)
-    const spaceRight = vw - margin - anchorRect.right - SUBMENU_GAP
-    const spaceLeft = anchorRect.left - margin - SUBMENU_GAP
-    const openRight = spaceRight >= width || spaceRight >= spaceLeft
-    const preferredLeft = openRight
-      ? anchorRect.right + SUBMENU_GAP
-      : anchorRect.left - SUBMENU_GAP - width
-    const preferredTop = anchorRect.top - SUBMENU_VERTICAL_OFFSET
-    const viewportLeft = clamp(preferredLeft, margin, vw - margin - width)
-    const viewportTop = clamp(preferredTop, margin, vh - margin - height)
-    const clampedX = Math.abs(viewportLeft - preferredLeft) > 0.5
-    const clampedY = Math.abs(viewportTop - preferredTop) > 0.5
+    // Shared side-picking + clamping math (popup-position.ts).
+    const layout = computeSubmenuLayout({
+      anchorRect,
+      natural: { width: naturalWidth, height: naturalHeight },
+      viewport: { width: vw, height: vh },
+      margin: MENU_VIEWPORT_MARGIN + SUBMENU_LAYOUT_SAFETY_INSET,
+      gap: SUBMENU_GAP,
+      verticalOffset: SUBMENU_VERTICAL_OFFSET,
+      minWidthCap: 220
+    })
+    const { openRight, clampedX, clampedY } = layout
+    const width = layout.width
+    const height = Math.min(naturalHeight, layout.maxHeight)
     const nextLayout: SubmenuLayout = {
-      left: Math.round(viewportLeft - anchorRect.left),
-      top: Math.round(viewportTop - anchorRect.top),
-      width: Math.round(width),
-      minWidth: Math.round(Math.min(220, availableWidth)),
-      maxWidth: Math.round(availableWidth),
-      maxHeight: Math.round(availableHeight)
+      left: layout.left,
+      top: layout.top,
+      width: layout.width,
+      minWidth: layout.minWidth,
+      maxWidth: layout.maxWidth,
+      maxHeight: layout.maxHeight
     }
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_CTX_SUBMENU_LAYOUT, {
       submenu,

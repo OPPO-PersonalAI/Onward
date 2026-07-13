@@ -11,6 +11,7 @@ import { formatShortTime } from '../../utils/schedule'
 import { useI18n } from '../../i18n/useI18n'
 import { PROMPT_COLORS } from './prompt-colors'
 import { perfTrace } from '../../utils/perf-trace'
+import { computeMenuPosition, computeSubmenuLayout } from '../../utils/popup-position'
 
 type PromptColorFilter = 'red' | 'yellow' | 'green' | null
 
@@ -674,9 +675,15 @@ export const PromptList = memo(function PromptList({
     if (!submenuWrapperRef.current || !submenuRef.current) return
     const wrapperRect = submenuWrapperRef.current.getBoundingClientRect()
     const submenuRect = submenuRef.current.getBoundingClientRect()
-    const padding = 8
-    const overflowsRight = wrapperRect.right + submenuRect.width + padding > window.innerWidth
-    const shouldFlip = overflowsRight && wrapperRect.left - submenuRect.width - padding >= 0
+    // Shared side-picking math; this host only consumes the flip boolean
+    // (CSS places the submenu). Picks the side with more room instead of
+    // the old "stay right unless the left fully fits" rule.
+    const layout = computeSubmenuLayout({
+      anchorRect: wrapperRect,
+      natural: { width: submenuRect.width, height: submenuRect.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight }
+    })
+    const shouldFlip = !layout.openRight
     if (shouldFlip !== submenuFlipped) {
       setSubmenuFlipped(shouldFlip)
     }
@@ -685,21 +692,18 @@ export const PromptList = memo(function PromptList({
   useLayoutEffect(() => {
     if (!contextMenu || !menuRef.current) return
     const rect = menuRef.current.getBoundingClientRect()
-    const padding = 8
-    let nextX = contextMenu.x
-    let nextY = contextMenu.y
+    // Shared flip-then-clamp placement (bottom-edge right-click flips the
+    // menu above the cursor instead of pinning it against the edge).
+    const result = computeMenuPosition({
+      anchor: { x: contextMenu.x, y: contextMenu.y },
+      menu: { width: rect.width, height: rect.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight }
+    })
 
-    if (nextX + rect.width > window.innerWidth - padding) {
-      nextX = Math.max(padding, window.innerWidth - rect.width - padding)
-    }
-    if (nextY + rect.height > window.innerHeight - padding) {
-      nextY = Math.max(padding, window.innerHeight - rect.height - padding)
-    }
-
-    if (nextX !== contextMenu.x || nextY !== contextMenu.y) {
+    if (result.x !== contextMenu.x || result.y !== contextMenu.y) {
       setContextMenu(prev => {
         if (!prev) return prev
-        return { ...prev, x: nextX, y: nextY }
+        return { ...prev, x: result.x, y: result.y }
       })
     }
   }, [contextMenu])

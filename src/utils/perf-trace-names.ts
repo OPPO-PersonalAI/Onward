@@ -834,7 +834,17 @@ export const PERF_TRACE_EVENT = {
   // (ph=X, durationMs in payload). Payload: { reason, sessionCount,
   // refreshedCount, recreatedCount, deferredCount, durationMs }. Quantifies
   // the switch-back recovery cost the 2026-07-13 bundle could not show.
-  RENDERER_XTERM_RENDERER_SURFACE_RESTORE_BATCH: 'renderer:xterm.renderer.surface-restore-batch'
+  RENDERER_XTERM_RENDERER_SURFACE_RESTORE_BATCH: 'renderer:xterm.renderer.surface-restore-batch',
+
+  // ───────── 2026-07-13 viewport-aware popup positioning (shared popup-position util) ─────────
+  // Renderer: a cursor-anchored menu's position was adjusted to stay inside
+  // the viewport (ph=i, diagnostic tier, fires only when an adjustment
+  // actually happened — flip above the cursor or clamp against an edge).
+  // Payload: { surface, flippedY, clampedX, clampedY, anchorX, anchorY,
+  // menuWidth, menuHeight }. Breadcrumb for "menu appears half off-screen /
+  // in the wrong place" reports: shows which surface adjusted, how, and from
+  // what raw anchor.
+  RENDERER_POPUP_POSITION_ADJUSTED: 'renderer:popup.position-adjusted'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

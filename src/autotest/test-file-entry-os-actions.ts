@@ -148,6 +148,59 @@ export async function testFileEntryOsActions(ctx: AutotestContext): Promise<Test
     return false
   }
 
+  /**
+   * FEOS-13/14/15 helper: right-click a row with the cursor pinned at the
+   * viewport's bottom-right corner, then assert the opened menu is fully
+   * inside the viewport and flipped ABOVE the cursor (2026-07-13
+   * viewport-aware popup positioning — shared popup-position util). Layout
+   * math is deterministic (useLayoutEffect corrects pre-paint), so a single
+   * poll-until-contained pass per surface is sufficient.
+   */
+  const assertEdgeMenuContained = async (
+    caseId: string,
+    findRow: () => HTMLElement | null,
+    menuRoot: string
+  ): Promise<{ opened: boolean; contained: boolean; cursorY: number; lastRect: Record<string, number> | null }> => {
+    const cursorX = window.innerWidth - 4
+    const cursorY = window.innerHeight - 4
+    const opened = await openMenuWithRetry(
+      `${caseId}-edge`,
+      () => {
+        const row = findRow()
+        if (row) {
+          row.dispatchEvent(new MouseEvent('contextmenu', {
+            bubbles: true,
+            cancelable: true,
+            button: 2,
+            clientX: cursorX,
+            clientY: cursorY
+          }))
+        }
+      },
+      menuRoot
+    )
+    let lastRect: Record<string, number> | null = null
+    const contained = opened && await waitFor(`${caseId}-contained`, () => {
+      const menu = document.querySelector<HTMLElement>(menuRoot)
+      if (!menu) return false
+      const rect = menu.getBoundingClientRect()
+      lastRect = {
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+        right: Math.round(rect.right),
+        bottom: Math.round(rect.bottom)
+      }
+      return rect.left >= 0 &&
+        rect.top >= 0 &&
+        rect.right <= window.innerWidth + 0.5 &&
+        rect.bottom <= window.innerHeight + 0.5 &&
+        // Flip contract: near the bottom edge the menu sits above the cursor.
+        rect.bottom <= cursorY + 1
+    }, 2000)
+    closeAnyContextMenu()
+    return { opened, contained, cursorY, lastRect }
+  }
+
   /** Waits for the existence check to enable the item, then clicks it. */
   const clickMenuActionWhenEnabled = async (
     label: string,
@@ -368,6 +421,16 @@ export async function testFileEntryOsActions(ctx: AutotestContext): Promise<Test
     })
   }
 
+  // ---- FEOS-13: editor tree menu stays inside the viewport at the bottom edge ----
+  if (!cancelled() && editorApi()?.isOpen?.()) {
+    const edge = await assertEdgeMenuContained(
+      'feos-13-tree',
+      () => findTreeItemByPath('readme.md'),
+      PE_MENU
+    )
+    _assert('FEOS-13-tree-edge-menu-contained-and-flipped', edge.opened && edge.contained, edge)
+  }
+
   // Close the Project Editor before the git surfaces.
   dispatchEscape()
   await waitFor('feos-editor-closed', () => !editorApi()?.isOpen?.(), 4000)
@@ -416,6 +479,14 @@ export async function testFileEntryOsActions(ctx: AutotestContext): Promise<Test
           revealDisabled: revealButton?.disabled ?? null
         })
         closeAnyContextMenu()
+
+        // ---- FEOS-14: git-diff menu stays inside the viewport at the bottom edge ----
+        const edge = await assertEdgeMenuContained(
+          'feos-14-diff',
+          () => findDiffRow('notes.txt'),
+          GD_MENU
+        )
+        _assert('FEOS-14-git-diff-edge-menu-contained-and-flipped', edge.opened && edge.contained, edge)
       }
     }
     if (diffApi()?.isOpen?.()) {
@@ -493,6 +564,17 @@ export async function testFileEntryOsActions(ctx: AutotestContext): Promise<Test
         _assert('FEOS-12-toctou-failure-toast-visible', ephemeralReady && deleted && clickedGone && toastVisible, {
           ephemeralReady, deleted, clickedGone, toastVisible
         })
+      }
+
+      // ---- FEOS-15: git-history menu stays inside the viewport at the bottom edge ----
+      if (commitsLoaded) {
+        const edge = await assertEdgeMenuContained(
+          'feos-15-history',
+          () => Array.from(document.querySelectorAll<HTMLElement>('.git-history-file-item'))
+            .find((el) => isVisibleElement(el) && (el.textContent || '').includes('readme.md')) ?? null,
+          GH_MENU
+        )
+        _assert('FEOS-15-git-history-edge-menu-contained-and-flipped', edge.opened && edge.contained, edge)
       }
     }
     if (historyApi()?.isOpen?.()) {

@@ -18,6 +18,7 @@ import type {
 import { useSettings } from '../../contexts/SettingsContext'
 import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
+import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
 import type { ProjectEditorOpenEventDetail, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
@@ -343,6 +344,12 @@ export function GitHistoryViewer({
   const [diffOptionsOpen, setDiffOptionsOpen] = useState(false)
   const diffOptionsRef = useRef<HTMLDivElement | null>(null)
   const [fileContextMenu, setFileContextMenu] = useState<{ x: number; y: number; targetFile: GitHistoryFile } | null>(null)
+  const fileContextMenuRef = useRef<HTMLDivElement | null>(null)
+  const fileContextMenuPosition = useViewportMenuPosition(
+    fileContextMenuRef,
+    fileContextMenu ? { x: fileContextMenu.x, y: fileContextMenu.y } : null,
+    { surface: 'git-history-file' }
+  )
 
   const [fileListWidth, setFileListWidth] = useState(() => {
     const prefs = getUIPreferences()
@@ -2424,8 +2431,13 @@ export function GitHistoryViewer({
       </div>
       {fileContextMenu && (
         <div
+          ref={fileContextMenuRef}
           className="git-history-context-menu"
-          style={{ position: 'fixed', left: fileContextMenu.x, top: fileContextMenu.y }}
+          style={{
+            position: 'fixed',
+            left: fileContextMenuPosition?.x ?? fileContextMenu.x,
+            top: fileContextMenuPosition?.y ?? fileContextMenu.y
+          }}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button

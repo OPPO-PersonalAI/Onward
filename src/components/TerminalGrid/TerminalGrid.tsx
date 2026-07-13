@@ -31,6 +31,7 @@ import { focusCoordinator } from '../../terminal/focus-coordinator'
 import type { TerminalDebugApi } from '../../autotest/types'
 import { perfMonitor } from '../../utils/perf-monitor'
 import { perfTrace, perfTraceTask } from '../../utils/perf-trace'
+import { computeMenuPosition, computeSubmenuLayout } from '../../utils/popup-position'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { resolveGitDiffInitialCwd } from '../../utils/git-diff-cwd-resolution'
 import { useI18n } from '../../i18n/useI18n'
@@ -1095,12 +1096,15 @@ export const TerminalGrid = memo(function TerminalGrid({
       return
     }
     const rect = el.getBoundingClientRect()
-    const maxX = window.innerWidth - rect.width - TERMINAL_CONTEXT_MENU_MARGIN
-    const maxY = window.innerHeight - rect.height - TERMINAL_CONTEXT_MENU_MARGIN
-    const next = {
-      x: Math.max(TERMINAL_CONTEXT_MENU_MARGIN, Math.min(termCtxMenu.x, maxX)),
-      y: Math.max(TERMINAL_CONTEXT_MENU_MARGIN, Math.min(termCtxMenu.y, maxY))
-    }
+    // Shared flip-then-clamp placement: near the bottom edge the menu now
+    // flips above the cursor (VS Code-style) instead of hugging the edge.
+    const result = computeMenuPosition({
+      anchor: { x: termCtxMenu.x, y: termCtxMenu.y },
+      menu: { width: rect.width, height: rect.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      margin: TERMINAL_CONTEXT_MENU_MARGIN
+    })
+    const next = { x: result.x, y: result.y }
     setTermCtxMenuPosition(prev => (prev?.x === next.x && prev.y === next.y ? prev : next))
   }, [termCtxMenu, termCtxPinnedOpen, orderedPinnedPrompts.length])
 
@@ -1114,9 +1118,16 @@ export const TerminalGrid = memo(function TerminalGrid({
     if (!menu || !submenu) return
     const menuRect = menu.getBoundingClientRect()
     const submenuRect = submenu.getBoundingClientRect()
-    const roomRight = window.innerWidth - TERMINAL_CONTEXT_MENU_MARGIN - menuRect.right - TERMINAL_CONTEXT_SUBMENU_GAP
-    const roomLeft = menuRect.left - TERMINAL_CONTEXT_MENU_MARGIN - TERMINAL_CONTEXT_SUBMENU_GAP
-    setTermCtxPinnedFlipped(roomRight < submenuRect.width && roomLeft > roomRight)
+    // Shared side-picking math; this host only needs the flip boolean (CSS
+    // places the submenu), so consume `openRight` and ignore coordinates.
+    const layout = computeSubmenuLayout({
+      anchorRect: menuRect,
+      natural: { width: submenuRect.width, height: submenuRect.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      margin: TERMINAL_CONTEXT_MENU_MARGIN,
+      gap: TERMINAL_CONTEXT_SUBMENU_GAP
+    })
+    setTermCtxPinnedFlipped(!layout.openRight)
   }, [termCtxPinnedOpen, orderedPinnedPrompts.length])
 
   // Close terminal context menu on mousedown outside

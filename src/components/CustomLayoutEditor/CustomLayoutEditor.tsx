@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useI18n } from '../../i18n/useI18n'
+import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import {
   CUSTOM_GRID_COLS,
   CUSTOM_GRID_ROWS,
@@ -514,21 +515,11 @@ interface CellContextMenuProps {
 function CellContextMenu({ x, y, targetCell, usedIndexes, totalCells, onAssign, onResetIndex, onDelete, onClose }: CellContextMenuProps) {
   const { t } = useI18n()
   const menuRef = useRef<HTMLDivElement | null>(null)
-  const [position, setPosition] = useState({ left: x, top: y })
-
-  useEffect(() => {
-    const el = menuRef.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    const margin = 8
-    let left = x
-    let top = y
-    if (left + rect.width + margin > window.innerWidth) left = window.innerWidth - rect.width - margin
-    if (top + rect.height + margin > window.innerHeight) top = window.innerHeight - rect.height - margin
-    if (left < margin) left = margin
-    if (top < margin) top = margin
-    setPosition({ left, top })
-  }, [x, y])
+  // Shared viewport-aware placement (flip-then-clamp, measured pre-paint —
+  // the old useEffect version corrected after paint, flashing one frame at
+  // the raw cursor position).
+  const effective = useViewportMenuPosition(menuRef, { x, y }, { surface: 'custom-layout-cell' })
+  const position = { left: effective?.x ?? x, top: effective?.y ?? y }
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {

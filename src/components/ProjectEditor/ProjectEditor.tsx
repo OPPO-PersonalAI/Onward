@@ -14,6 +14,7 @@ import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../hooks/useAppState'
 import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
+import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
@@ -1512,6 +1513,13 @@ export function ProjectEditor({
 
   const modalRef = useRef<HTMLDivElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
+  // Menu coordinates are modal-local (clientX minus the modal rect), so the
+  // clamping bounds are the modal box, not the window viewport.
+  const contextMenuPosition = useViewportMenuPosition(
+    contextMenuRef,
+    contextMenu ? { x: contextMenu.x, y: contextMenu.y } : null,
+    { surface: 'project-editor-entry', boundsRef: modalRef }
+  )
   const previewRef = useRef<HTMLDivElement>(null)
   const previewLayoutRef = useRef<HTMLDivElement>(null)
   const imagePreviewRef = useRef<HTMLImageElement | null>(null)
@@ -6494,25 +6502,8 @@ export function ProjectEditor({
     }
   }, [searchOpen, searchQuery, isIndexing, fileIndexVersion])
 
-  useEffect(() => {
-    if (!contextMenu || !contextMenuRef.current || !modalRef.current) return
-    const menuRect = contextMenuRef.current.getBoundingClientRect()
-    const modalRect = modalRef.current.getBoundingClientRect()
-    const padding = 8
-    let nextX = contextMenu.x
-    let nextY = contextMenu.y
-    const maxX = modalRect.width - menuRect.width - padding
-    const maxY = modalRect.height - menuRect.height - padding
-
-    if (nextX > maxX) nextX = Math.max(padding, maxX)
-    if (nextY > maxY) nextY = Math.max(padding, maxY)
-    if (nextX < padding) nextX = padding
-    if (nextY < padding) nextY = padding
-
-    if (nextX !== contextMenu.x || nextY !== contextMenu.y) {
-      setContextMenu((prev) => (prev ? { ...prev, x: nextX, y: nextY } : prev))
-    }
-  }, [contextMenu])
+  // Viewport-aware placement (flip-then-clamp inside the modal box) is
+  // handled by useViewportMenuPosition next to the ref declarations.
 
   const refreshDirectory = useCallback(async (path: string) => {
     const root = rootRef.current
@@ -11496,7 +11487,10 @@ export function ProjectEditor({
           <div
             className="project-editor-context-menu"
             ref={contextMenuRef}
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            style={{
+              left: contextMenuPosition?.x ?? contextMenu.x,
+              top: contextMenuPosition?.y ?? contextMenu.y
+            }}
             onClick={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
           >
