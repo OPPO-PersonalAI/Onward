@@ -1,12 +1,12 @@
 {
   "channel": "daily",
-  "version": "2.1.0-daily.20260711.1",
-  "tag": "v2.1.0-daily.20260711.1",
+  "version": "2.1.0-daily.20260713.1",
+  "tag": "v2.1.0-daily.20260713.1",
   "platform": "windows",
   "arch": "x64",
-  "artifactName": "Onward.2-v2.1.0-daily.20260711.1-windows-x64.exe",
-  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260711.1/Onward.2-v2.1.0-daily.20260711.1-windows-x64.exe",
-  "sha256": "99ba9eac4dfc556c31fcac6c0b961aa2ddfcafd95891bda0548b9445013c51e6",
-  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260711.1\n\nChanges since `v2.1.0-daily.20260629.1`.\n\n## Bug Fixes\n- Git History: Branch, remote, and tag labels now refresh right after a `git push` that advances a remote without moving HEAD, fixing the \"phantom fork\" where a remote branch appeared several commits behind its local branch.\n- Git Diff: Opening the diff on Windows with endpoint-security software no longer shows a long spinner (up to ~16s). File rows now appear immediately while their details load in the background.\n- Git Diff: The file list and terminal Git status now update reliably after a commit or `git init`, even when the file watcher misses changes to the `.git` folder.\n- Git Diff: Fixed a case where the diff could keep showing the previous file contents after an edit. Cached content is now re-validated on read, so a change the watcher missed can no longer serve a stale diff.\n- Git Diff: Line selection is no longer cleared when the diff content refreshes, so keep/discard actions on a selected range work reliably.\n- Terminal: Fixed garbled glyphs that could appear across multiple Tasks under heavy output when terminals shared a rendering texture atlas.\n- Stability: Fixed a rare crash that could occur when quitting the app while background Git or terminal work was still finishing.\n",
-  "publishedAt": "2026-07-11T15:42:51.317Z"
+  "artifactName": "Onward.2-v2.1.0-daily.20260713.1-windows-x64.exe",
+  "artifactUrl": "https://github.com/OPPO-PersonalAI/Onward-Agent-Workbench/releases/download/v2.1.0-daily.20260713.1/Onward.2-v2.1.0-daily.20260713.1-windows-x64.exe",
+  "sha256": "c6874149bdc9f5da8e52ce80991bcc7e12b9a42ca87a34e01dc7ab3e77bb7b44",
+  "releaseNotes": "# Onward Daily Build v2.1.0-daily.20260713.1\n\nChanges since `v2.1.0-daily.20260711.1`.\n\n## New Features\n- Add HTML preview navigation (back / forward / reload / home)\n- Add OS \"Open with Default Application\" and \"Reveal in Finder / File Explorer\" context actions on all file surfaces\n- Auto-preserve Prompt editor input when double-clicking a history entry: the current input is saved to history first, then the selected entry loads — typed content is never silently discarded\n\n## Bug Fixes\n- Keep WebGL contexts alive across window occlusion — fixes all terminals briefly showing a white placeholder for 1–3 seconds after switching back from another desktop (Space)\n- Viewport-aware placement for every right-click context menu — menus opened near the window edge now flip above the cursor instead of being cut off (Project Editor, Git Diff, Git History, terminal, Prompt surfaces)\n- Git Diff freshness: fix the content-cache stale-token race (TOCTOU) and fence warm-status reuse behind the latest mutation invalidation\n- Per-Task view memory survives multi-terminal use\n- HTML preview scroll capture is gated on the home document so scroll memory stays correct across in-preview navigation\n",
+  "publishedAt": "2026-07-13T13:16:53.568Z"
 }
