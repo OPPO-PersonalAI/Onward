@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "tag": "v2.1.0-daily.20260713.1",
+      "version": "2.1.0-daily.20260713.1",
+      "channel": "daily",
+      "previousTag": "v2.1.0-daily.20260711.1",
+      "publishedAt": "2026-07-13T13:01:56.892Z",
+      "markdown": {
+        "en": "en/daily/v2.1.0-daily.20260713.1.md"
+      },
+      "html": {
+        "en": "html/en/daily/v2.1.0-daily.20260713.1.html"
+      }
+    },
+    {
       "tag": "v2.1.0-daily.20260711.1",
       "version": "2.1.0-daily.20260711.1",
       "channel": "daily",
