@@ -844,7 +844,16 @@ export const PERF_TRACE_EVENT = {
   // menuWidth, menuHeight }. Breadcrumb for "menu appears half off-screen /
   // in the wrong place" reports: shows which surface adjusted, how, and from
   // what raw anchor.
-  RENDERER_POPUP_POSITION_ADJUSTED: 'renderer:popup.position-adjusted'
+  RENDERER_POPUP_POSITION_ADJUSTED: 'renderer:popup.position-adjusted',
+
+  // ───────── 2026-07-13 Prompt draft auto-preservation on history double-click ─────────
+  // Renderer: user double-clicked a history prompt while the editor held
+  // content (ph=i, diagnostic tier — fires once per double-click). Payload:
+  // { preserved, reason: 'empty' | 'unchanged-from-source' | 'draft-preserved',
+  // contentLen, hadEditingSource }. Content itself is never included (PII
+  // hygiene) — only its length. Breadcrumb for "my typed prompt vanished"
+  // reports: shows whether the auto-preserve branch ran and why.
+  RENDERER_PROMPT_DRAFT_AUTO_PRESERVED: 'renderer:prompt.draft-auto-preserved'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

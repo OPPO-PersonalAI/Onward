@@ -665,6 +665,7 @@ restore-in-place strategy.
 | Constant | Name | Phase | Call site |
 |---|---|---|---|
 | `RENDERER_POPUP_POSITION_ADJUSTED` | `renderer:popup.position-adjusted` | `i` | `src/hooks/useViewportMenuPosition.ts` — emitted only when a cursor-anchored menu's placement was adjusted to stay inside the viewport (flip above the cursor / clamp against an edge). Payload `{ surface, flippedY, clampedX, clampedY, anchorX, anchorY, menuWidth, menuHeight }`. Surfaces: `git-history-file`, `git-diff-file`, `project-editor-entry`, `custom-layout-cell` (Prompt/terminal menus share the same math via `computeMenuPosition` but keep their pre-existing host-local trace events). Breadcrumb for "menu opens half off-screen" reports. |
+| `RENDERER_PROMPT_DRAFT_AUTO_PRESERVED` | `renderer:prompt.draft-auto-preserved` | `i` | `PromptNotebook.tsx::handleDoubleClick` — fires once per history double-click. Payload `{ preserved, reason: empty \| unchanged-from-source \| draft-preserved, contentLen, hadEditingSource }` (content itself never included). Breadcrumb for "my typed prompt vanished after opening a history entry" reports: shows whether the auto-preserve branch ran and why it was skipped. |
 
 #### Background ops
 

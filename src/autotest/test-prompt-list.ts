@@ -238,6 +238,72 @@ export async function testPromptList(ctx: AutotestContext): Promise<TestResult[]
     }
   }
 
+  // ---- PL-13/14/15: draft auto-preservation on history double-click ----
+  // Contract (2026-07-13): double-clicking a history prompt while the editor
+  // holds content must FIRST auto-save that content into history, THEN load
+  // the double-clicked prompt — unless the editor still holds the untouched
+  // original of the entry being edited (no duplicate spam), or is empty.
+  if (!cancelled()) {
+    const dispatchRowDoubleClick = (promptId: string): boolean => {
+      const row = document.querySelector<HTMLElement>(
+        `.prompt-list-item[data-prompt-id="${CSS.escape(promptId)}"]`
+      )
+      if (!row) return false
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))
+      return true
+    }
+    const promptByContent = (content: string) =>
+      notebookApi()!.getPrompts().find(prompt => prompt.content === content) ?? null
+
+    // Seed a target history entry T to double-click on.
+    const targetContent = `PL13-target ${Date.now()}`
+    notebookApi()!.setEditorContent(targetContent)
+    await waitFor('pl13-target-typed', () => notebookApi()!.getEditorContent() === targetContent, 4000, 80)
+    notebookApi()!.submitEditor()
+    const targetSeeded = await waitFor('pl13-target-seeded', () => Boolean(promptByContent(targetContent)), 4000, 80)
+    const targetPrompt = promptByContent(targetContent)
+
+    // PL-13: fresh draft in the editor → double-click T → draft saved as a
+    // new entry AND T loaded into the editor, with the save toast visible.
+    const draftContent = `PL13-draft ${Date.now()}`
+    notebookApi()!.setEditorContent(draftContent)
+    const draftTyped = await waitFor('pl13-draft-typed', () => notebookApi()!.getEditorContent() === draftContent, 4000, 80)
+    const dblClicked = Boolean(targetSeeded && targetPrompt && dispatchRowDoubleClick(targetPrompt.id))
+    const draftSaved = await waitFor('pl13-draft-saved', () => Boolean(promptByContent(draftContent)), 4000, 80)
+    const targetLoaded = await waitFor('pl13-target-loaded', () => notebookApi()!.getEditorContent() === targetContent, 4000, 80)
+    const toastSeen = await waitFor('pl13-toast', () => {
+      const toast = document.querySelector<HTMLElement>('.prompt-editor-draft-toast')
+      return Boolean(toast && toast.textContent && toast.textContent.length > 0)
+    }, 2500, 80)
+    record('PL-13-double-click-preserves-editor-draft', targetSeeded && draftTyped && dblClicked && draftSaved && targetLoaded && toastSeen, {
+      targetSeeded, draftTyped, dblClicked, draftSaved, targetLoaded, toastSeen
+    })
+
+    // PL-14: editor now holds T untouched (loaded by PL-13's double-click).
+    // Double-click the preserved draft entry D → NO new history entry.
+    const draftPrompt = promptByContent(draftContent)
+    const countBeforeUntouched = notebookApi()!.getPrompts().length
+    const dblClickedDraft = Boolean(draftPrompt && dispatchRowDoubleClick(draftPrompt.id))
+    const draftLoaded = await waitFor('pl14-draft-loaded', () => notebookApi()!.getEditorContent() === draftContent, 4000, 80)
+    await sleep(300)
+    const countAfterUntouched = notebookApi()!.getPrompts().length
+    record('PL-14-untouched-source-not-duplicated', dblClickedDraft && draftLoaded && countAfterUntouched === countBeforeUntouched, {
+      dblClickedDraft, draftLoaded, countBeforeUntouched, countAfterUntouched
+    })
+
+    // PL-15: empty editor → double-click T → no new entry, T loads.
+    notebookApi()!.setEditorContent('')
+    await waitFor('pl15-cleared', () => notebookApi()!.getEditorContent() === '', 4000, 80)
+    const countBeforeEmpty = notebookApi()!.getPrompts().length
+    const dblClickedEmpty = Boolean(targetPrompt && dispatchRowDoubleClick(targetPrompt!.id))
+    const targetReloaded = await waitFor('pl15-target-loaded', () => notebookApi()!.getEditorContent() === targetContent, 4000, 80)
+    await sleep(300)
+    const countAfterEmpty = notebookApi()!.getPrompts().length
+    record('PL-15-empty-editor-adds-nothing', dblClickedEmpty && targetReloaded && countAfterEmpty === countBeforeEmpty, {
+      dblClickedEmpty, targetReloaded, countBeforeEmpty, countAfterEmpty
+    })
+  }
+
   notebookApi()!.setTargetsEnabled?.(false)
   notebookApi()!.setFilterEnabled?.(false)
   notebookApi()!.setColorFilter?.(null)

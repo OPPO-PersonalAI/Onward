@@ -11,8 +11,9 @@ import type { EditorDraft, PromptCleanupConfig, PromptSchedule } from '../../typ
 import { usePromptActions } from '../../contexts/PromptActionsContext'
 import { buildAccelerator } from '../../utils/keyboard'
 import { performanceTrace } from '../../utils/performance-trace'
-import { perfTrace } from '../../utils/perf-trace'
+import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { decideDraftPreservation } from './prompt-draft-preservation'
 import type { ScheduleNotification } from '../../hooks/useScheduleEngine'
 import { PromptSearch } from './PromptSearch'
 import { PromptList } from './PromptList'
@@ -220,6 +221,29 @@ export const PromptNotebook = memo(function PromptNotebook({
     saveMessageTimerRef.current = window.setTimeout(() => {
       setSaveMessage(null)
     }, 2000)
+  }, [])
+
+  // Draft auto-preserve feedback floats over the prompt editor itself: the
+  // search-box status slot truncates when the notebook panel is narrow
+  // (user-resizable width), while the editor is exactly where the user is
+  // looking when the double-click fires.
+  const [draftToast, setDraftToast] = useState<string | null>(null)
+  const draftToastTimerRef = useRef<number>(0)
+  const showDraftToast = useCallback((text: string) => {
+    setDraftToast(text)
+    if (draftToastTimerRef.current) {
+      window.clearTimeout(draftToastTimerRef.current)
+    }
+    draftToastTimerRef.current = window.setTimeout(() => {
+      setDraftToast(null)
+    }, 2000)
+  }, [])
+  useEffect(() => {
+    return () => {
+      if (draftToastTimerRef.current) {
+        window.clearTimeout(draftToastTimerRef.current)
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -826,10 +850,40 @@ export const PromptNotebook = memo(function PromptNotebook({
     setSelectedId(id)
   }, [])
 
-  // Double click to edit
+  // Double click to edit — but never at the cost of the user's current
+  // input: auto-preserve non-empty, modified editor content into history
+  // FIRST, then load the double-clicked prompt. Skips the save when the
+  // editor still holds the untouched original of the entry being edited
+  // (browsing history by double-click must not duplicate entries).
   const handleDoubleClick = useCallback((prompt: Prompt) => {
+    const normalizedContent = transformVirtualPaddingForSend(editorContentRef.current)
+    const decision = decideDraftPreservation({
+      normalizedContent,
+      title: editorTitleRef.current,
+      editingOriginal: editingPrompt
+        ? {
+            normalizedContent: transformVirtualPaddingForSend(editingPrompt.content),
+            title: editingPrompt.title
+          }
+        : null
+    })
+    if (decision.preserve) {
+      onAddPrompt({
+        title: editorTitleRef.current.trim(),
+        content: normalizedContent,
+        pinned: false,
+        color: editingPrompt?.color ?? undefined
+      })
+      showDraftToast(t('promptNotebook.draftPreserved'))
+    }
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROMPT_DRAFT_AUTO_PRESERVED, {
+      preserved: decision.preserve,
+      reason: decision.reason,
+      contentLen: normalizedContent.length,
+      hadEditingSource: Boolean(editingPrompt)
+    })
     setEditingPrompt(prompt)
-  }, [])
+  }, [editingPrompt, onAddPrompt, showDraftToast, t])
 
   // Cancel edit
   const handleCancelEdit = useCallback(() => {
@@ -1280,6 +1334,7 @@ export const PromptNotebook = memo(function PromptNotebook({
 
         {/* input area */}
         <PromptEditorWithAppend
+          draftToast={draftToast}
           onSubmit={handleSubmit}
           onUpdatePrompt={onUpdatePrompt}
           editingPrompt={editingPrompt}
@@ -1504,6 +1559,7 @@ export const PromptNotebook = memo(function PromptNotebook({
 
 // Editor wrapper component with additional functionality
 const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
+  draftToast,
   onSubmit,
   onUpdatePrompt,
   editingPrompt,
@@ -1531,6 +1587,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   ctxCurrentBranch,
   ctxCurrentTaskTitle
 }: {
+  draftToast: string | null
   onSubmit: (title: string, content: string, color?: 'red' | 'yellow' | 'green' | null) => void
   onUpdatePrompt: (prompt: Prompt, preserveTimestamp?: boolean) => void
   editingPrompt: Prompt | null
@@ -2152,6 +2209,10 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
       data-prompt-editing={editingPrompt ? 'true' : undefined}
     >
       <div className="prompt-editor-resizer" onMouseDown={handleMouseDown} />
+
+      {draftToast && (
+        <div className="prompt-editor-draft-toast" role="status">{draftToast}</div>
+      )}
 
       <div className="prompt-editor-inputs">
         <div className="prompt-editor-title-row">

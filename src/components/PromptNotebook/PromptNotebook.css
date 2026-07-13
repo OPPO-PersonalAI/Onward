@@ -712,6 +712,36 @@ body.dragging-prompt * {
   flex-shrink: 1;
 }
 
+/* Draft auto-preserve toast: floats centered over the editor's top edge so
+ * it stays fully visible at any notebook panel width (the search-box status
+ * slot truncates when the panel is narrow). Non-interactive, fades out on
+ * the same 2 s clock that clears the state. */
+.prompt-editor-draft-toast {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  pointer-events: none;
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  color: var(--success);
+  background-color: rgba(34, 197, 94, 0.16);
+  max-width: calc(100% - 24px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: prompt-editor-draft-toast-fade 2s ease forwards;
+}
+
+@keyframes prompt-editor-draft-toast-fade {
+  0% { opacity: 0; transform: translate(-50%, -4px); }
+  10% { opacity: 1; transform: translate(-50%, 0); }
+  75% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, 0); }
+}
+
 .prompt-editor-resizer {
   position: absolute;
   top: -3px;

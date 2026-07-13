@@ -506,6 +506,7 @@ const en = {
   'promptList.sendAndExecuteToAllTasks': 'Send and execute to all Tasks',
 
   'promptNotebook.saved': 'Saved',
+  'promptNotebook.draftPreserved': 'Previous input saved to history',
   'promptNotebook.import.success': 'Imported {{global}} global and {{local}} local Prompts',
   'promptNotebook.import.successWithSkipped': 'Imported {{global}} global and {{local}} local Prompts (skipped {{skipped}} duplicates)',
   'promptNotebook.import.noNewItems': 'No new Prompts were imported (skipped {{skipped}} duplicates)',
@@ -1928,6 +1929,7 @@ const zhCN: LocaleTranslations = {
   'promptList.sendAndExecuteToAllTasks': '发送并执行到所有 Task',
 
   'promptNotebook.saved': '已保存',
+  'promptNotebook.draftPreserved': '原有输入已存入历史',
   'promptNotebook.import.success': '已导入 {{global}} 个全局 Prompt 和 {{local}} 个本地 Prompt',
   'promptNotebook.import.successWithSkipped': '已导入 {{global}} 个全局 Prompt 和 {{local}} 个本地 Prompt（跳过 {{skipped}} 个重复项）',
   'promptNotebook.import.noNewItems': '没有新的 Prompt 被导入（跳过 {{skipped}} 个重复项）',
