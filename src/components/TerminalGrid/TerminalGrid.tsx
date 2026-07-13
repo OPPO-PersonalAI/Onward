@@ -1350,7 +1350,13 @@ export const TerminalGrid = memo(function TerminalGrid({
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        terminalSessionManager.suspendVisibleRendererSurfaces('document-hidden')
+        // Keep-alive contract (peer-aligned with VS Code / native GPU
+        // terminals): occlusion never tears down WebGL. Chromium's own
+        // background throttling pauses rendering; a genuine GPU reclaim
+        // surfaces as webglcontextlost and takes the fallback path. The
+        // old suspend-here design forced an N-context + shared-atlas
+        // rebuild storm on every Space switch-back (white flash, 1-3s).
+        terminalSessionManager.noteDocumentHiddenKeepAlive()
       } else {
         notifySurfaceEvent('document-visible')
       }

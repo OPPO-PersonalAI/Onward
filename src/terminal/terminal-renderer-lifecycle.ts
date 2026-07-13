@@ -6,8 +6,9 @@
 import type { Terminal as XTerm } from '@xterm/xterm'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { perfMonitor } from '../utils/perf-monitor'
-import { perfTrace } from '../utils/perf-trace'
+import { perfTraceDiagnostic } from '../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
+import { decideSurfaceRestoreAction, type SurfaceRestoreAction } from './terminal-renderer-surface-policy'
 
 export type RuntimePlatform = 'darwin' | 'win32' | 'linux'
 
@@ -55,6 +56,8 @@ export interface TerminalRendererLifecycleResult {
   webglActive: boolean
   attemptedWebgl: boolean
   changedRenderer: boolean
+  /** Set by restoreSurface(): which decision-table branch this restore took. */
+  action?: SurfaceRestoreAction
 }
 
 export interface TerminalRendererLifecycleOptions {
@@ -168,30 +171,58 @@ export class TerminalRendererLifecycle {
     this.lastSurfaceEvent = reason
     this.lastSurfaceEventAt = Date.now()
 
-    if (!this.webglAddon) {
-      // Path A: addon was previously disposed (or never attached). After
-      // creating a new one, xterm's render service won't repaint until
-      // the next PTY write or resize fires — which the autotest harness
-      // can't guarantee. Force a viewport refresh so the recovered surface
-      // shows the live buffer instead of the empty/zeroed canvas xterm
-      // hands back from initial allocation.
-      const result = this.ensureWebgl(reason)
-      this.refreshTerminalIfActive()
-      return result
-    }
+    this.clearExpiredWebglCooldown()
+    const action = decideSurfaceRestoreAction({
+      webglActive: this.webglAddon !== null,
+      contextLost: this.contextLost,
+      cooldownActive: this.isWebglCooldownActive(performance.now())
+    })
 
-    try {
-      this.webglAddon.clearTextureAtlas()
-      // Path B: addon stayed alive across the host surface event but the
-      // GPU compositor may have invalidated our tile. clearTextureAtlas
-      // only marks rows dirty for rebuild — actual repaint waits for the
-      // next PTY write or resize. We can't rely on either firing in time,
-      // so force a viewport refresh so xterm re-emits draw calls and the
-      // recovered GPU tile gets a current frame committed.
-      this.refreshTerminalIfActive()
-      return this.buildResult(true, false)
-    } catch (error) {
-      return this.recreateWebgl(reason, error)
+    switch (action) {
+      case 'refresh-only': {
+        // The addon survived the host surface event with its GL context and
+        // the shared glyph atlas intact. Re-issuing draw calls recommits the
+        // compositor tile; the repaint can't wait for the next PTY write or
+        // resize, so force a viewport refresh. Deliberately NO
+        // clearTextureAtlas here: the atlas is shared across all
+        // config-identical terminals, and clearing it per-terminal per
+        // restore batch is the O(N^2) rebuild storm behind the
+        // "all terminals white after Space switch-back" regression.
+        this.refreshTerminalIfActive()
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_REFRESH_AFTER_RESTORE, {
+          terminalId: this.terminalId,
+          reason,
+          action
+        })
+        return { ...this.buildResult(false, false), action }
+      }
+      case 'defer-context-lost':
+      case 'defer-cooldown': {
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
+          terminalId: this.terminalId,
+          reason,
+          action,
+          webglFailureCount: this.webglFailureCount,
+          webglDisabledUntil: this.webglDisabledUntil
+        })
+        return { ...this.buildResult(false, false), action }
+      }
+      case 'recreate-webgl': {
+        // Addon was previously disposed (context-loss fallback whose cooldown
+        // expired, or never attached). After creating a new one, xterm's
+        // render service won't repaint until the next PTY write or resize
+        // fires — force a viewport refresh so the recovered surface shows the
+        // live buffer instead of the empty canvas from initial allocation.
+        const result = this.ensureWebgl(reason)
+        this.refreshTerminalIfActive()
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_REFRESH_AFTER_RESTORE, {
+          terminalId: this.terminalId,
+          reason,
+          action,
+          webglActive: result.webglActive
+        })
+        return { ...result, action }
+      }
     }
   }
 
@@ -211,7 +242,7 @@ export class TerminalRendererLifecycle {
     // to the DOM renderer; this guard covers re-entrant restore attempts that
     // race while that transition is in progress.
     if (this.canvasContextIsLost()) {
-      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
         terminalId: this.terminalId,
         reason,
         contextLost: true
@@ -221,7 +252,7 @@ export class TerminalRendererLifecycle {
 
     this.clearExpiredWebglCooldown()
     if (this.isWebglSuppressed()) {
-      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
         terminalId: this.terminalId,
         reason,
         suppressedByCooldown: true,
@@ -241,7 +272,7 @@ export class TerminalRendererLifecycle {
       this.webglDisabledUntil = null
       this.contextLost = false
       this.attachContextListeners()
-      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_ENSURE_WEBGL, {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_ENSURE_WEBGL, {
         terminalId: this.terminalId,
         reason,
         ok: true,
@@ -249,7 +280,7 @@ export class TerminalRendererLifecycle {
       })
       return this.buildResult(true, true)
     } catch (error) {
-      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_ENSURE_WEBGL, {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_ENSURE_WEBGL, {
         terminalId: this.terminalId,
         reason,
         ok: false,
@@ -257,20 +288,6 @@ export class TerminalRendererLifecycle {
       })
       this.registerWebglFailure(reason, error)
       return this.buildResult(true, false)
-    }
-  }
-
-  private recreateWebgl(
-    reason: TerminalRendererLifecycleReason,
-    error: unknown
-  ): TerminalRendererLifecycleResult {
-    this.disposeWebgl('webgl-context-loss')
-    this.registerWebglFailure(reason, error)
-    const ensureResult = this.ensureWebgl(reason)
-    return {
-      ...ensureResult,
-      attemptedWebgl: true,
-      changedRenderer: true
     }
   }
 
@@ -289,7 +306,7 @@ export class TerminalRendererLifecycle {
       // loss; double-disposing is benign.
     }
     perfMonitor.decrementWebglContextCount()
-    perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_DISPOSE_WEBGL, {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_DISPOSE_WEBGL, {
       terminalId: this.terminalId,
       reason,
       disposeError: disposeError ? String(disposeError) : null
@@ -301,7 +318,7 @@ export class TerminalRendererLifecycle {
     this.webglFailureCount += 1
     const reachedThreshold = this.webglFailureCount >= this.policy.webglFailureFallbackThreshold
 
-    perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_FAILURE, {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_FAILURE, {
       terminalId: this.terminalId,
       reason,
       webglFailureCount: this.webglFailureCount,
@@ -331,7 +348,7 @@ export class TerminalRendererLifecycle {
 
     this.webglContextLossDisposable = webglAddon.onContextLoss(() => {
       this.contextLost = true
-      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_CONTEXT_LOST, {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_CONTEXT_LOST, {
         terminalId: this.terminalId,
         webglFailureCountBefore: this.webglFailureCount
       })
@@ -348,7 +365,7 @@ export class TerminalRendererLifecycle {
     this.detachContextListeners()
     const changedRenderer = this.disposeWebgl('webgl-context-loss')
     this.refreshTerminalIfActive()
-    perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_CONTEXT_LOSS_FALLBACK, {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_CONTEXT_LOSS_FALLBACK, {
       terminalId: this.terminalId,
       trigger,
       changedRenderer,

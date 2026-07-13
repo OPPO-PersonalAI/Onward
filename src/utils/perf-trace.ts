@@ -183,33 +183,44 @@ function installLongTaskTrace(): void {
   }
 }
 
+// Window-level visibility/focus events ride the DIAGNOSTIC tier: they fire
+// at user-action frequency (a handful per Space switch), and a production
+// diagnostic bundle without them cannot answer "did the app see the
+// occlusion, and when did it come back?" — the 2026-07-13 Space-switch
+// white-flash bundle had zero renderer visibility breadcrumbs precisely
+// because these rode the opt-in channel.
 function installWindowEventTrace(): void {
   document.addEventListener('visibilitychange', () => {
-    perfTrace(PERF_TRACE_EVENT.RENDERER_WINDOW_VISIBILITY_CHANGE, {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_WINDOW_VISIBILITY_CHANGE, {
       state: document.visibilityState,
       hidden: document.hidden
     })
   })
   window.addEventListener('focus', () => {
-    perfTrace(PERF_TRACE_EVENT.RENDERER_WINDOW_FOCUS, {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_WINDOW_FOCUS, {
       hasContextMenu: Boolean(document.querySelector('.prompt-context-menu'))
     })
   })
   window.addEventListener('blur', () => {
-    perfTrace(PERF_TRACE_EVENT.RENDERER_WINDOW_BLUR, {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_WINDOW_BLUR, {
       hasContextMenu: Boolean(document.querySelector('.prompt-context-menu'))
     })
   })
   window.addEventListener('pagehide', (event) => {
-    perfTrace(PERF_TRACE_EVENT.RENDERER_WINDOW_PAGEHIDE, {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_WINDOW_PAGEHIDE, {
       persisted: event.persisted
     })
   })
 }
 
 export function installRendererPerfTrace(): void {
-  if (installed || !isPerfTraceEnabled()) return
+  if (installed) return
   installed = true
+  // Diagnostic-tier listeners install unconditionally so production
+  // bundles carry visibility/focus breadcrumbs; the preload side enforces
+  // the ONWARD_PERF_TRACE=0 opt-out.
+  installWindowEventTrace()
+  if (!isPerfTraceEnabled()) return
   perfTrace(PERF_TRACE_EVENT.RENDERER_TRACE_START, {
     userAgent: navigator.userAgent,
     url: window.location.href
@@ -217,5 +228,4 @@ export function installRendererPerfTrace(): void {
   installPromptInputTrace()
   installRendererStallTrace()
   installLongTaskTrace()
-  installWindowEventTrace()
 }

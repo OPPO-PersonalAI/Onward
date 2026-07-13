@@ -906,6 +906,48 @@ export async function testRenderCorruptionStress(ctx: AutotestContext): Promise<
       })
       _assert('RCS-EPOCH-02-per-owner-seen-epoch-tracked', allTracking, { seen })
     }
+
+    // ── RCS-EPOCH-03: host-surface restore must NOT advance the shared epoch ──
+    // 2026-07-13 Space-switch white-flash guard. The restore path is
+    // refresh-only on a live addon: it must not call clearTextureAtlas(),
+    // because every clear bumps the shared `_modelEpoch` and (per the
+    // per-owner fix above) forces EVERY owning terminal into a full model
+    // rebuild — N panes × N clears per restore batch was the O(N^2) rebuild
+    // storm behind "all terminals white for 1-3s after Space switch-back".
+    // Drive the real restore entry (document-visible host-surface event),
+    // wait out the debounce + post-frame pass, and assert the shared epoch
+    // did not move and no addon was disposed/recreated.
+    if (!cancelled()) {
+      const readEpoch = () => {
+        const addon = getWebglAddon(sessionMgr, driver) as (WebglAddonProbe & {
+          _renderer?: { _charAtlas?: { _modelEpoch?: number } }
+        }) | null
+        const value = addon?._renderer?._charAtlas?._modelEpoch
+        return typeof value === 'number' ? value : null
+      }
+      const addonsBefore = probedIds.map((id) => getWebglAddon(sessionMgr, id))
+      const epochBefore = readEpoch()
+      sessionMgr.notifyHostSurfaceEvent?.('document-visible')
+      // 80ms restore debounce + 1 post-frame rAF pass + headroom.
+      await sleep(400)
+      const epochAfter = readEpoch()
+      const addonsAfter = probedIds.map((id) => getWebglAddon(sessionMgr, id))
+      const sameAddonInstances = addonsBefore.every((addon, i) => addon !== null && addon === addonsAfter[i])
+      const epochStable = epochBefore !== null && epochAfter === epochBefore
+      log('RCS-EPOCH-03:restore-epoch-stability', {
+        epochBefore,
+        epochAfter,
+        sameAddonInstances,
+        interpretation: epochStable && sameAddonInstances
+          ? 'restore batch left the shared atlas untouched and every addon alive → refresh-only contract holds'
+          : 'restore batch cleared the shared atlas or churned addons → O(N^2) rebuild storm regression'
+      })
+      _assert('RCS-EPOCH-03-restore-does-not-clear-shared-atlas', epochStable && sameAddonInstances, {
+        epochBefore,
+        epochAfter,
+        sameAddonInstances
+      })
+    }
   }
 
   if (cancelled()) return results

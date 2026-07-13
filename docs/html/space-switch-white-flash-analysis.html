@@ -1,0 +1,415 @@
+<!--
+  SPDX-FileCopyrightText: 2026 OPPO
+  SPDX-License-Identifier: Apache-2.0
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Space 切回后终端整体白屏 1–3 秒 — 诊断分析与修复方案</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: auto; }
+  body {
+    background: #0f1115; color: #d7dae0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.7; font-size: 15px;
+  }
+  code, pre { font-family: "SF Mono", Menlo, Consolas, monospace; }
+
+  /* ── Fixed left ToC ── */
+  nav#toc {
+    position: fixed; left: 0; top: 0; bottom: 0; width: 260px;
+    background: #14171d; border-right: 1px solid #262b35;
+    padding: 24px 16px; overflow-y: auto;
+  }
+  nav#toc h2 { font-size: 13px; color: #8a93a5; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; }
+  nav#toc a {
+    display: block; color: #aeb6c4; text-decoration: none;
+    padding: 6px 10px; border-radius: 6px; font-size: 13.5px; margin-bottom: 2px;
+  }
+  nav#toc a:hover { background: #1e232c; color: #e8ebf0; }
+  nav#toc a.active { background: #24304a; color: #7fb2ff; }
+
+  main { margin-left: 260px; padding: 40px 48px 80px; max-width: 1000px; }
+
+  h1 { font-size: 26px; color: #f0f2f6; margin-bottom: 8px; }
+  .subtitle { color: #8a93a5; margin-bottom: 32px; font-size: 14px; }
+  section { margin-bottom: 48px; }
+  section h2 {
+    font-size: 20px; color: #e8ebf0; margin-bottom: 16px;
+    padding-bottom: 8px; border-bottom: 1px solid #262b35;
+  }
+  section h3 { font-size: 16px; color: #cdd3dd; margin: 20px 0 10px; }
+  p { margin-bottom: 12px; }
+  ul, ol { margin: 0 0 12px 22px; }
+  li { margin-bottom: 6px; }
+  strong { color: #f0f2f6; }
+  a { color: #7fb2ff; }
+
+  /* components */
+  .card {
+    background: #171b22; border: 1px solid #262b35; border-radius: 10px;
+    padding: 16px 20px; margin-bottom: 16px;
+  }
+  .callout { border-left: 4px solid #7fb2ff; background: #16202e; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 16px; }
+  .callout.warn { border-color: #f2b843; background: #241d10; }
+  .callout.danger { border-color: #ef5b6a; background: #261418; }
+  .callout.ok { border-color: #4fc98d; background: #12211a; }
+  .badge {
+    display: inline-block; font-size: 11.5px; padding: 2px 9px; border-radius: 999px;
+    font-weight: 600; vertical-align: middle; margin-right: 6px;
+  }
+  .badge.red { background: #3a1b20; color: #ff8a95; border: 1px solid #63313a; }
+  .badge.yellow { background: #322913; color: #f2c469; border: 1px solid #5c4c22; }
+  .badge.green { background: #14301f; color: #6bd9a0; border: 1px solid #2a5c3f; }
+  .badge.blue { background: #16283e; color: #85b8ff; border: 1px solid #2c4a71; }
+  .badge.purple { background: #251a38; color: #c19bf5; border: 1px solid #46336b; }
+
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 13.5px; }
+  th { background: #1b2029; color: #aeb6c4; text-align: left; padding: 8px 12px; border: 1px solid #262b35; }
+  td { padding: 8px 12px; border: 1px solid #262b35; vertical-align: top; }
+  .table-wrap { overflow-x: auto; }
+
+  pre.code {
+    background: #12151b; border: 1px solid #262b35; border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.6;
+    margin-bottom: 16px; color: #c4cbd6;
+  }
+  .tok-k { color: #c78cf0; } .tok-s { color: #8fd3a2; } .tok-c { color: #6b7386; } .tok-n { color: #7fb2ff; } .tok-e { color: #ff8a95; }
+
+  /* flow diagram */
+  .flow { display: flex; flex-direction: column; gap: 0; margin-bottom: 16px; }
+  .flow-step {
+    display: flex; align-items: flex-start; gap: 14px;
+    background: #171b22; border: 1px solid #262b35; border-radius: 10px;
+    padding: 12px 16px; position: relative;
+  }
+  .flow-step + .flow-step { margin-top: 26px; }
+  .flow-step + .flow-step::before {
+    content: "▼"; position: absolute; top: -22px; left: 28px; color: #4a5265; font-size: 13px;
+  }
+  .flow-num {
+    flex: 0 0 30px; height: 30px; border-radius: 50%; background: #24304a; color: #7fb2ff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+  }
+  .flow-step.hot { border-color: #63313a; }
+  .flow-step.hot .flow-num { background: #3a1b20; color: #ff8a95; }
+  .flow-body { flex: 1; }
+  .flow-title { font-weight: 600; color: #e8ebf0; margin-bottom: 3px; }
+  .flow-detail { font-size: 13px; color: #98a1b3; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .panel { background: #171b22; border: 1px solid #262b35; border-radius: 10px; padding: 14px 18px; }
+  .panel h4 { font-size: 14px; margin-bottom: 10px; }
+  .panel.before h4 { color: #f2c469; }
+  .panel.after h4 { color: #ff8a95; }
+  .panel.opt h4 { color: #85b8ff; font-size: 15px; }
+
+  .meta-footer {
+    margin-top: 60px; padding-top: 20px; border-top: 1px solid #262b35;
+    font-size: 12.5px; color: #6b7386;
+  }
+  .meta-footer table { font-size: 12.5px; }
+
+  @media (max-width: 900px) {
+    nav#toc { display: none; }
+    main { margin-left: 0; padding: 24px; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#overview">1. 问题概述</a>
+  <a href="#evidence">2. 诊断包证据</a>
+  <a href="#mechanism">3. 现有机制：挂起 / 恢复</a>
+  <a href="#rootcause">4. 根因链条</a>
+  <a href="#amplifier">5. 放大器：epoch 广播</a>
+  <a href="#why-white">6. 为什么是"白色"</a>
+  <a href="#trace-gap">7. 诊断盲区（必修）</a>
+  <a href="#peer">8. 同行产品调研</a>
+  <a href="#options">9. 修复方案选项</a>
+  <a href="#testplan">10. 测试方案</a>
+  <a href="#meta">文档元数据</a>
+</nav>
+
+<main>
+  <h1>Space 切回后终端整体白屏 1–3 秒</h1>
+  <p class="subtitle">诊断包 onward-diagnostic-2026-07-13_12-34-50 分析 · 版本 2.1.0-daily.20260711.1 · macOS arm64 · Electron 39.8.5</p>
+
+  <section id="overview">
+    <h2>1. 问题概述</h2>
+    <div class="card">
+      <p><span class="badge red">现象</span>从另一个 macOS 桌面（Space）切回 Onward 时，<strong>全部 6 个终端的内容区域</strong>显示一种"像浏览器无内容可显示时的占位提示"（白色），<strong>1–3 秒</strong>后自行恢复正常。</p>
+      <p><span class="badge yellow">频率</span>偶发、条件不明；用户在<strong>升级到 20260711 版本后 30 分钟内</strong>首次注意到（升级前版本 20260629 未见）。</p>
+      <p><span class="badge blue">用户猜测</span>"程序内容不可见的时候，销毁了信息"。</p>
+    </div>
+    <div class="callout ok">
+      <strong>结论先行：</strong>用户猜测方向正确，但被销毁的不是终端缓冲区内容，而是<strong>渲染器资源</strong>——应用在窗口被遮挡时主动销毁全部 WebGL 上下文（这是 2026-05-01 为修"Spaces 切换后 Task 空白"引入的<em>刻意设计</em>）；切回时的"重建 + 字形图集清空风暴"让渲染进程在 1–3 秒内交不出任何一帧，Chromium 合成器只能显示无内容占位（白色）。新版本 f05fe9b 补丁把恢复成本放大了约一个数量级，使原本一闪而过的间隙变得肉眼可见。
+    </div>
+  </section>
+
+  <section id="evidence">
+    <h2>2. 诊断包证据</h2>
+    <h3>2.1 时间线（telemetry-events.jsonl，UTC）</h3>
+    <div class="table-wrap"><table>
+      <tr><th>时间</th><th>事件</th><th>解读</th></tr>
+      <tr><td>03:56:37</td><td>session/start（升级完成，20260711 首次启动）</td><td>事发会话开始，pid 50825</td></tr>
+      <tr><td>03:58:27–43</td><td>4 × prompt/use sendAndExecute</td><td>启动多个 agent 任务</td></tr>
+      <tr><td>04:01–04:21</td><td>heartbeat：activeMs 稳定增长，6 终端 / 6 宫格布局</td><td>持续使用中</td></tr>
+      <tr><td>04:21:30 → 04:26</td><td>heartbeat activeMs 仅 +5 秒</td><td><strong>用户离开（切到别的 Space）</strong></td></tr>
+      <tr><td>~04:29</td><td>activeMs 恢复增长</td><td><strong>用户切回（事发窗口）</strong></td></tr>
+      <tr><td>04:32:37–04:34:50</td><td>trace 分片 perf-3704：约 2 分钟写入 4.66 MB</td><td>6 个终端重输出洪峰（7000+ pty.output 事件）</td></tr>
+      <tr><td>04:34:50</td><td>诊断包生成</td><td>用户在现象发生后立即取证</td></tr>
+    </table></div>
+
+    <h3>2.2 关键的"证据缺席"</h3>
+    <div class="callout danger">
+      整个 49.76 MB、跨两个会话的 trace 中，renderer 侧事件<strong>只有 <code>renderer:ipc.terminal.write</code> 一种</strong>。注册表中与本问题直接相关的
+      <code>renderer:window.visibility-change</code>、<code>renderer:xterm.renderer.dispose-webgl</code>、
+      <code>renderer:xterm.renderer.ensure-webgl</code>、<code>renderer:xterm.renderer.context-lost</code>
+      <strong>一条都没有</strong>——它们全部走 opt-in 的 <code>perfTrace()</code> 通道（需 <code>ONWARD_PERF_TRACE=1</code>），生产环境默认不记录。详见 <a href="#trace-gap">§7</a>。
+    </div>
+    <p>因此本分析的机制部分来自<strong>代码级取证</strong>（下文逐条给出 file:line），时序部分来自 telemetry 与 trace 中主进程侧的旁证。</p>
+  </section>
+
+  <section id="mechanism">
+    <h2>3. 现有机制：窗口遮挡时挂起渲染器，可见时恢复</h2>
+    <p>这套机制由三次历史修复层层演化而来：</p>
+    <div class="table-wrap"><table>
+      <tr><th>提交</th><th>日期</th><th>内容</th></tr>
+      <tr><td><code>309f770</code></td><td>2026-04-21</td><td>surface 丢失后的渲染器恢复</td></tr>
+      <tr><td><code>30ec82d</code></td><td>2026-05-01</td><td><strong>修"macOS Spaces / Win 虚拟桌面切换后 Task 空白"</strong>：引入挂起/恢复管线</td></tr>
+      <tr><td><code>e496fed</code></td><td>2026-05-06</td><td>WebGL 回退语义对齐 VS Code（context-loss 后 DOM 回退 + 冷却）</td></tr>
+      <tr><td><code>746e117</code></td><td>2026-05-29</td><td>共享图集页版本号碰撞修复（6+ Task 乱码）</td></tr>
+    </table></div>
+
+    <h3>当前代码路径</h3>
+    <ul>
+      <li><strong>挂起</strong>：<code>TerminalGrid.tsx:1351-1357</code> 监听 <code>visibilitychange</code>，<code>document.hidden</code> 时调 <code>suspendVisibleRendererSurfaces('document-hidden')</code>（<code>terminal-session-manager.ts:1242</code>）→ 对每个可见会话 <code>renderer.deactivate()</code> → <code>disposeWebgl()</code>（<code>terminal-renderer-lifecycle.ts:277</code>）→ xterm 退到 DOM 渲染器。</li>
+      <li><strong>隐藏期间</strong>：Electron <code>backgroundThrottling</code> 为默认 true，rAF 停摆 → DOM 渲染器实际上从不绘制；PTY 数据进入 <code>pendingData</code> 缓冲（<code>terminal-session-manager.ts:1014-1045</code>）。</li>
+      <li><strong>恢复</strong>：切回触发 <code>document-visible</code> + <code>window-focus</code> → 80ms 防抖（darwin 策略，<code>terminal-renderer-lifecycle.ts:71-80</code>）→ <code>restoreVisibleRendererSurfaces</code>（<code>terminal-session-manager.ts:1266</code>）。</li>
+    </ul>
+  </section>
+
+  <section id="rootcause">
+    <h2>4. 根因链条（切回瞬间发生了什么）</h2>
+    <div class="flow">
+      <div class="flow-step">
+        <div class="flow-num">1</div>
+        <div class="flow-body">
+          <div class="flow-title">切回 Space，窗口重新可见</div>
+          <div class="flow-detail">合成器上一帧内容已随 WebGL canvas 销毁而失效；DOM 渲染器在隐藏期间从未绘制过 → 此刻<strong>没有任何可显示的帧</strong>。白色占位从这一刻开始。</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">2</div>
+        <div class="flow-body">
+          <div class="flow-title">80ms 防抖后，恢复第 1 轮</div>
+          <div class="flow-detail">对 6 个终端逐个：<code>ensureWebgl()</code> 新建 WebGL 上下文（<strong>共享字形图集为空</strong>）+ <code>forceFit</code> + <code>terminal.refresh(0, rows-1)</code>；同时 flush 隐藏期间缓冲的 PTY 数据（agent 洪峰输出）。</div>
+        </div>
+      </div>
+      <div class="flow-step hot">
+        <div class="flow-num">3</div>
+        <div class="flow-body">
+          <div class="flow-title">下一帧，恢复第 2 轮（postResumeFrameCount=1）</div>
+          <div class="flow-detail"><code>schedulePostFrameSurfaceRestore</code>（<code>terminal-session-manager.ts:1290</code>）对 6 个终端<strong>再次</strong>调 <code>restoreSurface</code>——此时 addon 已存在，走 Path B = <strong>6 次 <code>clearTextureAtlas()</code></strong>（<code>terminal-renderer-lifecycle.ts:184</code>）。6 个终端共享同一个图集：每次 clear 都把<strong>全部</strong>已光栅化字形清空，前一个终端刚重建的字形被下一个 clear 再次摧毁。</div>
+        </div>
+      </div>
+      <div class="flow-step hot">
+        <div class="flow-num">4</div>
+        <div class="flow-body">
+          <div class="flow-title">f05fe9b 放大器（本次升级新增，见 §5）</div>
+          <div class="flow-detail">每次 <code>clearTextureAtlas</code> 都 bump 共享 <code>_modelEpoch</code> → <strong>全部 6 个</strong> owner 各自强制 <code>_clearModel(true)</code> + 全视口 <code>_updateModel(0, rows-1)</code>；叠加 022e3f2 的 merge-retry 循环（单次渲染 ≤32 次重试），成本从 O(N) 涨到 O(N² × 重试)。6 宫格 × 密集 TUI 输出 × retina DPR=2 → 渲染主线程连续忙碌数百 ms 至数秒。</div>
+        </div>
+      </div>
+      <div class="flow-step hot">
+        <div class="flow-num">5</div>
+        <div class="flow-body">
+          <div class="flow-title">白色窗口期：1–3 秒</div>
+          <div class="flow-detail">在第一帧干净内容提交之前，合成器对每个 canvas 区域绘制"无内容占位"（白）。首帧提交后一切恢复 → 用户看到"过一会儿才恢复"。</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <strong>次生场景（偶发性的另一半）：</strong>若遮挡期间 macOS 真的回收了 GPU surface（或该轮挂起未及触发），切回时 <code>webglcontextlost</code> 在多个 canvas 上触发 → <code>fallbackAfterContextLoss</code>（<code>terminal-renderer-lifecycle.ts:342</code>）→ 进入 <strong>5000ms WebGL 冷却</strong>并退 DOM 渲染；冷却期内所有恢复请求被 <code>restore-deferred</code> 拒绝。这条路径下白色窗口期更长。"偶尔出现、条件不明"正对应这两条路径叠加负载高低的组合。
+    </div>
+  </section>
+
+  <section id="amplifier">
+    <h2>5. 放大器：f05fe9b 的 epoch 广播（为什么升级后才注意到）</h2>
+    <p>版本区间 20260629 → 20260711 共 10 个提交，其中唯一触及渲染器的是 <code>f05fe9b</code>（2026-07-02，"per-owner model-epoch to seal multi-Task WebGL atlas garble"）。它本身是正确的乱码修复，但改变了 <code>clearTextureAtlas</code> 的传播语义：</p>
+    <div class="grid2">
+      <div class="panel before">
+        <h4>升级前（20260629）</h4>
+        <p style="font-size:13.5px">共享图集的 <code>_requestClearModel</code> 是<strong>单个布尔</strong>：clear 之后只有<strong>第一个</strong>渲染的终端做全量模型重建，其余 5 个继续用旧模型（这正是乱码根源，但恢复路径上"便宜"）。</p>
+        <p style="font-size:13.5px">恢复风暴成本 ≈ <strong>O(N)</strong> 次全量重建。窗口期短，肉眼难察觉。</p>
+      </div>
+      <div class="panel after">
+        <h4>升级后（20260711，含 f05fe9b）</h4>
+        <p style="font-size:13.5px">每次 clear bump 共享 <code>_modelEpoch</code>，<strong>每个</strong> owner 的 <code>beginFrame()</code> 都返回 true → 6 个终端各自全量 <code>_clearModel + _updateModel</code>；merge-retry 循环在 epoch 连续推进时反复整轮重建。</p>
+        <p style="font-size:13.5px">恢复风暴成本 ≈ <strong>O(N² × 重试)</strong> 次全量重建 + 图集反复清空重光栅化。窗口期拉长到 1–3 秒，肉眼可见。</p>
+      </div>
+    </div>
+    <div class="callout">
+      注意：<strong>f05fe9b 不是 bug，恢复路径的"每终端各 clear 一次共享图集"才是浪费的源头</strong>——6 个终端共享一个图集，一个恢复批次里 clear 一次就够了。f05fe9b 只是让这个既有浪费从"隐性"变成"显性"。
+    </div>
+  </section>
+
+  <section id="why-white">
+    <h2>6. 为什么是"白色"，而不是黑屏或花屏</h2>
+    <ul>
+      <li>窗口原生背景色已设置为深色（<code>electron/main/index.ts:457</code>，<code>backgroundColor: '#1e1e1e'</code>），主题 Amethyst 也是深色 → <strong>排除</strong>"窗口级白底闪现"。</li>
+      <li>用户描述"像浏览器无内容可显示时的提示，是渲染内核主动显示的，不是渲染出错"——这与 Chromium 合成器对<strong>失效 canvas 层 / 死 GPU tile</strong> 的占位绘制一致。<code>docs/lessons.md</code> 2026-04-30 条目记录过同一视觉："Chromium's compositor showed the dead GPU tile as a 'broken image' placeholder"。</li>
+      <li>占位出现在<strong>每个终端的内容区域</strong>（canvas 层级），而非整窗——与"6 个 canvas 同时无有效内容"吻合。</li>
+    </ul>
+  </section>
+
+  <section id="trace-gap">
+    <h2>7. 诊断盲区（无论选哪个方案都必须修）</h2>
+    <div class="callout danger">
+      <p><strong>问题</strong>：渲染器生命周期全部 9 个事件（visibility-change / dispose-webgl / ensure-webgl / context-lost / context-loss-fallback / restore-deferred / failure 等）都走 opt-in 的 <code>perfTrace()</code>，生产诊断包里为零。这正是 <code>src/utils/perf-trace.ts:29-37</code> 注释里点名警告过的失效模式（2026-07-04 Git Diff 诊断包同样的教训）。</p>
+      <p><strong>修法</strong>：把这些<strong>低频、用户动作级</strong>的生命周期事件迁移到 default-on 的 <code>perfTraceDiagnostic()</code> 通道。它们每次 Space 切换才发十几条，完全符合 diagnostic tier 的频率约束。修复后，用户再报同类问题时，诊断包能直接回答"挂起了吗、恢复用了多久、有没有 context-loss、冷却触发没有"。</p>
+      <p>另外两个注册即未发射的事件（<code>RENDERER_XTERM_RENDERER_CONTEXT_RESTORED</code> / <code>REFRESH_AFTER_RESTORE</code>，<code>perf-trace-names.ts:370,372</code>）应一并补上发射点，量化"恢复耗时"。</p>
+    </div>
+  </section>
+
+  <section id="peer">
+    <h2>8. 同行产品调研</h2>
+    <div class="callout">
+      <strong>一句话结论：所有成熟同行在窗口遮挡时都"暂停渲染、保留 GPU 上下文"，没有任何一家采取"销毁再重建"。</strong>本应用的 dispose-on-hidden 设计是同类产品中的孤例。
+    </div>
+
+    <h3>8.1 VS Code（xterm.js 最大的使用方）：只在真丢失时销毁</h3>
+    <p>VS Code <strong>不会</strong>在窗口隐藏/遮挡时销毁 WebglAddon。<code>xtermTerminal.ts</code> 中唯一的销毁路径是真正的 <code>onContextLoss</code> 回调（<code>_disposeOfWebglRenderer()</code>）；不存在任何 visibility/occlusion 触发的销毁。隐藏终端的处理靠 xterm.js 内建的 IntersectionObserver（PR <a href="https://github.com/xtermjs/xterm.js/pull/1144">#1144</a>、issue <a href="https://github.com/xtermjs/xterm.js/issues/880">#880</a>）：元素完全不可见时停止渲染帧，但<strong>WebGL 上下文保持存活</strong>——是暂停，不是拆除。</p>
+    <p>而且"在存活终端上重建 WebglAddon"这条路径本身是已知脆弱面：VS Code issue <a href="https://github.com/microsoft/vscode/issues/263159">#263159</a>（"terminal goes invisible"，<code>webglcontextrestored</code> 后报 <code>INVALID_OPERATION: object does not belong to this context</code>，以 not-planned 关闭）、<a href="https://github.com/microsoft/vscode/issues/76940">#76940</a>（唤醒后损坏，隐藏/显示不能恢复，只能新建终端）——正是我们每次 Space 切换都会主动走的机制。</p>
+
+    <h3>8.2 Chromium / Electron 在 macOS 的遮挡行为</h3>
+    <ul>
+      <li>Electron 文档确认：macOS 上 visibility 状态跟随<strong>窗口遮挡</strong>——切到别的 Space 使窗口被完全遮挡即 <code>document.hidden=true</code>；<code>backgroundThrottling: true</code>（默认）会同时压制 rAF（<a href="https://github.com/electron/electron/issues/9567">electron#9567</a>、<a href="https://github.com/electron/electron/issues/4925">#4925</a>）。这与 §3/§4 的机制推演一致。</li>
+      <li><strong>新发现的风险面</strong>：Chrome 对单页 WebGL 上下文数有约 16 个的上限，超限时<strong>最老的上下文被强制 <code>webglcontextlost</code></strong>。每次 Space 切换翻搅 6 个上下文（销毁 6 + 新建 6），一旦销毁侧回收滞后就逼近上限——与"偶尔出现、条件不明"的观测吻合（触发即落入 §4 次生场景的 5s 冷却路径）。</li>
+      <li>重新显示时，若 canvas 合成层还没有有效内容，合成器显示空白/白色层直到第一次重绘提交——与用户描述的白色占位一致。（<a href="https://www.electronjs.org/docs/latest/api/browser-window">Electron BrowserWindow 文档</a>）</li>
+    </ul>
+
+    <h3>8.3 xterm.js 恢复路径的已知伤疤</h3>
+    <ul>
+      <li>官方 README 推荐的 <code>onContextLoss</code> 处理就是 <code>dispose()</code>——这个 API 不是为"日常反复重建"设计的。</li>
+      <li>在存活终端上新建 WebglAddon 会让字形图集从空开始重新光栅化（issue <a href="https://github.com/xtermjs/xterm.js/issues/4065">#4065</a>："图集清空后重来"），重建后的最初帧可能渲染空白/残缺字形，直到图集重新填充——与 §4 第 2-4 步的推演一致。相关脆弱面：<a href="https://github.com/xtermjs/xterm.js/issues/2623">#2623</a>、<a href="https://github.com/xtermjs/xterm.js/issues/3548">#3548</a>。</li>
+      <li><strong>未证实项（诚实声明）</strong>：调研未能确认 @xterm/addon-webgl 0.19/0.20 是否修复了"重建后首帧空图集"行为——"升级新版 addon 能解决"目前是未验证假设。</li>
+    </ul>
+
+    <h3>8.4 原生 GPU 终端：一致的"暂停循环、保留资源"</h3>
+    <div class="table-wrap"><table>
+      <tr><th>产品</th><th>遮挡时策略</th></tr>
+      <tr><td>Alacritty / WezTerm</td><td>基于 winit 的 <code>WindowEvent::Occluded</code>（macOS NSWindow occlusionState）：遮挡期间跳过重绘，GPU surface/上下文保留（winit 仅在 iOS 因应用生命周期释放资源，macOS 不释放）</td></tr>
+      <tr><td>Ghostty</td><td>原生 AppKit + Metal：不可见时降频/暂停重绘，Metal layer 保留</td></tr>
+      <tr><td>iTerm2（Metal）</td><td>遮挡/离屏窗口暂停绘制，不拆除 Metal device</td></tr>
+    </table></div>
+    <p style="font-size:13px; color:#8a93a5">来源：winit 文档（docs.rs/winit）、gpu-terminal-wars（unixy.io）、Terminal Emulator Comparison 2026（blog.luminoid.dev）。</p>
+
+    <div class="callout warn">
+      <strong>调研对方案的影响</strong>：同行共识使<strong>方案 2</strong>（不再遮挡即销毁）从"激进选项"升级为"长期正确方向"——它同时消除重建风暴、空图集首帧、以及 16 上下文上限翻搅三个风险面。但它的回归验证成本仍然最高（须证明 2026-05-01 phantom-blank 不复发，而当年那个 bug 的真正根源——contextlost 里同步 dispose、缺 preventDefault——已由 lessons 2026-04-30 的修复解决，挂起机制可能是在治"已被治好的病"）。方案 1 仍是本次回归的最短止血路径。
+    </div>
+  </section>
+
+  <section id="options">
+    <h2>9. 修复方案选项</h2>
+
+    <div class="panel opt" style="margin-bottom:16px">
+      <h4><span class="badge green">方案 0 · 必做</span>诊断通道迁移（不改行为）</h4>
+      <p style="font-size:13.5px">§7 的修复：生命周期事件迁到 <code>perfTraceDiagnostic</code> + 补齐 restored / refresh-after-restore 发射点。不改变任何渲染行为，为后续验证和未来诊断提供数据。<strong>风险：无。</strong></p>
+    </div>
+
+    <div class="panel opt" style="margin-bottom:16px">
+      <h4><span class="badge blue">方案 1 · 推荐</span>恢复路径去重：共享图集每批次只 clear 一次</h4>
+      <p style="font-size:13.5px"><strong>改动</strong>：(a) 恢复第 2 轮（post-frame Path B）按<strong>共享图集实体</strong>去重——一个恢复批次内只对图集 clear 一次，其余终端只 <code>refresh</code>；(b) Path B 跳过"第 1 轮刚由 Path A 重建过上下文"的终端（新图集本来就是空的，再 clear 纯属浪费）。</p>
+      <p style="font-size:13.5px"><strong>效果</strong>：恢复成本从 O(N²×重试) 回到 O(N)，f05fe9b 的正确性收益保留。<strong>风险：低</strong>——不动挂起策略，2026-05-01 的 phantom-blank 防护原样保留；TFA-10..18 现有断言直接回归验证。</p>
+    </div>
+
+    <div class="panel opt" style="margin-bottom:16px">
+      <h4><span class="badge purple">方案 2 · 策略变更</span>不再在 document.hidden 时销毁 WebGL</h4>
+      <p style="font-size:13.5px"><strong>改动</strong>：取消 suspend-on-hidden；上下文常驻，只暂停写入/渲染；真正的 GPU 回收交给 keep-alive 的 context-loss 恢复路径（lessons 2026-04-30 已确立：contextlost 时保留 addon + preventDefault，contextrestored 后重建）。</p>
+      <p style="font-size:13.5px"><strong>效果</strong>：切回时零重建成本，白色窗口期从机制上消失。<strong>风险：中高</strong>——需要重新验证当初引入挂起机制要防的"GPU surface 回收后 phantom-blank"不回归；依赖同行调研结论（VS Code 是否保持上下文存活）。改动面大，需要完整的 5 次往返稳定性验证。</p>
+    </div>
+
+    <div class="panel opt" style="margin-bottom:16px">
+      <h4><span class="badge yellow">方案 3 · 体验平滑</span>错峰恢复（可与方案 1 叠加）</h4>
+      <p style="font-size:13.5px"><strong>改动</strong>：恢复不再 6 个终端同帧进行——聚焦终端最先恢复，其余每帧一个错开，保证渲染主线程每帧都能提交。</p>
+      <p style="font-size:13.5px"><strong>效果</strong>：即便未来终端数增加，首帧时间有上界。<strong>风险：低-中</strong>——恢复期间不同终端有短暂视觉不同步。</p>
+    </div>
+
+    <div class="callout warn">
+      <strong>决策请求</strong>：方案 0 属于诊断基建，无行为变化，建议直接实施；方案 1/2/3 属于渲染器生命周期策略调整，按项目规则需要用户显式决策。推荐组合：<strong>方案 0 + 方案 1</strong>（先消掉本次回归的直接放大器，低风险、可快速验证），方案 2 待同行调研结论与方案 1 实测效果后再评估，方案 3 视 1 的实测残余窗口期决定是否叠加。
+    </div>
+    <div class="callout ok">
+      <strong>用户决策（2026-07-13）</strong>：选定 <strong>方案 0 + 方案 2</strong>（对齐同行：遮挡时保留 WebGL 上下文、只暂停渲染），恢复延迟测试预算 <strong>200ms</strong>（3 次取样、≥1 次达标）。实施要点：<code>document.hidden</code> 不再触发 <code>suspendVisibleRendererSurfaces</code>（该方法移除，改为 <code>noteDocumentHiddenKeepAlive()</code> 诊断面包屑）；<code>restoreSurface</code> 接入纯决策表 <code>decideSurfaceRestoreAction</code>——存活 addon 走 refresh-only（<strong>不再 clearTextureAtlas</strong>，方案 1 的去重收益被方案 2 自然覆盖）；真实 context-loss → DOM 回退 → 冷却 → 重建的安全网原样保留；tab 切换（<code>setVisibility(false)</code>）的 WebGL 释放行为不变。生命周期事件全部迁移 <code>perfTraceDiagnostic</code>（默认开启），新增 <code>document-hidden-keepalive</code> 与 <code>surface-restore-batch</code>（时长 span）两个诊断事件。
+    </div>
+  </section>
+
+  <section id="testplan">
+    <h2>10. 测试方案（SOP Step 0 结论：扩充既有 runner，不新建）</h2>
+    <div class="table-wrap"><table>
+      <tr><th>层</th><th>载体</th><th>断言</th></tr>
+      <tr>
+        <td><span class="badge blue">复现</span>autotest</td>
+        <td><strong>扩充 <code>run-terminal-focus-activation</code></strong>（现有 TFA-10..18 正是 Spaces 切换恢复面）</td>
+        <td>新增 TFA 用例：6 终端 + 重输出下驱动 document.hidden→visible 往返（复用 <code>runVisibilityRoundtrip</code> autotest 钩子），断言 (a) 恢复批次内共享图集 clear 次数 == 1；(b) 恢复后像素探针非空、非占位；(c) 恢复延迟聚合 3 次取样、≥1 次满足预算（预算值需与用户确认，现有先例 200ms）</td>
+      </tr>
+      <tr>
+        <td><span class="badge blue">风暴</span>autotest</td>
+        <td><strong>扩充 <code>run-render-corruption-stress</code></strong>（RCS-EPOCH 系列所在地）</td>
+        <td>新增 RCS 用例：一个恢复批次内多次 clearTextureAtlas 时，每 owner 的全量重建次数有上界（防止未来回归到 O(N²)）</td>
+      </tr>
+      <tr>
+        <td><span class="badge green">单元</span>unittest</td>
+        <td>新建 <code>test/unittest/renderer-surface-restore-dedup.test.mts</code></td>
+        <td>纯逻辑面：恢复批次的去重决策表（哪些终端 clear、哪些只 refresh；Path A 后跳过 Path B clear 的判定）</td>
+      </tr>
+      <tr>
+        <td><span class="badge purple">埋点</span>自检</td>
+        <td><code>run-trace-infra-self-check-autotest.sh</code></td>
+        <td>新迁移的 diagnostic 事件注册齐全、<code>infra/trace.md</code> §2 同步</td>
+      </tr>
+    </table></div>
+    <p>按"timing-sensitive autotest"硬规则：往返恢复类断言在用例内重复 5 次取聚合；延迟类 3 次取样、全部超预算才判失败。</p>
+  </section>
+
+  <section id="meta" class="meta-footer">
+    <h2 style="font-size:15px; border:none; margin-bottom:10px">文档元数据</h2>
+    <div class="table-wrap"><table>
+      <tr><th>生成分支</th><td>master</td></tr>
+      <tr><th>反映版本</th><td>v2.1.0-daily.20260711.1（用户事发版本）· 仓库 HEAD c754646</td></tr>
+      <tr><th>诊断包</th><td>onward-diagnostic-2026-07-13_12-34-50.zip（本地分析，未外传；含本机路径的内容未在本文档引用）</td></tr>
+      <tr><th>文档版本</th><td>v1.2</td></tr>
+    </table></div>
+    <h3 style="font-size:13.5px; margin:14px 0 8px; color:#8a93a5">更新历史（只增不改）</h3>
+    <div class="table-wrap"><table>
+      <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+      <tr><td>v1.0</td><td>2026-07-13</td><td>master</td><td>初版：诊断包分析、根因链条、f05fe9b 放大器、修复方案选项与测试方案（§8 同行调研待补）</td></tr>
+      <tr><td>v1.1</td><td>2026-07-13</td><td>master</td><td>补充 §8 同行调研（VS Code / Chromium / xterm.js / 原生 GPU 终端，含引用来源）；新增 Chrome ~16 WebGL 上下文上限风险面；更新方案 2 的评估结论</td></tr>
+      <tr><td>v1.2</td><td>2026-07-13</td><td>master</td><td>记录用户决策（方案 0+2、延迟预算 200ms）与实施要点：keep-alive 契约、restoreSurface 决策表化（refresh-only）、诊断通道迁移、新增 keepalive/restore-batch 事件；测试为 TRSP-U-01..09 + TFA-19/20 + RCS-EPOCH-03</td></tr>
+    </table></div>
+  </section>
+</main>
+
+<script>
+  // ToC current-section highlighting; anchor jumps stay instant (scroll-behavior: auto).
+  const links = Array.from(document.querySelectorAll('nav#toc a'));
+  const sections = links.map(a => document.querySelector(a.getAttribute('href')));
+  function refresh() {
+    let idx = 0;
+    for (let i = 0; i < sections.length; i++) {
+      if (sections[i] && sections[i].getBoundingClientRect().top <= 90) idx = i;
+    }
+    links.forEach((a, i) => a.classList.toggle('active', i === idx));
+  }
+  document.addEventListener('scroll', refresh, { passive: true });
+  refresh();
+</script>
+</body>
+</html>

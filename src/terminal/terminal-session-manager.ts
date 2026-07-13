@@ -13,7 +13,7 @@ import type { TerminalStyleConfig } from '../types/settings.d.ts'
 import type { TerminalBufferOptions, TerminalBufferResult } from '../types/electron.d.ts'
 import { requestOpenExternalHttpLink } from '../utils/externalLink'
 import { perfMonitor } from '../utils/perf-monitor'
-import { perfTraceTask } from '../utils/perf-trace'
+import { perfTraceTask, perfTraceDiagnostic } from '../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
 import { inputPriorityLane } from './input-priority-lane'
 import { TerminalOutputScheduler } from './terminal-output-scheduler'
@@ -21,6 +21,7 @@ import {
   TerminalRendererLifecycle,
   createTerminalRendererPolicy,
   type TerminalRendererLifecycleReason,
+  type TerminalRendererLifecycleResult,
   type TerminalRendererMode,
   type TerminalRendererPolicy,
   type TerminalRendererSurfaceEvent
@@ -1239,18 +1240,29 @@ export class TerminalSessionManager {
     this.scheduleVisibleRendererSurfaceRestore(reason)
   }
 
-  suspendVisibleRendererSurfaces(reason: 'document-hidden' | 'hidden' = 'document-hidden'): number {
-    let suspended = 0
-
+  /**
+   * Document went hidden (window occluded / Space switched away). Peer-aligned
+   * contract (VS Code, native GPU terminals): KEEP every visible pane's WebGL
+   * context alive — rendering pauses via Chromium's background rAF throttling,
+   * and genuine GPU reclamation surfaces as webglcontextlost, handled by the
+   * context-loss fallback. Tearing contexts down here was the root of the
+   * "all terminals white for 1-3s after Space switch-back" regression: the
+   * switch-back had to recreate N contexts and re-rasterize the shared glyph
+   * atlas before the compositor had any frame to show.
+   */
+  noteDocumentHiddenKeepAlive(): { webglSessions: number; visibleSessions: number } {
+    let webglSessions = 0
+    let visibleSessions = 0
     for (const session of this.sessions.values()) {
       if (!session.visible || !session.open || session.status === 'disposed') continue
-      const result = session.renderer.deactivate(reason)
-      if (result.changedRenderer) {
-        suspended += 1
-      }
+      visibleSessions += 1
+      if (session.renderer.isWebglActive()) webglSessions += 1
     }
-
-    return suspended
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_DOCUMENT_HIDDEN_KEEPALIVE, {
+      webglSessions,
+      visibleSessions
+    })
+    return { webglSessions, visibleSessions }
   }
 
   scheduleVisibleRendererSurfaceRestore(reason: TerminalRendererSurfaceEvent): void {
@@ -1264,17 +1276,32 @@ export class TerminalSessionManager {
   }
 
   restoreVisibleRendererSurfaces(reason: TerminalRendererSurfaceEvent): number {
+    const startedAt = performance.now()
     const restoredSessionIds: string[] = []
+    let refreshedCount = 0
+    let recreatedCount = 0
+    let deferredCount = 0
 
     for (const session of this.sessions.values()) {
       if (!this.canRestoreRendererSurface(session)) continue
-      this.restoreRendererSurface(session, reason, true)
+      const result = this.restoreRendererSurface(session, reason, true)
+      if (result.action === 'refresh-only') refreshedCount += 1
+      else if (result.action === 'recreate-webgl') recreatedCount += 1
+      else deferredCount += 1
       restoredSessionIds.push(session.id)
     }
 
     this.schedulePostFrameSurfaceRestore(restoredSessionIds, reason)
 
     this.rendererRecoveryCount += restoredSessionIds.length
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_SURFACE_RESTORE_BATCH, {
+      reason,
+      sessionCount: restoredSessionIds.length,
+      refreshedCount,
+      recreatedCount,
+      deferredCount,
+      durationMs: +(performance.now() - startedAt).toFixed(1)
+    })
     return restoredSessionIds.length
   }
 
@@ -1319,13 +1346,14 @@ export class TerminalSessionManager {
     session: TerminalSession,
     reason: TerminalRendererSurfaceEvent,
     forceGeometry: boolean
-  ): void {
-    session.renderer.restoreSurface(reason)
+  ): TerminalRendererLifecycleResult {
+    const result = session.renderer.restoreSurface(reason)
     if (forceGeometry) {
       this.forceFit(session.id)
-      return
+      return result
     }
     this.fit(session.id)
+    return result
   }
 
   private getTextareaElementForSession(session: TerminalSession): HTMLTextAreaElement | null {

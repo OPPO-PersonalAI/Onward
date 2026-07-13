@@ -533,7 +533,12 @@ register. Lazy-load via `require('electron')` gated on
 | `RENDERER_PERF_SNAPSHOT` | `renderer:perf-snapshot` | `i` (t) | `perf-monitor.ts` 1 s tick |
 | `RENDERER_APPSTATE_SUMMARY` | `renderer:appstate-summary` | `i` (t) | `AppStateContext` 1 s tick |
 
-#### Web events — wired
+#### Web events — wired (DIAGNOSTIC tier since 2026-07-13)
+
+These four ride `perfTraceDiagnostic` (default-ON in production) and
+`installWindowEventTrace()` installs unconditionally: the 2026-07-13
+Space-switch white-flash bundle had zero renderer visibility breadcrumbs
+because they previously rode the opt-in `perfTrace` channel.
 
 | Constant | Name | Phase | Call site |
 |---|---|---|---|
@@ -576,16 +581,31 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_MONACO_VIEWSTATE_RESTORE` | `renderer:monaco.viewstate-restore` | `X` | `ProjectEditor.tsx::editor.restoreViewState` |
 | `RENDERER_XTERM_WEBGL_INIT` | `renderer:xterm.webgl-context-init` | `X` | `src/components/Terminal/Terminal.tsx` WebGL addon attach |
 
-#### Terminal renderer surface lifecycle
+#### Terminal renderer surface lifecycle (DIAGNOSTIC tier since 2026-07-13)
+
+All lifecycle events below ride `perfTraceDiagnostic` (default-ON in
+production). Keep-alive contract since 2026-07-13: document-hidden never
+disposes WebGL (peer-aligned with VS Code / native GPU terminals); the
+host-surface restore on a live addon is refresh-only and must NOT clear the
+shared glyph atlas (the O(N²) rebuild storm behind the Space-switch
+white-flash regression).
 
 | Constant | Name | Phase | Call site |
 |---|---|---|---|
 | `RENDERER_XTERM_RENDERER_CONTEXT_LOST` | `renderer:xterm.renderer.context-lost` | `i` | `terminal-renderer-lifecycle.ts` xterm `WebglAddon.onContextLoss` callback; enters the VS Code-aligned DOM fallback path |
-| `RENDERER_XTERM_RENDERER_RESTORE_DEFERRED` | `renderer:xterm.renderer.restore-deferred` | `i` | Same file, `ensureWebgl()` defers while cooldown makes WebGL unsafe |
+| `RENDERER_XTERM_RENDERER_RESTORE_DEFERRED` | `renderer:xterm.renderer.restore-deferred` | `i` | Same file, `restoreSurface()` (decision table `defer-context-lost` / `defer-cooldown`) and `ensureWebgl()` guards |
+| `RENDERER_XTERM_RENDERER_REFRESH_AFTER_RESTORE` | `renderer:xterm.renderer.refresh-after-restore` | `i` | Same file, `restoreSurface()` after the forced viewport refresh; payload `action` = `refresh-only` \| `recreate-webgl` |
 | `RENDERER_XTERM_RENDERER_CONTEXT_LOSS_FALLBACK` | `renderer:xterm.renderer.context-loss-fallback` | `i` | Same file, DOM fallback path after xterm reports an unrecovered context loss; tagged with `trigger`, `changedRenderer`, `cooldownMs` |
 | `RENDERER_XTERM_RENDERER_ENSURE_WEBGL` | `renderer:xterm.renderer.ensure-webgl` | `i` | Same file, WebGL addon attach / attach failure |
-| `RENDERER_XTERM_RENDERER_DISPOSE_WEBGL` | `renderer:xterm.renderer.dispose-webgl` | `i` | Same file, WebGL addon dispose; `reason=document-hidden` means host page visibility released GPU ownership |
+| `RENDERER_XTERM_RENDERER_DISPOSE_WEBGL` | `renderer:xterm.renderer.dispose-webgl` | `i` | Same file, WebGL addon dispose (tab-hidden `setVisibility(false)`, context-loss fallback, dispose) — `reason=document-hidden` no longer occurs since the keep-alive contract |
 | `RENDERER_XTERM_RENDERER_FAILURE` | `renderer:xterm.renderer.failure` | `i` | Same file, WebGL attach failures and cooldown accounting |
+| `RENDERER_XTERM_RENDERER_DOCUMENT_HIDDEN_KEEPALIVE` | `renderer:xterm.renderer.document-hidden-keepalive` | `i` | `terminal-session-manager.ts::noteDocumentHiddenKeepAlive()` — occlusion observed, contexts kept; payload `{ webglSessions, visibleSessions }` |
+| `RENDERER_XTERM_RENDERER_SURFACE_RESTORE_BATCH` | `renderer:xterm.renderer.surface-restore-batch` | `X` (`durationMs` in payload) | `terminal-session-manager.ts::restoreVisibleRendererSurfaces()` — one restore batch over all visible panes; payload `{ reason, sessionCount, refreshedCount, recreatedCount, deferredCount, durationMs }` |
+
+`RENDERER_XTERM_RENDERER_CONTEXT_RESTORED` stays registered-but-unemitted:
+the keep-alive design has no `webglcontextrestored`-driven path (loss →
+dispose → cooldown → recreate), so the name is reserved for a future
+restore-in-place strategy.
 
 #### User-input hot paths (wired)
 

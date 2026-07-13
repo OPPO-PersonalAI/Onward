@@ -821,7 +821,20 @@ export const PERF_TRACE_EVENT = {
   // editor instance was already disposed (locale change while the <Editor>
   // conditional is unmounted). Breadcrumb for "Monaco menu items missing"
   // reports; the next onMount re-registers cleanly.
-  RENDERER_FILE_ENTRY_MONACO_ACTIONS_SKIPPED: 'renderer:file-entry.monaco-actions-skipped'
+  RENDERER_FILE_ENTRY_MONACO_ACTIONS_SKIPPED: 'renderer:file-entry.monaco-actions-skipped',
+
+  // ───────── 2026-07-13 Space-switch white-flash fix (keep WebGL alive across occlusion) ─────────
+  // Renderer: document went hidden (window occluded / Space switched away)
+  // and the peer-aligned keep-alive contract left every visible pane's WebGL
+  // context untouched (ph=i). Payload: { webglSessions, visibleSessions }.
+  // Breadcrumb for "terminals white after switching back" reports — proves
+  // the occlusion was observed and nothing was torn down.
+  RENDERER_XTERM_RENDERER_DOCUMENT_HIDDEN_KEEPALIVE: 'renderer:xterm.renderer.document-hidden-keepalive',
+  // Renderer: one host-surface restore batch over all visible panes
+  // (ph=X, durationMs in payload). Payload: { reason, sessionCount,
+  // refreshedCount, recreatedCount, deferredCount, durationMs }. Quantifies
+  // the switch-back recovery cost the 2026-07-13 bundle could not show.
+  RENDERER_XTERM_RENDERER_SURFACE_RESTORE_BATCH: 'renderer:xterm.renderer.surface-restore-batch'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

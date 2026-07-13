@@ -434,6 +434,8 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
   //   TFA-16 document-visible during cooldown keeps DOM rendering
   //   TFA-17 repeated host events during cooldown do not recreate WebGL
   //   TFA-18 restoring the old canvas context does not disturb DOM fallback
+  //   TFA-19 document-hidden keeps WebGL alive (occlusion keep-alive contract, 5-trial aggregate)
+  //   TFA-20 surface-restore latency budget: >=1 of 3 trials within SURFACE_RESTORE_BUDGET_MS
   // ───────────────────────────────────────────────────────────────────
   const repro = window.__blankTaskRepro
   if (!repro) {
@@ -506,7 +508,7 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
             statsAfterPaint,
             recovered,
             bugHypothesisFix:
-              'restoreSurface path B (clearTextureAtlas) must follow with terminal.refresh() — clearTextureAtlas alone marks rows dirty but never paints'
+              'restoreSurface refresh-only path must force terminal.refresh() — a live addon repaint cannot wait for the next PTY write (atlas is intentionally NOT cleared: shared across panes)'
           }
         )
       }
@@ -696,6 +698,162 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
             domRowsTextAfterOldRestoreLength: domRowsTextAfterOldRestore.trim().length,
             bugHypothesisFix:
               'once the lifecycle has switched to DOM rendering, a later restore of the old detached WebGL context must not flip the terminal back into a blank GPU surface'
+          }
+        )
+      }
+
+      // ---- TFA-19/20: occlusion keep-alive contract + restore latency budget ----
+      // 2026-07-13 "all terminals white for 1-3s after Space switch-back" fix.
+      // Peer-aligned contract: document-hidden NEVER tears down WebGL; the
+      // switch-back restore is a refresh (no context recreate, no shared-atlas
+      // clear), so the compositor always has a committed frame within budget.
+      {
+        // TFA-13..18 left this terminal in DOM fallback with the WebGL
+        // cooldown ticking (5s from the loss). Wait it out, then let a host
+        // surface event recreate WebGL — this transition is itself part of
+        // the contract (cooldown expiry → recreate works).
+        const cooldownState = repro.getSessionDebugState(terminalId) as {
+          rendererWebglDisabledUntil?: number | null
+        } | null
+        const disabledUntil = cooldownState?.rendererWebglDisabledUntil ?? null
+        if (disabledUntil !== null) {
+          const remaining = Math.max(0, disabledUntil - performance.now())
+          await sleep(remaining + 100)
+        }
+        terminalApi?.notifyHostSurfaceEvent('document-visible')
+        const webglBack = await waitFor(
+          'tfa-19-webgl-recreated-after-cooldown-expiry',
+          () => {
+            const state = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+            return state?.webglActive === true && findWebglSurface(terminalId) !== null
+          },
+          8000,
+          100
+        )
+
+        // Shadow document.hidden with an own accessor so the real hidden
+        // branch of the visibilitychange handler runs (the property lives on
+        // Document.prototype; delete restores platform behaviour).
+        const setDocumentHiddenForTest = (hidden: boolean) => {
+          if (hidden) {
+            Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+            Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
+          } else {
+            delete (document as { hidden?: unknown }).hidden
+            delete (document as { visibilityState?: unknown }).visibilityState
+          }
+          document.dispatchEvent(new Event('visibilitychange'))
+        }
+
+        // TFA-19 — keep-alive roundtrip. Timing-sensitive (visibility events,
+        // debounced restore) → repeat 5x inside the test, assert ALL trials
+        // kept the addon alive through the hidden phase and recovered pixels
+        // after the visible phase (boolean-correctness aggregator).
+        const KEEPALIVE_TRIALS = 5
+        const keepAliveTrials: Array<{
+          aliveWhileHidden: boolean
+          surfacePresentWhileHidden: boolean
+          recoveredAfterVisible: boolean
+        }> = []
+        if (webglBack) {
+          for (let trial = 0; trial < KEEPALIVE_TRIALS; trial++) {
+            setDocumentHiddenForTest(true)
+            try {
+              // The old suspend design disposed WebGL synchronously in this
+              // handler; give the (removed) path headroom to misbehave before
+              // sampling so a regression cannot hide in dispatch timing.
+              await sleep(150)
+              const hiddenState = repro.getSessionDebugState(terminalId) as {
+                webglActive?: boolean
+              } | null
+              keepAliveTrials.push({
+                aliveWhileHidden: hiddenState?.webglActive === true,
+                surfacePresentWhileHidden: findWebglSurface(terminalId) !== null,
+                recoveredAfterVisible: false
+              })
+            } finally {
+              setDocumentHiddenForTest(false)
+            }
+            const recovered = await waitFor(
+              `tfa-19-recovered-trial-${trial}`,
+              () => {
+                const surface = findWebglSurface(terminalId)
+                if (!surface) return false
+                const state = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+                return state?.webglActive === true && hasRenderablePixels(readWebglPixels(surface.gl))
+              },
+              RESTORE_TIMEOUT_MS,
+              RESTORE_POLL_MS
+            )
+            keepAliveTrials[trial].recoveredAfterVisible = recovered
+          }
+        }
+        const keepAliveAllTrialsGreen =
+          keepAliveTrials.length === KEEPALIVE_TRIALS &&
+          keepAliveTrials.every(
+            (t) => t.aliveWhileHidden && t.surfacePresentWhileHidden && t.recoveredAfterVisible
+          )
+        _assert('TFA-19-document-hidden-keeps-webgl-alive', webglBack && keepAliveAllTrialsGreen, {
+          webglBack,
+          trials: keepAliveTrials,
+          bugHypothesisFix:
+            'document-hidden must not dispose WebGL: occlusion keep-alive (VS Code-aligned) is what removes the N-context rebuild storm on Space switch-back'
+        })
+
+        // TFA-20 — restore latency. Latency aggregator per test/README.md § 3:
+        // N=3 trials, pass if >=1 meets the budget, fail only if all 3 exceed.
+        // Budget signed off by the user on 2026-07-13 (matches the existing
+        // surface-restore precedent).
+        const SURFACE_RESTORE_BUDGET_MS = 200
+        const LATENCY_TRIALS = 3
+        const LATENCY_POLL_MS = 25
+        const latencyTrials: Array<{ whiteObserved: boolean; elapsedMs: number | null }> = []
+        if (webglBack) {
+          for (let trial = 0; trial < LATENCY_TRIALS; trial++) {
+            const phantomResult = repro.phantomBlank(terminalId)
+            const whiteObserved = await waitFor(
+              `tfa-20-phantom-white-trial-${trial}`,
+              () => {
+                const surface = findWebglSurface(terminalId)
+                return surface !== null && looksAllWhite(readWebglPixels(surface.gl))
+              },
+              PHANTOM_BLANK_OBSERVE_TIMEOUT_MS,
+              LATENCY_POLL_MS
+            )
+            const startedAt = performance.now()
+            terminalApi?.notifyHostSurfaceEvent('document-visible')
+            let elapsedMs: number | null = null
+            const recovered = await waitFor(
+              `tfa-20-recovered-trial-${trial}`,
+              () => {
+                const surface = findWebglSurface(terminalId)
+                if (!surface) return false
+                if (!hasRenderablePixels(readWebglPixels(surface.gl))) return false
+                elapsedMs = Math.round(performance.now() - startedAt)
+                return true
+              },
+              RESTORE_TIMEOUT_MS,
+              LATENCY_POLL_MS
+            )
+            latencyTrials.push({
+              whiteObserved: phantomResult.triggered && whiteObserved,
+              elapsedMs: recovered ? elapsedMs : null
+            })
+            await sleep(120)
+          }
+        }
+        const withinBudgetCount = latencyTrials.filter(
+          (t) => t.elapsedMs !== null && t.elapsedMs <= SURFACE_RESTORE_BUDGET_MS
+        ).length
+        _assert(
+          'TFA-20-surface-restore-latency-within-budget',
+          webglBack && latencyTrials.length === LATENCY_TRIALS && withinBudgetCount >= 1,
+          {
+            budgetMs: SURFACE_RESTORE_BUDGET_MS,
+            withinBudgetCount,
+            trials: latencyTrials,
+            bugHypothesisFix:
+              'switch-back restore is refresh-only on a live addon (no context recreate, no shared-atlas clear), so at least one of three trials must repaint within the budget'
           }
         )
       }
