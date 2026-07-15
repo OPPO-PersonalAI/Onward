@@ -78,7 +78,7 @@ import {
   HTML_PREVIEW_MIN_ZOOM_FACTOR,
   isHtmlPreviewRefreshShortcut,
   isHtmlPath,
-  isSameHtmlPreviewDocument,
+  isSameHtmlPreviewFile,
   normalizeHtmlPreviewScrollState,
   normalizeHtmlPreviewZoomFactor,
   stepHtmlPreviewZoomFactor,
@@ -1259,7 +1259,12 @@ export function ProjectEditor({
     // transplant the foreign page's offset onto the freshly remounted home
     // document; instead let the home document render from the top.
     const homeUrl = reader?.homeUrl ?? withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
-    const onHomeDocument = isSameHtmlPreviewDocument(reader?.url ?? null, homeUrl)
+    // Use the hash-insensitive same-FILE check, not same-document: an in-page
+    // anchor (e.g. "#working-route") is still the originally opened file, so its
+    // scroll offset is meaningful and must be preserved across the round trip.
+    // isSameHtmlPreviewDocument keeps the hash and would treat the anchor as a
+    // foreign page, wrongly skipping the capture.
+    const onHomeDocument = isSameHtmlPreviewFile(reader?.url ?? null, homeUrl)
     if (browserId && onHomeDocument) {
       const scrollResult = await getHtmlPreviewController(browserId)?.getScrollState()
       if (activeFilePathRef.current !== targetPath) return
@@ -2714,7 +2719,10 @@ export function ProjectEditor({
     // capturing there would transplant another page's offset into this
     // file's memory. Keep the last on-home offset instead.
     const homeUrl = htmlReaderStateRef.current?.homeUrl ?? withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
-    if (!isSameHtmlPreviewDocument(htmlReaderStateRef.current?.url ?? null, homeUrl)) {
+    // Hash-insensitive same-FILE check (see requestHtmlPreviewReload above): an
+    // in-page anchor is still this file, so capture its scroll rather than
+    // skipping it as an off-home foreign page.
+    if (!isSameHtmlPreviewFile(htmlReaderStateRef.current?.url ?? null, homeUrl)) {
       const skippedPayload = { ph: 'i', site, skipped: 'off-home' }
       if (site === 'poll') {
         perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED, skippedPayload)
@@ -3829,9 +3837,15 @@ export function ProjectEditor({
 
   useEffect(() => {
     const browserId = htmlReaderState?.browserId
-    if (!browserId) return
+    // Wait for the preview to be ready before pushing the remembered zoom: on a
+    // warm reopen the fresh iframe session exists (browserId set) before its
+    // frame has loaded, so a setZoomFactor postMessage fired here would be
+    // dropped and the restored zoom would silently revert to 1. Gating on
+    // `ready` re-runs this once the frame's onLoad lands (parallel to how scroll
+    // restore retries via handleFrameLoad), so the zoom survives the round trip.
+    if (!browserId || !htmlReaderState?.ready) return
     void getHtmlPreviewController(browserId)?.setZoomFactor(htmlPreviewZoomFactorRef.current)
-  }, [htmlReaderState?.browserId])
+  }, [htmlReaderState?.browserId, htmlReaderState?.ready])
 
   useEffect(() => {
     if (!htmlPreviewSearchOpen) return
