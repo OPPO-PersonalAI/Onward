@@ -68,6 +68,7 @@ import {
   installContentCacheInvalidatorOnce
 } from './git-diff-content-cache-wiring'
 import { gitStateMirrorRouter } from './git-state-mirror-router'
+import { gitAutofetchManager } from './git-autofetch-manager'
 import { getUpdateService } from './update-service'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
@@ -893,6 +894,25 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
         'commit', '--allow-empty', '-m', 'autotest git init'
       ], opts)
       return { ok: true }
+    } catch (error) {
+      return { ok: false, error: String(error) }
+    }
+  })
+  // Autotest-only: deterministically drive ONE background auto-fetch for a repo
+  // (bypassing the due-timer) so the fetch→revalidate→behind path can be asserted
+  // without racing the scheduler's interval. Gated on ONWARD_AUTOTEST=1.
+  ipcMain.handle('debug:autotest-git-autofetch', async (
+    _event,
+    payload?: { repoRoot?: unknown }
+  ): Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }> => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { ok: false, error: 'debug:autotest-git-autofetch requires ONWARD_AUTOTEST=1' }
+    }
+    const repoRoot = typeof payload?.repoRoot === 'string' ? payload.repoRoot : ''
+    if (!repoRoot) return { ok: false, error: 'Missing repoRoot.' }
+    try {
+      const result = await gitAutofetchManager.forceFetchForAutotest(repoRoot)
+      return { ok: result.ok, reason: result.reason, durationMs: result.durationMs }
     } catch (error) {
       return { ok: false, error: String(error) }
     }
@@ -2792,6 +2812,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler('debug:post-api-terminal-write')
   ipcMain.removeHandler('debug:autotest-write-external-file')
   ipcMain.removeHandler('debug:autotest-git-init')
+  ipcMain.removeHandler('debug:autotest-git-autofetch')
   ipcMain.removeHandler('performance-trace:record')
   ipcMain.removeHandler('performance-trace:get-status')
   ipcMain.removeHandler('performance-trace:flush')

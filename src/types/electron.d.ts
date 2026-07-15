@@ -429,6 +429,18 @@ export interface GitStateMirrorSnapshot {
    * cached page without an extra git spawn. Undefined on non-repo / unknown.
    */
   branchOid?: string
+  /**
+   * Commits ahead of the branch's upstream (`+N` from `# branch.ab`). Drives the
+   * "local ahead" green badge dot + `↑N` count. Local-only, always accurate.
+   * Undefined when the branch has no upstream.
+   */
+  ahead?: number
+  /**
+   * Commits behind the branch's upstream (`-N` from `# branch.ab`). Drives the
+   * `↓M` count. Only as fresh as the last fetch; the background auto-fetch keeps
+   * it current. Undefined when the branch has no upstream.
+   */
+  behind?: number
   status: TerminalGitStatus | null
   files: GitFileStatus[]
   repos?: GitRepoContext[]
@@ -1090,6 +1102,7 @@ export interface DebugAPI {
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
   gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
+  gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
   flushPerfTrace: () => Promise<PerformanceTraceStatus>

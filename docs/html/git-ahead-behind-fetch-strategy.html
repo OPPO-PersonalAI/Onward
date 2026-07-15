@@ -1,0 +1,258 @@
+<!-- SPDX-FileCopyrightText: 2026 OPPO -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#2a3441;
+    --text:#e6edf3; --muted:#9aa7b4; --accent:#58a6ff; --accent2:#7ee2b8;
+    --clean:#10B981; --ahead:#4ADE80; --behind:#38BDF8; --diverge:#F59E0B;
+    --modified:#EAB308; --added:#A855F7; --deleted:#EF4444; --mixed:#3B82F6; --unknown:#94A3B8;
+    --ok:#7ee2b8; --warn:#f4d67a; --bad:#f7a4a4;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:auto}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;font-size:15px}
+  .layout{display:flex}
+  nav.toc{position:fixed;top:0;left:0;width:240px;height:100vh;background:var(--panel);border-right:1px solid var(--border);padding:24px 16px;overflow-y:auto}
+  nav.toc h4{margin:0 0 14px;font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+  nav.toc a{display:block;color:var(--text);text-decoration:none;padding:7px 10px;border-radius:6px;font-size:13px;margin-bottom:2px;transition:background .1s}
+  nav.toc a:hover,nav.toc a.active{background:var(--panel2);color:var(--accent)}
+  main{margin-left:240px;padding:36px 44px 90px;max-width:1000px}
+  h1{font-size:25px;margin:0 0 6px}
+  .sub{color:var(--muted);margin:0 0 30px;font-size:14px}
+  section{margin-bottom:42px;scroll-margin-top:20px}
+  h2{font-size:20px;border-left:3px solid var(--accent);padding-left:11px;margin:0 0 18px}
+  h3{font-size:15px;color:var(--accent2);margin:22px 0 10px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 22px;margin-bottom:16px}
+  p{margin:0 0 12px}
+  code{background:var(--panel2);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  pre{background:#0a0e14;border:1px solid var(--border);border-radius:8px;padding:14px 16px;overflow-x:auto;font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.55}
+  pre .k{color:#79c0ff}.c{color:#8b949e}.s{color:#a5d6ff}.f{color:#ffa657}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:6px 0}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);font-weight:600}
+  .pill{display:inline-block;padding:2px 9px;border-radius:11px;font-size:11.5px;font-weight:600;white-space:nowrap}
+  .pill.free{background:rgba(74,222,128,.16);color:var(--ok)}
+  .pill.cost{background:rgba(239,68,68,.16);color:var(--bad)}
+  .pill.mid{background:rgba(234,179,8,.16);color:var(--warn)}
+  .pill.rec{background:var(--ahead);color:#052e10;font-weight:700}
+  /* flow diagram */
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .node{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:11px 14px;font-size:12.5px;min-width:120px;text-align:center}
+  .node .t{font-weight:600;font-size:12.5px}
+  .node .d{color:var(--muted);font-size:11px;margin-top:3px}
+  .node.net{border-color:var(--diverge)}
+  .node.new{border-color:var(--ahead);box-shadow:0 0 0 1px rgba(74,222,128,.25)}
+  .arw{display:flex;align-items:center;color:var(--muted);padding:0 8px;font-size:18px}
+  .arw.down{width:100%;justify-content:center;padding:6px 0}
+  /* badge mimic */
+  .badge{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--border);border-radius:20px;padding:4px 11px 4px 9px;font-size:12.5px;font-family:ui-monospace,monospace}
+  .dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+  .ah{color:var(--ahead);font-weight:600}
+  .bh{color:var(--behind);font-weight:600}
+  .callout{border-left:3px solid var(--accent);background:var(--panel);border-radius:0 8px 8px 0;padding:12px 16px;margin:14px 0}
+  .callout.warn{border-left-color:var(--diverge)}
+  .callout.rec{border-left-color:var(--ahead)}
+  .decision{background:linear-gradient(180deg,rgba(88,166,255,.07),transparent);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;padding:14px 18px;margin-bottom:14px}
+  .decision b{color:var(--accent)}
+  ul{margin:6px 0 12px;padding-left:22px}li{margin:4px 0}
+  .meta-tbl td{font-size:13px}
+  .good{color:var(--ok)}.warnc{color:var(--warn)}.badc{color:var(--bad)}
+</style>
+
+<div class="layout">
+<nav class="toc" id="toc">
+  <h4>目录</h4>
+  <a href="#bg">① 背景与现状架构</a>
+  <a href="#mech">② 核心机制回顾</a>
+  <a href="#arch">③ 提议架构:fetch 链路</a>
+  <a href="#params">④ 策略参数(需决策)</a>
+  <a href="#visual">⑤ 徽章视觉状态表</a>
+  <a href="#risk">⑥ 权衡与风险(对标)</a>
+  <a href="#trace">⑦ 诊断埋点</a>
+  <a href="#decide">⑧ 待确认决策清单</a>
+  <a href="#doc">⑨ 文档信息与更新历史</a>
+</nav>
+
+<main>
+  <h1>Terminal Git 徽章 — ahead/behind + 后台 fetch 策略设计</h1>
+  <p class="sub">分支 <code>20260715-git-stats-ahead-behind</code> · 版本 2.0.1 · 基线 commit 9df2b3b · 状态:<b style="color:var(--ahead)">已确认(待实现)</b></p>
+
+  <div class="callout rec">
+    <b>已定方向:</b> ① ahead / behind 都用「箭头方向 + 数字」表达(<span class="ah">↑N</span> / <span class="bh">↓M</span>);② ahead 时圆点用亮草绿 <code>#4ADE80</code>;③ 引入 App 首个网络操作 —— 后台 <code>git fetch</code> 让 behind 变准。本文档只解决"怎么 fetch"这层策略,拿到你确认后再动代码。
+  </div>
+
+  <section id="bg">
+    <h2>① 背景与现状架构</h2>
+    <p>当前每个 Task 终端格子上有一个 Git 徽章(彩色圆点 + 分支名)。状态只有 6 种(<code>clean/added/deleted/modified/mixed/unknown</code>),全部由 <b>GitStateMirror</b> 子系统在一个 <b>worker 线程</b>里跑本地 <code>git status</code> 算出来,<b>全程无任何网络操作</b>。</p>
+    <div class="card">
+      <h3 style="margin-top:0">现状链路(纯本地,无 fetch)</h3>
+      <div class="flow">
+        <div class="node"><div class="t">@parcel/watcher</div><div class="d">文件变更事件</div></div>
+        <div class="arw">→</div>
+        <div class="node"><div class="t">status worker</div><div class="d">git status --porcelain=2 --branch</div></div>
+        <div class="arw">→</div>
+        <div class="node"><div class="t">router 扇出</div><div class="d">IPC update</div></div>
+        <div class="arw">→</div>
+        <div class="node"><div class="t">徽章</div><div class="d">圆点颜色</div></div>
+      </div>
+      <p style="margin:14px 0 0;color:var(--muted);font-size:13px"><b>关键:</b><code>--branch</code> 参数<b>现在就已经在请求</b>,输出里已含 <code># branch.ab +A -B</code>(领先 A / 落后 B),只是解析器把这行丢弃了。所以 ahead 解析出来<b>零成本、无需新进程、无需网络</b>。</p>
+    </div>
+  </section>
+
+  <section id="mech">
+    <h2>② 核心机制回顾:为什么 behind 必须 fetch</h2>
+    <table>
+      <tr><th style="width:130px">维度</th><th>ahead(领先)</th><th>behind(落后)</th></tr>
+      <tr><td>定义</td><td>本地有、本地记录的 <code>origin/xxx</code> 没有的提交</td><td>本地记录的 <code>origin/xxx</code> 有、本地 HEAD 没有的提交</td></tr>
+      <tr><td>数据来源</td><td colspan="2">都来自本地 <code>refs/remotes/origin/xxx</code>(上次 fetch 写下的快照),<b>不是</b>实时问远端</td></tr>
+      <tr><td>准确度</td><td class="good">永远准(只依赖本地提交)</td><td class="badc">只和"上次 fetch"一样新;不 fetch → 别人 push 后仍显示 <code>↓0</code></td></tr>
+      <tr><td>成本</td><td><span class="pill free">零 · 读已有输出</span></td><td><span class="pill cost">需 git fetch · 网络</span></td></tr>
+    </table>
+    <p style="color:var(--muted);font-size:13px">对标:VS Code / GitKraken / JetBrains / Fork 全部如此 —— ahead 免费,behind 靠后台 fetch 刷新本地 remote 引用。这不是工具局限,是 Git 模型本身。</p>
+  </section>
+
+  <section id="arch">
+    <h2>③ 提议架构:fetch 独立成链,绝不阻塞本地 status</h2>
+    <p>核心原则:<b>fetch 是慢的网络操作(秒级),本地 status 是快的(毫秒级),两者必须解耦。</b>新增一个独立的 <b>fetch 调度器</b>(主进程),它只负责按周期发起 <code>git fetch</code>;fetch 成功后<b>触发一次现有的 status 重算</b>,让 <code># branch.ab</code> 的 behind 数刷新,再沿现有 IPC 链路更新徽章。fetch 本身<b>永不进入</b>那条快的 status worker 路径。</p>
+    <div class="card">
+      <h3 style="margin-top:0">提议链路(绿框 = 新增)</h3>
+      <div class="flow" style="margin-bottom:6px">
+        <div class="node new"><div class="t">Fetch 调度器</div><div class="d">周期 tick · 去重 · 退避</div></div>
+        <div class="arw">→</div>
+        <div class="node net new"><div class="t">git fetch(硬化)</div><div class="d">非交互 · 超时 · 只更新 remote 引用</div></div>
+        <div class="arw">→</div>
+        <div class="node new"><div class="t">成功 → 触发重算</div><div class="d">复用现有 status worker</div></div>
+      </div>
+      <div class="arw down">↓</div>
+      <div class="flow">
+        <div class="node"><div class="t">status worker</div><div class="d">解析 # branch.ab(新)</div></div>
+        <div class="arw">→</div>
+        <div class="node"><div class="t">router 扇出</div><div class="d">delta 带 ahead/behind(新字段)</div></div>
+        <div class="arw">→</div>
+        <div class="node"><div class="t">徽章</div><div class="d">圆点色 + ↑N ↓M</div></div>
+      </div>
+    </div>
+    <h3>fetch 命令硬化(防卡死 / 防弹窗)—— 实现细节,已按最佳实践定</h3>
+    <pre><span class="c"># 只更新 remote 追踪引用,不动工作区/本地分支;非交互,失败快速返回</span>
+<span class="k">GIT_TERMINAL_PROMPT</span>=0 <span class="c"># 禁止 https 凭证交互提示</span>
+<span class="k">GIT_OPTIONAL_LOCKS</span>=0 <span class="c"># 不抢锁,避免和用户命令竞争</span>
+<span class="k">GIT_SSH_COMMAND</span>=<span class="s">"ssh -o BatchMode=yes -o ConnectTimeout=10"</span> <span class="c"># SSH 无密码则快速失败,不静默卡死</span>
+git <span class="f">fetch</span> --no-write-fetch-head --prune=false &lt;remote&gt; &lt;当前分支的 upstream&gt;
+<span class="c"># 外层再套一个硬超时(如 20s),超时 kill 子进程</span></pre>
+    <p style="color:var(--muted);font-size:13px">这几项直接消除了对标调研里最严重的两个坑:私有仓<b>凭证弹窗</b>、SSH 带密钥<b>静默卡死</b>。失败一律快速返回、静默重试,不打扰用户。</p>
+  </section>
+
+  <section id="params">
+    <h2>④ 策略参数(需要你拍板的部分)</h2>
+    <p>下面每一项都标了我的<b>建议默认值</b>(<span class="pill rec">建议</span>),稍后用选择题逐项确认。</p>
+
+    <div class="decision">
+      <b>4.1 fetch 周期</b> —— 多久 fetch 一次。<br>
+      对标:VS Code 3min、GitKraken 1min、JetBrains/Fork 20min。你之前提到 5~10 分钟。<br>
+      <span class="pill rec">建议 10 分钟</span> —— 本 App 可能同时开多个 Task/多仓,周期长一点降低总开销;behind 有 10 分钟延迟对"是否落后"这种信息完全够用。
+    </div>
+
+    <div class="decision">
+      <b>4.2 fetch 范围</b> —— 给哪些仓库 fetch。<br>
+      <span class="pill rec">建议:按"唯一仓库"去重后全部 fetch;App 窗口隐藏/最小化时暂停;无 upstream 的分支跳过。</span><br>
+      多个 Task 指向同一个仓库只 fetch 一次;App 不在前台时不 fetch(省电省网,回到前台立即补一次)。备选:只 fetch 当前聚焦 Task 的仓库(更省但其他徽章 behind 会滞后)。
+    </div>
+
+    <div class="decision">
+      <b>4.3 默认开 / 关 + 开关位置</b> —— 对标里 VS Code 默认关(因为怕弹窗),但我们已把 fetch 硬化成"绝不弹窗、绝不卡死"。<br>
+      <span class="pill rec">建议:默认开;同时给一个环境变量 kill switch <code>ONWARD_DISABLE_GIT_AUTOFETCH=1</code>。</span><br>
+      因为 fetch 已经不可能弹窗/卡死,默认开是安全的。是否还要在设置界面加可视开关(需配 en+zh-CN 双语文案)是可选项。
+    </div>
+
+    <div class="decision">
+      <b>4.4 失败退避</b> —— 某仓 fetch 失败(网络断/无凭证)后怎么办。<br>
+      <span class="pill rec">建议:单仓指数退避,从 10min 起翻倍,封顶 1 小时;成功后复位。</span><br>
+      避免对一个连不上的私有仓每 10 分钟白试一次。该仓 behind 显示为"未知"(见视觉表)。
+    </div>
+  </section>
+
+  <section id="visual">
+    <h2>⑤ 徽章视觉状态表(圆点颜色 + 箭头)</h2>
+    <p>已定:ahead/behind 都用箭头+数字(<span class="ah">↑N</span> 绿 / <span class="bh">↓M</span> 蓝),ahead 时圆点亮草绿 <code>#4ADE80</code>。下表把所有组合列全,<b>其中 behind-only / diverged 的圆点颜色需要你确认</b>(4.5)。</p>
+    <table>
+      <tr><th>工作区</th><th>同步状态</th><th>圆点</th><th>徽章样例</th><th>说明</th></tr>
+      <tr><td>clean</td><td>up-to-date</td><td>emerald</td><td><span class="badge"><span class="dot" style="background:var(--clean)"></span>main</span></td><td>现状不变</td></tr>
+      <tr><td>clean</td><td>仅 ahead</td><td><b style="color:var(--ahead)">亮草绿</b></td><td><span class="badge"><span class="dot" style="background:var(--ahead)"></span>main <span class="ah">↑2</span></span></td><td>有未 push 提交</td></tr>
+      <tr><td>clean</td><td>仅 behind</td><td>emerald</td><td><span class="badge"><span class="dot" style="background:var(--clean)"></span>main <span class="bh">↓1</span></span></td><td>远端领先,本地无改动 → 圆点保持 emerald,方向交给 ↓ 箭头</td></tr>
+      <tr><td>clean</td><td>diverged(都有)</td><td><b style="color:var(--ahead)">亮草绿</b></td><td><span class="badge"><span class="dot" style="background:var(--ahead)"></span>main <span class="ah">↑2</span> <span class="bh">↓1</span></span></td><td>有本地待 push → 绿点;落后交给 ↓ 箭头</td></tr>
+      <tr><td>dirty</td><td>任意</td><td>改动色(黄/紫/红/蓝)</td><td><span class="badge"><span class="dot" style="background:var(--modified)"></span>main <span class="ah">↑2</span> <span class="bh">↓1</span></span></td><td>改动色优先,箭头照常附加</td></tr>
+      <tr><td>任意</td><td>无 upstream</td><td>树状态色</td><td><span class="badge"><span class="dot" style="background:var(--clean)"></span>main</span></td><td>无上游 → 无箭头(现状)</td></tr>
+      <tr><td>任意</td><td>behind 未知(fetch 失败)</td><td>按上面规则</td><td><span class="badge"><span class="dot" style="background:var(--ahead)"></span>main <span class="ah">↑2</span> <span class="bh" style="color:var(--muted)">↓?</span></span></td><td>ahead 照显,behind 显示 <code>↓?</code> 或隐藏</td></tr>
+    </table>
+    <div class="callout rec">
+      <b>4.5 已确认 —— 圆点语义:「绿点 = 你有本地提交要 push」</b>(与 GitLens 一致):只要 ahead&gt;0 且 clean 就用亮草绿,behind 完全交给 <span class="bh">↓</span> 箭头;behind-only 时圆点保持 emerald;diverged(都&gt;0)因为也 ahead 所以是绿点 + <span class="ah">↑</span><span class="bh">↓</span> 双箭头。
+    </div>
+  </section>
+
+  <section id="risk">
+    <h2>⑥ 权衡与风险(对标数据)</h2>
+    <table>
+      <tr><th style="width:150px">风险</th><th>说明</th><th>我们的缓解</th></tr>
+      <tr><td>凭证弹窗</td><td>私有仓后台 fetch 会弹凭证框(VS Code 官方 FAQ 记录)</td><td class="good"><code>GIT_TERMINAL_PROMPT=0</code> → 直接失败,不弹</td></tr>
+      <tr><td>SSH 静默卡死</td><td>带密码的 key 没加载会挂起、像假死</td><td class="good"><code>BatchMode=yes</code> + ConnectTimeout → 快速失败</td></tr>
+      <tr><td>多仓开销</td><td>多仓 × 短周期 = 网络/进程压力大</td><td class="good">去重 + 10min 周期 + 隐藏暂停 + 失败退避</td></tr>
+      <tr><td>网络失败</td><td>fetch 只碰 remote 引用和 FETCH_HEAD,不动工作区</td><td class="good">失败静默吞掉、退避重试,安全</td></tr>
+      <tr><td>锁竞争</td><td>和用户手动 git 命令抢 <code>.git</code> 锁</td><td class="good"><code>GIT_OPTIONAL_LOCKS=0</code> + 只读 fetch</td></tr>
+    </table>
+  </section>
+
+  <section id="trace">
+    <h2>⑦ 诊断埋点(按项目硬性规则)</h2>
+    <p>fetch 链路的每个控制流拐点都要能在用户上报的 trace 里看到。计划新增事件(先注册进 <code>src/utils/perf-trace-names.ts</code>,再埋点,再更新 <code>infra/trace.md</code>):</p>
+    <ul>
+      <li><code>main:git-autofetch.scheduled</code> —— 某仓被排入本轮 fetch</li>
+      <li><code>main:git-autofetch.started</code> / <code>.succeeded</code>(span,带耗时)/ <code>.failed</code>(带原因分类:auth / network / timeout)</li>
+      <li><code>main:git-autofetch.backoff</code> —— 某仓进入退避,带下次间隔</li>
+      <li><code>main:git-autofetch.skipped-hidden</code> —— App 隐藏跳过本轮</li>
+      <li><code>main:git-autofetch.triggered-recompute</code> —— fetch 成功后触发 status 重算</li>
+      <li><code>worker:git-state-mirror.branch-ab-parsed</code> —— 解析出 ahead/behind(instant)</li>
+    </ul>
+  </section>
+
+  <section id="decide">
+    <h2>⑧ 待确认决策清单</h2>
+    <table>
+      <tr><th style="width:60px">编号</th><th>决策点</th><th>已确认结论</th></tr>
+      <tr><td>4.1</td><td>fetch 周期</td><td class="good">可配置,默认 10 分钟</td></tr>
+      <tr><td>4.2</td><td>fetch 范围</td><td class="good">去重全仓 + App 隐藏时暂停</td></tr>
+      <tr><td>4.3</td><td>默认开关 + 位置</td><td class="good">默认开 + 环境变量 kill switch <code>ONWARD_DISABLE_GIT_AUTOFETCH=1</code></td></tr>
+      <tr><td>4.4</td><td>失败退避</td><td class="good">10min 起指数退避,封顶 1h,成功复位</td></tr>
+      <tr><td>4.5</td><td>圆点语义</td><td class="good">绿点=有本地待 push;behind 交给 ↓ 箭头;behind-only 保持 emerald</td></tr>
+    </table>
+    <p style="color:var(--muted);font-size:13px">全部决策已于 2026-07-15 确认(见更新历史 v2),进入实现阶段。</p>
+  </section>
+
+  <section id="doc">
+    <h2>⑨ 文档信息与更新历史</h2>
+    <table class="meta-tbl">
+      <tr><th style="width:140px">生成分支</th><td><code>20260715-git-stats-ahead-behind</code></td></tr>
+      <tr><th>对应版本 / commit</th><td>2.0.1 / 基线 9df2b3b(设计提案,未提交代码)</td></tr>
+      <tr><th>文档版本</th><td>v2</td></tr>
+    </table>
+    <h3>更新历史(仅追加)</h3>
+    <table>
+      <tr><th style="width:70px">版本</th><th style="width:110px">日期</th><th>分支</th><th>变更摘要</th></tr>
+      <tr><td>v1</td><td>2026-07-15</td><td>20260715-git-stats-ahead-behind</td><td>初稿:fetch 执行策略、参数权衡、视觉状态表、诊断埋点、待确认决策清单</td></tr>
+      <tr><td>v2</td><td>2026-07-15</td><td>20260715-git-stats-ahead-behind</td><td>决策定稿:周期可配默认 10min;去重全仓 + 隐藏暂停;默认开 + 环变量 kill switch;10min 起退避封顶 1h;圆点语义「绿点=有本地待 push」。状态改为「已确认(待实现)」</td></tr>
+      <tr><td>v3</td><td>2026-07-15</td><td>20260715-git-stats-ahead-behind</td><td>实现落地:Phase 1(解析 <code>#&nbsp;branch.ab</code> → 快照贯通 → 徽章绿点 + ↑N/↓M)与 Phase 2(<code>git-autofetch-manager</code> + 纯逻辑 <code>git-autofetch-scheduler</code>,硬化 fetch + 退避 + 隐藏暂停 + kill switch)全部完成。单测 4 组(parse / sync-display / scheduler / identity)+ 新 autotest <code>run-git-autofetch-ahead-behind</code>(AB-01..06,含 fetch→behind 翻转)全绿;typecheck / 注释 lint / trace 自检通过</td></tr>
+    </table>
+  </section>
+</main>
+</div>
+
+<script>
+  // Instant-jump TOC (no smooth scroll) + active highlight
+  const links=[...document.querySelectorAll('nav.toc a')];
+  const secs=links.map(a=>document.querySelector(a.getAttribute('href')));
+  function onScroll(){
+    let idx=0;
+    for(let i=0;i<secs.length;i++){ if(secs[i]&&secs[i].getBoundingClientRect().top<=80) idx=i; }
+    links.forEach((a,i)=>a.classList.toggle('active',i===idx));
+  }
+  document.addEventListener('scroll',onScroll,{passive:true});onScroll();
+</script>

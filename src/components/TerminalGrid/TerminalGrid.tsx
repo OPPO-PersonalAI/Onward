@@ -57,6 +57,7 @@ import {
   removeMirrorAlias,
   resolveTerminalGitDisplayState
 } from './gitStatusIdentity'
+import { resolveGitSyncDisplay } from './gitSyncDisplay'
 import '@xterm/xterm/css/xterm.css'
 import './TerminalGrid.css'
 import '../../styles/path-copy-toast.css'
@@ -2834,12 +2835,24 @@ export const TerminalGrid = memo(function TerminalGrid({
             const repoName = renderOverride?.repoName !== undefined ? renderOverride.repoName : rawRepoName
             const status = renderOverride?.status !== undefined ? renderOverride.status : rawStatus
             const compactCwd = cwd ? formatCompactPath(cwd) : ''
-            const branchStatusClass = status && status !== 'clean'
-              ? `terminal-grid-branch--${status}`
+            // Sync (ahead/behind) is orthogonal to tree cleanliness: a clean
+            // tree that is ahead gets the distinct green dot; dirty trees keep
+            // their working-tree colour and just append the arrows. Counts come
+            // from the mirror snapshot only (legacy RPC path has none).
+            const sync = resolveGitSyncDisplay({ status, ahead: gitState.ahead, behind: gitState.behind })
+            const branchStatusClass = sync.dotState !== 'clean'
+              ? `terminal-grid-branch--${sync.dotState}`
               : ''
             const branchClassName = branchStatusClass
               ? `terminal-grid-branch ${branchStatusClass}`
               : 'terminal-grid-branch'
+            const branchSyncTitle = sync.showAhead || sync.showBehind
+              ? t('terminalGrid.branchSyncTitle', {
+                  branch: branch ?? '',
+                  ahead: sync.ahead,
+                  behind: sync.behind
+                })
+              : t('terminalGrid.branchTitle', { branch: branch ?? '' })
 
             // Custom mode lays each Task on a stored rectangle inside the
             // 4col x 2row atomic mesh. Preset modes leave grid-area unset
@@ -2955,12 +2968,22 @@ export const TerminalGrid = memo(function TerminalGrid({
                     {branch && (
                       <span
                         className={`${branchClassName} terminal-grid-copyable`}
-                        title={t('terminalGrid.branchTitle', { branch })}
+                        title={branchSyncTitle}
                         onDoubleClick={(e) => {
                           void handleCopyText(e, termInfo.id, t('terminalGrid.copyLabel.branch'), branch)
                         }}
                       >
                         <span className="terminal-grid-branch-name">{branch}</span>
+                        {sync.showAhead && (
+                          <span className="terminal-grid-branch-ahead" aria-label={t('terminalGrid.aheadAria', { ahead: sync.ahead })}>
+                            {`↑${sync.ahead}`}
+                          </span>
+                        )}
+                        {sync.showBehind && (
+                          <span className="terminal-grid-branch-behind" aria-label={t('terminalGrid.behindAria', { behind: sync.behind })}>
+                            {`↓${sync.behind}`}
+                          </span>
+                        )}
                       </span>
                     )}
                     {repoName && (
