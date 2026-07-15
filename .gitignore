@@ -15,6 +15,10 @@ __pycache__/
 test/autotest/results/
 test/autotest/fixtures/*/user-data/
 test/autotest/fixtures/*/workdir/
+# Per-run scratch that fixture builders (create-*-fixture.mjs) wipe-and-rebuild
+# under a committed fixture dir. Like user-data/ and workdir/ above, this must
+# never pollute the working tree — the committed source lives one level up.
+test/autotest/fixtures/*/runtime/
 # Legacy local test scratch directories. Reusable fixtures belong under
 # test/autotest/fixtures/ and run outputs belong under test/autotest/results/,
 # test/full-regression-results/, or traces/.
