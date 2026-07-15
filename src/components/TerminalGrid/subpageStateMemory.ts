@@ -66,10 +66,27 @@ function normalizeScopePart(value: string | null | undefined): string | null {
   return trimmed.replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
+function normalizeScopeRoot(value: string | null | undefined): string | null {
+  const normalized = normalizeScopePart(value)
+  if (!normalized) return null
+  const isWindowsRoot = /^[A-Za-z]:(?:\/|$)/.test(normalized) || normalized.startsWith('//')
+  return isWindowsRoot ? normalized.toLowerCase() : normalized
+}
+
+export function resolveSubpageMemoryRoot(
+  panelRoot: string | null | undefined,
+  ownedRoot: string | null | undefined,
+  fallbackRoot: string | null | undefined
+): string | null {
+  return normalizeScopeRoot(panelRoot)
+    ?? normalizeScopeRoot(ownedRoot)
+    ?? normalizeScopeRoot(fallbackRoot)
+}
+
 export function normalizeSubpageMemoryScope(scope: SubpageMemoryScope): SubpageMemoryScope {
   return {
     terminalId: scope.terminalId,
-    root: normalizeScopePart(scope.root),
+    root: normalizeScopeRoot(scope.root),
     tabId: normalizeScopePart(scope.tabId)
   }
 }

@@ -354,21 +354,28 @@ class BrowserViewManager {
         const apply = () => {
           window.scrollTo(targetX, targetY);
         };
-        apply();
-        requestAnimationFrame(() => {
-          apply();
-          requestAnimationFrame(apply);
-        });
-        const doc = document.documentElement;
-        const body = document.body;
-        return {
-          x: window.scrollX || doc.scrollLeft || (body ? body.scrollLeft : 0) || 0,
-          y: window.scrollY || doc.scrollTop || (body ? body.scrollTop : 0) || 0,
-          scrollWidth: Math.max(doc.scrollWidth || 0, body ? body.scrollWidth || 0 : 0),
-          scrollHeight: Math.max(doc.scrollHeight || 0, body ? body.scrollHeight || 0 : 0),
-          clientWidth: doc.clientWidth || window.innerWidth || 0,
-          clientHeight: doc.clientHeight || window.innerHeight || 0
+        const readState = () => {
+          const doc = document.documentElement;
+          const body = document.body;
+          return {
+            x: window.scrollX || doc.scrollLeft || (body ? body.scrollLeft : 0) || 0,
+            y: window.scrollY || doc.scrollTop || (body ? body.scrollTop : 0) || 0,
+            scrollWidth: Math.max(doc.scrollWidth || 0, body ? body.scrollWidth || 0 : 0),
+            scrollHeight: Math.max(doc.scrollHeight || 0, body ? body.scrollHeight || 0 : 0),
+            clientWidth: doc.clientWidth || window.innerWidth || 0,
+            clientHeight: doc.clientHeight || window.innerHeight || 0
+          };
         };
+        return new Promise((resolve) => {
+          apply();
+          requestAnimationFrame(() => {
+            apply();
+            requestAnimationFrame(() => {
+              apply();
+              resolve(readState());
+            });
+          });
+        });
       })()`, true)
       return { success: true, state: normalizeScrollState(value) }
     } catch (error) {

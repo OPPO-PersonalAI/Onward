@@ -9,7 +9,8 @@
  *   PDF_BASE64=<base64>
  *   EPUB_BASE64=<base64>
  *
- * The PDF contains a single 300x200 page with the text "Onward Autotest PDF".
+ * The base PDF contains one 300x200 page; the alternate PDF contains two pages
+ * so navigation tests can verify page-number restoration as well as scrolling.
  * The EPUB is a minimal EPUB 3 with two chapters referencing the text
  * "Onward Autotest EPUB chapter N."
  */
@@ -26,10 +27,60 @@ function encodePdf(variant = 'base') {
   if (variant === 'outline') {
     return encodePdfWithOutline('BT /F1 18 Tf 30 100 Td (Onward Autotest Outlined PDF) Tj ET')
   }
+  if (variant === 'navigation') {
+    return encodePdfWithTwoPages(
+      'BT /F1 18 Tf 30 100 Td (Onward Autotest PDF v2) Tj ET',
+      'BT /F1 18 Tf 30 100 Td (Onward Autotest PDF v2 page 2) Tj ET'
+    )
+  }
   const streamText = variant === 'alt'
     ? 'BT /F1 18 Tf 30 100 Td (Onward Autotest PDF v2) Tj ET'
     : 'BT /F1 18 Tf 30 100 Td (Onward Autotest PDF) Tj ET'
   return encodePdfWith(streamText)
+}
+
+function encodePdfWithTwoPages(firstStream, secondStream) {
+  const chunks = []
+  const offsets = []
+  let cursor = 0
+  const write = (chunk) => { chunks.push(chunk); cursor += chunk.length }
+  const writeString = (value) => write(Buffer.from(value, 'binary'))
+  const recordObject = () => offsets.push(cursor)
+
+  writeString('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n')
+
+  recordObject()
+  writeString('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n')
+
+  recordObject()
+  writeString('2 0 obj\n<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>\nendobj\n')
+
+  recordObject()
+  writeString(
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n'
+  )
+
+  recordObject()
+  writeString(`4 0 obj\n<< /Length ${firstStream.length} >>\nstream\n${firstStream}\nendstream\nendobj\n`)
+
+  recordObject()
+  writeString('5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n')
+
+  recordObject()
+  writeString(
+    '6 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 7 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n'
+  )
+
+  recordObject()
+  writeString(`7 0 obj\n<< /Length ${secondStream.length} >>\nstream\n${secondStream}\nendstream\nendobj\n`)
+
+  const xrefStart = cursor
+  const pad = (value) => String(value).padStart(10, '0')
+  let xref = 'xref\n0 8\n0000000000 65535 f \n'
+  for (const offset of offsets) xref += `${pad(offset)} 00000 n \n`
+  writeString(xref)
+  writeString(`trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`)
+  return Buffer.concat(chunks)
 }
 
 // Emits a PDF with a single-entry outline ("Autotest Chapter" pointing to the
@@ -244,6 +295,7 @@ function buildEpubBuffer(variant = 'base') {
 <body>
   <h1>Chapter 2</h1>
   <p>Onward Autotest EPUB chapter 2.</p>
+  <div aria-hidden="true" style="height: 2400px"></div>
 </body>
 </html>
 `
@@ -297,6 +349,7 @@ function buildEpubBuffer(variant = 'base') {
 
 const pdfBuf = encodePdf('base')
 const pdfAltBuf = encodePdf('alt')
+const pdfNavigationBuf = encodePdf('navigation')
 const pdfOutlineBuf = encodePdf('outline')
 const epubBuf = buildEpubBuffer('base')
 const epubAltBuf = buildEpubBuffer('alt')
@@ -312,6 +365,7 @@ if (process.argv.includes('--write')) {
   const files = [
     ['onward-autotest.pdf', pdfBuf],
     ['onward-autotest.alt.pdf', pdfAltBuf],
+    ['onward-autotest.navigation.pdf', pdfNavigationBuf],
     ['onward-autotest.outlined.pdf', pdfOutlineBuf],
     ['onward-autotest.epub', epubBuf],
     ['onward-autotest.alt.epub', epubAltBuf]

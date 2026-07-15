@@ -3,11 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef } from 'react'
 import { useI18n } from '../../i18n/useI18n'
 import { redispatchPdfHostKey } from '../../utils/pdfHostKey'
 import type { OutlineItem } from './Outline/types'
 import { OutlineSymbolKind } from './Outline/types'
+import {
+  normalizePdfReaderState,
+  normalizePdfReaderStateIfReady,
+  shouldInitializePdfReadyHandshake,
+  type PdfReaderState
+} from './pdfReaderState'
 
 /** Raw outline tree shape posted by the embedded PDF viewer. */
 interface RawPdfOutlineNode {
@@ -26,7 +32,7 @@ interface PdfReaderProps {
   /** Per-file position memory. Sent to the viewer after pagesinit. */
   initialState?: { page?: number; scrollTop?: number; scale?: string }
   /** Fires whenever the user scrolls / paginates / zooms so the host can persist. */
-  onStateChange?: (state: { page: number; scrollTop: number; scale: string | null }) => void
+  onStateChange?: (state: PdfReaderState) => void
   /** Fires once after document load with the flattened outline tree. Empty if none. */
   onOutlineLoaded?: (items: OutlineItem[]) => void
   /** Fires on every page change (including from scroll / arrow keys). */
@@ -39,6 +45,10 @@ export interface PdfReaderHandle {
   /** Navigate to a full pdf.js destination (preserves /XYZ, /FitH, etc.).
    * Prefer this over goToPage when the outline entry has a dest attached. */
   goToDest(dest: unknown): void
+  /** Read the live viewer state synchronously before the iframe is unmounted. */
+  getCurrentState(): PdfReaderState | null
+  /** Whether document loading and initial state restoration have completed. */
+  isStateReady(): boolean
 }
 
 // CSS custom properties on the host document we forward to the viewer so it can
@@ -106,7 +116,17 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
 ) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const readyRef = useRef(false)
+  const stateReadyRef = useRef(false)
+  const lastPageRef = useRef<number>(0)
   const { t } = useI18n()
+
+  const setIframeRef = useCallback((node: HTMLIFrameElement | null) => {
+    if (iframeRef.current === node) return
+    iframeRef.current = node
+    readyRef.current = false
+    stateReadyRef.current = false
+    lastPageRef.current = 0
+  }, [])
 
   const onStateChangeRef = useRef(onStateChange)
   useEffect(() => { onStateChangeRef.current = onStateChange }, [onStateChange])
@@ -116,18 +136,17 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
   useEffect(() => { onPageChangeRef.current = onPageChange }, [onPageChange])
 
   const initialStateRef = useRef(initialState ?? null)
-  useEffect(() => { initialStateRef.current = initialState ?? null }, [filePath, initialState])
+  useLayoutEffect(() => {
+    initialStateRef.current = initialState ?? null
+  }, [filePath, initialState, viewerUrl])
 
-  const lastPageRef = useRef<number>(0)
-  // Reset the page-change dedupe when the viewer URL changes (each URL maps
-  // to a distinct PDF). Otherwise, opening PDF-B at the same saved page as
-  // PDF-A would be treated as a no-op and the outline highlight would stay
-  // stuck on page 1.
-  useEffect(() => { lastPageRef.current = 0 }, [viewerUrl])
+  const requestReady = useCallback(() => {
+    iframeRef.current?.contentWindow?.postMessage({ type: 'onward:pdf:requestReady' }, '*')
+  }, [])
 
   useImperativeHandle(ref, () => ({
     goToPage(page: number) {
-      if (!readyRef.current) return
+      if (!stateReadyRef.current) return
       if (!Number.isFinite(page) || page < 1) return
       iframeRef.current?.contentWindow?.postMessage(
         { type: 'onward:pdf:goToPage', page },
@@ -135,12 +154,32 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
       )
     },
     goToDest(dest: unknown) {
-      if (!readyRef.current) return
+      if (!stateReadyRef.current) return
       if (dest == null) return
       iframeRef.current?.contentWindow?.postMessage(
         { type: 'onward:pdf:goToDest', dest },
         '*'
       )
+    },
+    getCurrentState() {
+      if (!stateReadyRef.current) return null
+      try {
+        const frameDocument = iframeRef.current?.contentDocument
+        const pageInput = frameDocument?.getElementById('pageNumberInput') as HTMLInputElement | null
+        const viewerContainer = frameDocument?.getElementById('viewerContainer') as HTMLElement | null
+        const zoomSelect = frameDocument?.getElementById('zoomSelect') as HTMLSelectElement | null
+        if (!pageInput || !viewerContainer || !zoomSelect) return null
+        return normalizePdfReaderStateIfReady(stateReadyRef.current, {
+          page: pageInput.value,
+          scrollTop: viewerContainer.scrollTop,
+          scale: zoomSelect.value
+        })
+      } catch {
+        return null
+      }
+    },
+    isStateReady() {
+      return stateReadyRef.current
     }
   }), [])
 
@@ -176,35 +215,41 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
     [t]
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const publishState = (data: { page: unknown; scrollTop: unknown; scale: unknown }) => {
+      const state = normalizePdfReaderState(data)
+      onStateChangeRef.current?.(state)
+      if (state.page !== lastPageRef.current) {
+        lastPageRef.current = state.page
+        onPageChangeRef.current?.(state.page)
+      }
+    }
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow) return
       const data = event.data
       if (!data || typeof data !== 'object') return
       if (data.type === 'onward:pdf:ready') {
+        const shouldInitialize = shouldInitializePdfReadyHandshake(readyRef.current)
         readyRef.current = true
         postThemeAndI18n()
+        if (!shouldInitialize) return
+        stateReadyRef.current = false
         const restore = initialStateRef.current
-        if (restore && (restore.page || restore.scrollTop || restore.scale)) {
-          iframeRef.current?.contentWindow?.postMessage({
-            type: 'onward:pdf:restoreState',
-            page: restore.page ?? 1,
-            scrollTop: restore.scrollTop ?? 0,
-            scale: restore.scale ?? null
-          }, '*')
-        }
+        iframeRef.current?.contentWindow?.postMessage({
+          type: 'onward:pdf:restoreState',
+          page: restore?.page ?? 1,
+          scrollTop: restore?.scrollTop ?? 0,
+          scale: restore?.scale ?? null
+        }, '*')
       } else if (data.type === 'onward:pdf:outline') {
         const raw = Array.isArray(data.items) ? (data.items as RawPdfOutlineNode[]) : []
         onOutlineLoadedRef.current?.(flattenRawOutline(raw))
       } else if (data.type === 'onward:pdf:state') {
-        const page = Number(data.page) || 1
-        const scrollTop = Number(data.scrollTop) || 0
-        const scale = typeof data.scale === 'string' ? data.scale : null
-        onStateChangeRef.current?.({ page, scrollTop, scale })
-        if (page !== lastPageRef.current) {
-          lastPageRef.current = page
-          onPageChangeRef.current?.(page)
-        }
+        if (!stateReadyRef.current) return
+        publishState(data)
+      } else if (data.type === 'onward:pdf:stateReady') {
+        stateReadyRef.current = true
+        publishState(data)
       } else if (data.type === 'onward:pdf:hostKey') {
         redispatchPdfHostKey(data)
       }
@@ -217,8 +262,9 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
     }
     window.addEventListener('message', handleMessage)
     if (readyRef.current) postThemeAndI18n()
+    requestReady()
     return () => window.removeEventListener('message', handleMessage)
-  }, [i18nStrings])
+  }, [i18nStrings, requestReady])
 
   useEffect(() => {
     if (typeof MutationObserver === 'undefined') return
@@ -235,12 +281,13 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
   return (
     <div className="project-editor-pdf-reader" data-file-path={filePath}>
       <iframe
-        ref={iframeRef}
+        ref={setIframeRef}
         key={viewerUrl}
         src={viewerUrl}
         title={filePath}
         className="project-editor-pdf-reader-iframe"
         sandbox="allow-same-origin allow-scripts"
+        onLoad={requestReady}
       />
     </div>
   )

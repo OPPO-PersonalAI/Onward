@@ -107,6 +107,27 @@ export function isSameHtmlPreviewDocument(
   return normalizedCurrent === normalizedHome
 }
 
+export function normalizeHtmlPreviewFileUrl(rawUrl: string | null | undefined): string | null {
+  if (!rawUrl) return null
+  try {
+    const url = new URL(rawUrl)
+    url.hash = ''
+    return normalizeHtmlPreviewDocumentUrl(url.toString())
+  } catch {
+    return null
+  }
+}
+
+export function isSameHtmlPreviewFile(
+  currentUrl: string | null | undefined,
+  targetUrl: string | null | undefined
+): boolean {
+  const normalizedCurrent = normalizeHtmlPreviewFileUrl(currentUrl)
+  const normalizedTarget = normalizeHtmlPreviewFileUrl(targetUrl)
+  if (normalizedCurrent === null || normalizedTarget === null) return false
+  return normalizedCurrent === normalizedTarget
+}
+
 export interface HtmlPreviewNavButtonState {
   backEnabled: boolean
   forwardEnabled: boolean
@@ -145,6 +166,59 @@ export function normalizeHtmlPreviewScrollState(value: unknown): HtmlPreviewScro
     clientWidth: readNonNegativeNumber(raw.clientWidth),
     clientHeight: readNonNegativeNumber(raw.clientHeight)
   }
+}
+
+export interface HtmlPreviewScrollRestoreGateInput {
+  activeBrowserId: string | null
+  expectedBrowserId: string
+  activeReloadKey: number | null
+  expectedReloadKey: number
+  targetNavigationConfirmed: boolean
+  loadSettled: boolean
+  zoomApplied: boolean
+  hasTargetState: boolean
+  restoreInFlight: boolean
+  restored: boolean
+}
+
+export function shouldAttemptHtmlPreviewScrollRestore(
+  input: HtmlPreviewScrollRestoreGateInput
+): boolean {
+  return input.activeBrowserId === input.expectedBrowserId
+    && input.activeReloadKey === input.expectedReloadKey
+    && input.targetNavigationConfirmed
+    && input.loadSettled
+    && input.zoomApplied
+    && input.hasTargetState
+    && !input.restoreInFlight
+    && !input.restored
+}
+
+export function resolveHtmlPreviewScrollRestoreTarget(
+  requestedY: number,
+  scrollHeight: number,
+  clientHeight: number
+): number {
+  const targetY = readNonNegativeNumber(requestedY)
+  const maxScrollTop = Math.max(
+    0,
+    readNonNegativeNumber(scrollHeight) - readNonNegativeNumber(clientHeight)
+  )
+  return Math.min(targetY, maxScrollTop)
+}
+
+export function isHtmlPreviewScrollRestoreVerified(
+  requestedY: number,
+  actualState: HtmlPreviewScrollState | null,
+  tolerance = 2
+): boolean {
+  if (!actualState) return false
+  const expectedY = resolveHtmlPreviewScrollRestoreTarget(
+    requestedY,
+    actualState.scrollHeight,
+    actualState.clientHeight
+  )
+  return Math.abs(actualState.y - expectedY) <= Math.max(0, tolerance)
 }
 
 export function normalizeHtmlPreviewZoomFactor(value: unknown): number {

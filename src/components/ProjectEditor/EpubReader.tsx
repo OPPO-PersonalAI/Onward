@@ -9,6 +9,18 @@ import type { Book, NavItem, Rendition } from 'epubjs'
 import { useI18n } from '../../i18n/useI18n'
 import type { OutlineItem } from './Outline/types'
 import { OutlineSymbolKind } from './Outline/types'
+import {
+  acceptEpubRelocation,
+  beginEpubDisplayAttempt,
+  beginEpubReaderSession,
+  createSerialEpubTaskCoordinator,
+  disposeEpubReaderSession,
+  isCurrentEpubSessionEvent,
+  isEpubFrameContentReady,
+  shouldPersistEpubScroll,
+  settleEpubDisplayAttempt,
+  type EpubReaderSessionState
+} from './epubReaderState'
 
 interface EpubReaderProps {
   /**
@@ -44,6 +56,33 @@ export interface EpubReaderHandle {
   goToHref(href: string): void
 }
 
+export interface EpubReaderProgress {
+  sessionId: number
+  filePath: string
+  stateReady: boolean
+  latestAttemptId: number
+  settledAttemptId: number | null
+  readyAttemptId: number | null
+  latestTarget: string | null
+  displayStarted: number
+  displayResolved: number | null
+  displayRejected: string | null
+  containerWidth: number
+  containerHeight: number
+  lastBookOpened: boolean
+  lastLocationHref: string | null
+  lastLocationCfi: string | null
+  appliedFontPct: number | null
+}
+
+type EpubNavigationRequest =
+  | { kind: 'display'; target?: string; reason: 'initial' | 'outline' | 'font' | 'search'; restoreScroll?: boolean }
+  | { kind: 'font'; target?: string; fontPct: number; reason: 'font' }
+  | { kind: 'previous'; reason: 'toolbar' }
+  | { kind: 'next'; reason: 'toolbar' }
+
+type EpubNavigationRequester = (request: EpubNavigationRequest) => Promise<void>
+
 type EpubSearchHit = {
   cfi: string
   excerpt: string
@@ -54,6 +93,31 @@ type EpubSearchHit = {
 const MIN_FONT_PCT = 70
 const MAX_FONT_PCT = 200
 const FONT_STEP = 10
+const RENDITION_RECOVERY_DELAY_MS = 4000
+const MAX_RENDITION_RECOVERY_ATTEMPTS = 2
+
+let nextEpubReaderSessionId = 0
+
+function readEpubFrameSnapshot(container: HTMLElement | null): {
+  hasFrame: boolean
+  bodyChildCount: number
+  bodyTextLength: number
+} {
+  const iframe = container?.querySelector<HTMLIFrameElement>('iframe') ?? null
+  if (!iframe) {
+    return { hasFrame: false, bodyChildCount: 0, bodyTextLength: 0 }
+  }
+  try {
+    const body = iframe.contentDocument?.body ?? null
+    return {
+      hasFrame: true,
+      bodyChildCount: body?.childElementCount ?? 0,
+      bodyTextLength: body?.textContent?.trim().length ?? 0
+    }
+  } catch {
+    return { hasFrame: true, bodyChildCount: 0, bodyTextLength: 0 }
+  }
+}
 
 function collectHostTheme(): { background: string; foreground: string; accent: string; muted: string; panel: string } {
   const style = window.getComputedStyle(document.documentElement)
@@ -114,6 +178,10 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
   const containerRef = useRef<HTMLDivElement | null>(null)
   const bookRef = useRef<Book | null>(null)
   const renditionRef = useRef<Rendition | null>(null)
+  const sessionStateRef = useRef<EpubReaderSessionState | null>(null)
+  const requestNavigationRef = useRef<EpubNavigationRequester | null>(null)
+  const recoveryAttemptsRef = useRef(new WeakMap<ArrayBuffer, number>())
+  const [renditionRecoveryNonce, setRenditionRecoveryNonce] = useState(0)
   // Keep initialLocation / initialScrollTop fresh across file switches. These
   // refs are snapshotted at the start of the main mount effect (which re-runs
   // whenever previewBuffer changes — i.e. per file open). Updating them on
@@ -131,10 +199,6 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
   useEffect(() => { onOutlineLoadedRef.current = onOutlineLoaded }, [onOutlineLoaded])
   const onLocationChangeRef = useRef(onLocationChange)
   useEffect(() => { onLocationChangeRef.current = onLocationChange }, [onLocationChange])
-  // Suppress the very first `relocated` that epub.js fires as part of its
-  // initial display; otherwise the first active-item computation would be
-  // done before the rendition has settled.
-  const bookReadyRef = useRef(false)
   // Debounce scroll-persist so we don't hammer the host on every scroll tick.
   // Uses the same idea as PdfReader's queueReadingStatePost.
   const scrollPersistTimerRef = useRef<number | null>(null)
@@ -144,6 +208,8 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
   const programmaticScrollUntilRef = useRef<number>(0)
 
   const [fontPct, setFontPct] = useState(clampFontPct(initialFontPct))
+  const fontPctRef = useRef(fontPct)
+  fontPctRef.current = fontPct
   const [searchQuery, setSearchQuery] = useState('')
   const [searchHits, setSearchHits] = useState<EpubSearchHit[]>([])
   const [searching, setSearching] = useState(false)
@@ -154,9 +220,7 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
 
   useImperativeHandle(ref, () => ({
     goToHref(href: string) {
-      const rendition = renditionRef.current
-      if (!rendition) return
-      try { void rendition.display(href) } catch { /* ignore */ }
+      void requestNavigationRef.current?.({ kind: 'display', target: href, reason: 'outline' })
     }
   }), [])
 
@@ -187,23 +251,81 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       }
     })
     rendition.themes.select(themeName)
-    // NOTE: font size is applied by the dedicated fontPct useEffect below —
-    // keeping fontPct OUT of this callback's deps is load-bearing: otherwise
-    // changing the size would invalidate applyTheme, which is a dep of the
-    // main mount useEffect, which would tear down + recreate the book and
-    // snap the user back to chapter 1.
+    // Initial font size is applied before the first display; later changes are
+    // serialized with navigation by the fontPct effect below. Keeping fontPct
+    // out of this callback prevents a font change from recreating the book.
   }, [themeName])
 
   useEffect(() => {
     if (!containerRef.current) return
     const container = containerRef.current
+    const sessionId = ++nextEpubReaderSessionId
+    const initialTarget = initialLocationRef.current
+    const savedScrollTop = initialScrollTopRef.current
+    programmaticScrollUntilRef.current = typeof savedScrollTop === 'number' && savedScrollTop > 0
+      ? Number.POSITIVE_INFINITY
+      : 0
+    let sessionState = beginEpubReaderSession({
+      sessionId,
+      filePath,
+      restoreTarget: initialTarget
+    })
+    sessionStateRef.current = sessionState
     setError(null)
-    bookReadyRef.current = false
 
     let disposed = false
     let book: Book | null = null
     let rendition: Rendition | null = null
+    let scrollContainer: HTMLElement = container
+    let scrollListenerContainer: HTMLElement | null = null
     let handleScroll: (() => void) | null = null
+    let handleRelocated: ((loc: { start?: { cfi?: string; href?: string } }) => void) | null = null
+    let activeNavigationRequester: EpubNavigationRequester | null = null
+    let pendingRelocation: { start?: { cfi?: string; href?: string } } | null = null
+    let recoveryTimer: number | null = null
+    const coordinator = createSerialEpubTaskCoordinator()
+    const progressHost = window as unknown as { __onwardEpubReaderProgress?: EpubReaderProgress }
+    const progressState: EpubReaderProgress = {
+      sessionId,
+      filePath,
+      stateReady: false,
+      latestAttemptId: 0,
+      settledAttemptId: null,
+      readyAttemptId: null,
+      latestTarget: initialTarget,
+      displayStarted: Date.now(),
+      displayResolved: null,
+      displayRejected: null,
+      containerWidth: container.offsetWidth,
+      containerHeight: container.offsetHeight,
+      lastBookOpened: false,
+      lastLocationHref: null,
+      lastLocationCfi: null,
+      appliedFontPct: null
+    }
+    progressHost.__onwardEpubReaderProgress = progressState
+
+    const isCurrentSession = () => Boolean(
+      !disposed
+      && rendition
+      && renditionRef.current === rendition
+      && sessionStateRef.current
+      && isCurrentEpubSessionEvent(sessionStateRef.current, sessionId)
+      && progressHost.__onwardEpubReaderProgress === progressState
+    )
+    const publishSessionState = (nextState: EpubReaderSessionState) => {
+      sessionState = nextState
+      if (!sessionStateRef.current || !isCurrentEpubSessionEvent(sessionStateRef.current, sessionId)) return
+      sessionStateRef.current = nextState
+      progressState.latestAttemptId = nextState.latestAttemptId
+      progressState.settledAttemptId = nextState.settledAttemptId
+      progressState.readyAttemptId = nextState.readyAttemptId
+      progressState.latestTarget = nextState.latestTarget
+      progressState.stateReady = nextState.latestAttemptId > 0
+        && nextState.settledAttemptId === nextState.latestAttemptId
+        && nextState.readyAttemptId === nextState.latestAttemptId
+        && nextState.restoreTargetConfirmed
+    }
 
     try {
       book = ePub(previewBuffer) as Book
@@ -217,42 +339,44 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       })
       renditionRef.current = rendition
 
-      // epub.js 0.3.93 captures `window.requestAnimationFrame` ONCE at module
-      // load (utils/core.js#12) and reuses that const in two critical hot
-      // paths:
-      //   1. Queue.tick (rendition.q.tick) — drives every dequeue (attachTo,
-      //      start, display).
-      //   2. Rendition.reportLocation — the inline `requestAnimationFrame(...)`
-      //      that emits the `relocated` / `locationChanged` events.
-      // When the EPUB mounts during a layout transition (PDF teardown, modal
-      // opening, hidden parent), the browser can defer or skip rAF — both
-      // paths stall: queue → `paneDescendants: 0`; reportLocation →
-      // `currentLocationHref: null`. Replacing rAF on `window` doesn't help
-      // because epub.js holds its own captured reference.
-      //
-      // Patch the two paths on the per-instance properties / methods so we
-      // bypass the captured const without touching epub.js source.
       const renditionAny = rendition as unknown as {
         q: { tick: (cb: () => void) => void; run: () => void; enqueue: (task: unknown) => unknown }
-        manager: { currentLocation: () => unknown }
+        manager?: { currentLocation: () => unknown; container?: HTMLElement }
         located: (result: unknown) => { start?: { index?: number; href?: string; cfi?: string; percentage?: number }; end?: { cfi?: string } } | null
         location: unknown
         emit: (event: string, payload?: unknown) => void
         reportLocation: () => unknown
       }
+      const resolveScrollContainer = () => (
+        renditionAny.manager?.container
+        ?? container.querySelector<HTMLElement>('.epub-container')
+        ?? container
+      )
 
-      // Patch 1: queue.tick — replace rAF with setTimeout(0). Do not force-run
-      // the queue here: renderTo() already scheduled epub.js's first queue tick,
-      // and a second tick can dequeue start() before book.opened has populated
-      // book.package.
+      const bindScrollContainer = () => {
+        const nextContainer = resolveScrollContainer()
+        scrollContainer = nextContainer
+        if (!handleScroll || scrollListenerContainer === nextContainer) return nextContainer
+        if (scrollListenerContainer) {
+          scrollListenerContainer.removeEventListener('scroll', handleScroll)
+        }
+        nextContainer.addEventListener('scroll', handleScroll, { passive: true })
+        scrollListenerContainer = nextContainer
+        return nextContainer
+      }
+
+      // epub.js captures requestAnimationFrame at module load. Replace both
+      // captured hot paths on this rendition and reject callbacks from an old
+      // reader session before they can mutate the new reader.
       renditionAny.q.tick = (cb: () => void) => window.setTimeout(cb, 0)
-
-      // Patch 2: reportLocation — re-implement without the inline rAF so
-      // `relocated` / `locationChanged` fire even if rAF stalls.
       renditionAny.reportLocation = function patchedReportLocation() {
         return renditionAny.q.enqueue(function reportedLocation(this: typeof renditionAny) {
-          const location = this.manager.currentLocation()
+          if (!isCurrentSession()) return
+          const manager = this.manager
+          if (!manager) return
+          const location = manager.currentLocation()
           const settle = (result: unknown) => {
+            if (!isCurrentSession()) return
             const located = this.located(result)
             if (!located || !located.start || !located.end) return
             this.location = located
@@ -266,76 +390,21 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
             this.emit('relocated', this.location)
           }
           if (location && typeof (location as { then?: unknown }).then === 'function') {
-            ;(location as Promise<unknown>).then(settle)
+            void (location as Promise<unknown>).then(settle)
           } else if (location) {
             settle(location)
           }
         }.bind(renditionAny))
       }
 
-      // Apply the theme and start display once the book is ready so we don't
-      // race with epub.js's internal startup sequence (which touches
-      // `book.package` in start()).
-      const readyThen = (book.ready ?? book.opened) as Promise<unknown> | undefined
-
-      // Track display progress for autotest visibility. These refs get
-      // surfaced via the debug hook below.
-      const progress = (window as unknown as {
-        __onwardEpubReaderProgress?: {
-          displayStarted: number
-          displayResolved: number | null
-          displayRejected: string | null
-          containerWidth: number
-          containerHeight: number
-          lastBookOpened: boolean
-        }
-      })
-      progress.__onwardEpubReaderProgress = {
-        displayStarted: Date.now(),
-        displayResolved: null,
-        displayRejected: null,
-        containerWidth: container?.offsetWidth ?? 0,
-        containerHeight: container?.offsetHeight ?? 0,
-        lastBookOpened: false
-      }
-      void book.opened.then(() => {
-        if (progress.__onwardEpubReaderProgress) {
-          progress.__onwardEpubReaderProgress.lastBookOpened = true
-        }
-      }).catch(() => {
-        /* ignore */
-      })
-      const initialTarget = initialLocationRef.current ?? undefined
-      // Hook persistence: record where the user is reading whenever the
-      // rendition relocates. We debounce by swapping onMemoryChangeRef.
-      rendition.on('relocated', (loc: { start?: { cfi?: string; href?: string } }) => {
-        const cfi = loc?.start?.cfi ?? loc?.start?.href ?? null
-        const rawHref = loc?.start?.href ?? null
-        const href = stripFragment(rawHref)
-        if (progress.__onwardEpubReaderProgress) {
-          ;(progress.__onwardEpubReaderProgress as Record<string, unknown>).lastLocationHref = href
-          ;(progress.__onwardEpubReaderProgress as Record<string, unknown>).lastLocationCfi = cfi
-        }
-        onMemoryChangeRef.current?.({ epubLocation: cfi })
-        // Suppress the first `relocated` until the book has fully settled so
-        // the outline doesn't flash-highlight chapter 1 on restore.
-        if (bookReadyRef.current) {
-          onLocationChangeRef.current?.(href)
-        }
-      })
-      // Pixel-exact scroll restore: after display() resolves AND the content
-      // has laid out enough for the host container to be scrollable, write
-      // the saved scrollTop. epub.js's scrolled-doc manager lays out the
-      // book incrementally as iframes render, so we poll briefly until
-      // scrollHeight can accommodate the target, then assign.
       const applySavedScroll = () => {
-        const savedTop = initialScrollTopRef.current
+        const savedTop = savedScrollTop
         if (typeof savedTop !== 'number' || savedTop <= 0) return
         let attempts = 0
         const maxAttempts = 60
         const tick = () => {
-          if (disposed) return
-          const el = containerRef.current
+          if (!isCurrentSession()) return
+          const el = bindScrollContainer()
           if (!el) return
           const maxTop = Math.max(0, el.scrollHeight - el.clientHeight)
           if (maxTop < savedTop - 2 && attempts < maxAttempts) {
@@ -343,102 +412,149 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
             window.requestAnimationFrame(tick)
             return
           }
-          const clamped = Math.min(savedTop, maxTop)
           programmaticScrollUntilRef.current = performance.now() + 600
-          el.scrollTop = clamped
+          el.scrollTop = Math.min(savedTop, maxTop)
         }
         window.requestAnimationFrame(tick)
       }
-      let resolved = false
-      const startDisplay = () => {
-        const r = renditionRef.current
-        if (!r || disposed || resolved) return
-        if (progress.__onwardEpubReaderProgress) {
-          progress.__onwardEpubReaderProgress.displayStarted = Date.now()
+
+      const requestNavigation: EpubNavigationRequester = async (request) => {
+        if (!isCurrentSession() || !rendition) return
+        const target = request.kind === 'display' || request.kind === 'font'
+          ? (request.target ?? null)
+          : null
+        const startsDisplayAttempt = request.kind !== 'font' || target !== null
+        let attemptId: number | null = null
+        if (startsDisplayAttempt) {
+          const nextState = beginEpubDisplayAttempt(sessionState, target)
+          publishSessionState(nextState)
+          attemptId = nextState.latestAttemptId
         }
-        r.display(initialTarget).then(() => {
-          resolved = true
-          if (progress.__onwardEpubReaderProgress) {
-            progress.__onwardEpubReaderProgress.displayResolved = Date.now()
+        progressState.displayStarted = Date.now()
+        progressState.displayResolved = null
+        progressState.displayRejected = null
+
+        await coordinator.enqueue(async () => {
+          if (!isCurrentSession() || !rendition) return
+          // A newer queued request supersedes this one before it starts.
+          if (attemptId !== null && sessionState.latestAttemptId !== attemptId) return
+          try {
+            if (request.kind === 'display') {
+              await rendition.display(request.target)
+            } else if (request.kind === 'font') {
+              rendition.themes.fontSize(`${request.fontPct}%`)
+              progressState.appliedFontPct = request.fontPct
+              if (request.target) await rendition.display(request.target)
+            } else if (request.kind === 'previous') {
+              await rendition.prev()
+            } else {
+              await rendition.next()
+            }
+            if (!isCurrentSession()) return
+            if (attemptId !== null) {
+              publishSessionState(settleEpubDisplayAttempt(sessionState, { sessionId, attemptId }))
+              const relocation = pendingRelocation
+              pendingRelocation = null
+              if (relocation) handleRelocated?.(relocation)
+            }
+            progressState.displayResolved = Date.now()
+            bindScrollContainer()
+            if (request.kind === 'display' && request.restoreScroll) {
+              applySavedScroll()
+            }
+          } catch (err) {
+            if (!isCurrentSession()) return
+            const message = String((err as { message?: string })?.message ?? err)
+            progressState.displayRejected = message
+            setError(message)
           }
-          applySavedScroll()
-        }).catch((err: unknown) => {
-          if (disposed) return
-          if (progress.__onwardEpubReaderProgress) {
-            progress.__onwardEpubReaderProgress.displayRejected = String((err as { message?: string })?.message ?? err)
-          }
-          setError(String((err as { message?: string })?.message ?? err))
         })
       }
+      activeNavigationRequester = requestNavigation
+      requestNavigationRef.current = requestNavigation
 
-      // Persist precise scroll offset whenever the user scrolls. Debounced
-      // to 250 ms the same way PdfReader debounces `onward:pdf:state`.
+      handleRelocated = (loc) => {
+        if (!isCurrentSession()) return
+        const cfi = loc?.start?.cfi ?? loc?.start?.href ?? null
+        const href = stripFragment(loc?.start?.href ?? null)
+        const relocation = acceptEpubRelocation(sessionState, { sessionId, cfi, href })
+        if (!relocation.accepted) {
+          if (sessionState.settledAttemptId !== sessionState.latestAttemptId) {
+            pendingRelocation = loc
+          }
+          return
+        }
+        publishSessionState(relocation.state)
+        progressState.lastLocationHref = href
+        progressState.lastLocationCfi = cfi
+        recoveryAttemptsRef.current.delete(previewBuffer)
+        if (recoveryTimer !== null) {
+          window.clearTimeout(recoveryTimer)
+          recoveryTimer = null
+        }
+        onMemoryChangeRef.current?.({ epubLocation: cfi })
+        onLocationChangeRef.current?.(href)
+      }
+      rendition.on('relocated', handleRelocated)
+
       handleScroll = () => {
-        if (disposed) return
-        if (performance.now() < programmaticScrollUntilRef.current) return
+        if (!isCurrentSession()) return
+        if (!shouldPersistEpubScroll(performance.now(), programmaticScrollUntilRef.current)) return
         if (scrollPersistTimerRef.current) {
           window.clearTimeout(scrollPersistTimerRef.current)
         }
         scrollPersistTimerRef.current = window.setTimeout(() => {
           scrollPersistTimerRef.current = null
-          const el = containerRef.current
-          if (!el) return
-          onMemoryChangeRef.current?.({ epubScrollTop: el.scrollTop })
+          if (!isCurrentSession()) return
+          onMemoryChangeRef.current?.({ epubScrollTop: scrollContainer.scrollTop })
         }, 250)
       }
-      container.addEventListener('scroll', handleScroll, { passive: true })
-      // epub.js's DefaultViewManager occasionally stalls its first display()
-      // against our sandboxed file:// iframe — the Promise never resolves but
-      // no error is raised either. Two observed root causes:
-      //   1. The rendition was mounted before the container had its final
-      //      layout size, so epub.js latched a 0x0 stage and never re-rendered.
-      //   2. The view iframe was created but never flushed (epub.js race on
-      //      addEventListener ordering). Retrying display() forces a new view.
-      // We handle (1) with an explicit `rendition.resize(width, height)` pass
-      // against the current container dimensions, and (2) by re-issuing
-      // display() until we actually see an <iframe> in the container.
-      // The initial display and retries are gated behind book readiness so we
-      // don't hit the 'book.package' undefined trap inside rendition.start().
-      const bookReady = (readyThen ?? book?.opened ?? Promise.resolve(null)) as Promise<unknown>
-      // Retry cadence up to 12s — in heavier regression scenarios (e.g., the
-      // `pdf-epub-full` suite where EPUB opens after a PDF preview teardown)
-      // DefaultViewManager can take longer than the first 4 nudges to actually
-      // materialize the iframe. Later retries are cheap noops once an iframe
-      // is present, so the worst case is a few extra display() calls.
-      const retryIntervals = [600, 1400, 2600, 4000, 6000, 8500, 11500]
+      bindScrollContainer()
+
+      void book.opened.then(() => {
+        if (isCurrentSession()) progressState.lastBookOpened = true
+      }).catch(() => { /* ignore */ })
+
+      const bookReady = (book.ready ?? book.opened ?? Promise.resolve(null)) as Promise<unknown>
       void bookReady.then(() => {
-        if (disposed) return
+        if (!isCurrentSession() || !rendition) return
         applyTheme()
-        bookReadyRef.current = true
+        try {
+          rendition.themes.fontSize(`${fontPctRef.current}%`)
+          progressState.appliedFontPct = fontPctRef.current
+        } catch { /* ignore */ }
+        try {
+          const width = container.offsetWidth
+          const height = container.offsetHeight
+          if (width > 0 && height > 0) rendition.resize(width, height)
+        } catch { /* ignore */ }
         renditionAny.q.run()
-        startDisplay()
-        for (const delay of retryIntervals) {
-          window.setTimeout(() => {
-            if (disposed) return
-            const iframeNow = container && container.querySelector('iframe')
-            if (iframeNow) return
-            const r = renditionRef.current
-            if (!r) return
-            // Nudge the stage with the current container size before retrying
-            // display — epub.js latches the initial 0x0 size on first render
-            // if the container wasn't laid out yet.
-            try {
-              const w = container.offsetWidth
-              const h = container.offsetHeight
-              if (w > 0 && h > 0) {
-                const resize = (r as unknown as { resize?: (w?: number, h?: number) => void }).resize
-                if (typeof resize === 'function') resize.call(r, w, h)
-              }
-            } catch { /* ignore */ }
-            try { startDisplay() } catch { /* ignore */ }
-          }, delay)
-        }
-      }).catch(() => { /* ignore — nothing to retry */ })
+        void requestNavigation({
+          kind: 'display',
+          target: initialTarget ?? undefined,
+          reason: 'initial',
+          restoreScroll: true
+        })
+
+        // A genuinely stuck initial display is recovered by replacing the
+        // entire book/rendition session. Calling display() again on the same
+        // rendition is unsafe because epub.js resolves, but does not cancel,
+        // the old manager.display operation.
+        recoveryTimer = window.setTimeout(() => {
+          if (!isCurrentSession()) return
+          const frameReady = isEpubFrameContentReady(readEpubFrameSnapshot(container))
+          const locationReady = sessionState.readyAttemptId === sessionState.latestAttemptId
+          if (frameReady && locationReady) return
+          const previousAttempts = recoveryAttemptsRef.current.get(previewBuffer) ?? 0
+          if (previousAttempts >= MAX_RENDITION_RECOVERY_ATTEMPTS) return
+          recoveryAttemptsRef.current.set(previewBuffer, previousAttempts + 1)
+          setRenditionRecoveryNonce((nonce) => nonce + 1)
+        }, RENDITION_RECOVERY_DELAY_MS)
+      }).catch(() => { /* ignore */ })
 
       void book.loaded.navigation.then((nav: { toc: NavItem[] }) => {
-        if (disposed) return
-        const toc = nav?.toc ?? []
-        onOutlineLoadedRef.current?.(flattenNavItems(toc))
+        if (!isCurrentSession()) return
+        onOutlineLoadedRef.current?.(flattenNavItems(nav?.toc ?? []))
       })
     } catch (err) {
       setError(String((err as { message?: string })?.message ?? err))
@@ -446,31 +562,33 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
 
     return () => {
       disposed = true
+      programmaticScrollUntilRef.current = 0
+      sessionState = disposeEpubReaderSession(sessionState, sessionId)
+      if (sessionStateRef.current && isCurrentEpubSessionEvent(sessionStateRef.current, sessionId)) {
+        sessionStateRef.current = sessionState
+      }
+      coordinator.dispose()
+      if (requestNavigationRef.current === activeNavigationRequester) requestNavigationRef.current = null
+      if (recoveryTimer !== null) window.clearTimeout(recoveryTimer)
       if (scrollPersistTimerRef.current) {
         window.clearTimeout(scrollPersistTimerRef.current)
         scrollPersistTimerRef.current = null
       }
-      if (handleScroll) {
-        try {
-          container.removeEventListener('scroll', handleScroll)
-        } catch {
-          /* ignore */
-        }
+      if (handleScroll && scrollListenerContainer) {
+        try { scrollListenerContainer.removeEventListener('scroll', handleScroll) } catch { /* ignore */ }
       }
-      try {
-        renditionRef.current?.destroy()
-      } catch {
-        /* ignore */
+      if (rendition && handleRelocated) {
+        try { rendition.off('relocated', handleRelocated) } catch { /* ignore */ }
       }
-      renditionRef.current = null
-      try {
-        bookRef.current?.destroy()
-      } catch {
-        /* ignore */
+      try { rendition?.destroy() } catch { /* ignore */ }
+      if (renditionRef.current === rendition) renditionRef.current = null
+      try { book?.destroy() } catch { /* ignore */ }
+      if (bookRef.current === book) bookRef.current = null
+      if (progressHost.__onwardEpubReaderProgress === progressState) {
+        delete progressHost.__onwardEpubReaderProgress
       }
-      bookRef.current = null
     }
-  }, [previewBuffer, applyTheme])
+  }, [previewBuffer, filePath, applyTheme, renditionRecoveryNonce])
 
   // Re-apply theme when host theme changes (class / data-theme mutations).
   useEffect(() => {
@@ -490,51 +608,26 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
     onMemoryChangeRef.current?.({ epubFontPct: fontPct })
   }, [fontPct])
 
-  // Apply font size on change while keeping the user anchored on the page
-  // they're currently reading. epub.js re-layouts the entire rendition when
-  // `themes.fontSize` changes, which resets the view to the first page of
-  // the book unless we re-seek to the previous CFI afterwards. Snapshot the
-  // anchor BEFORE applying the new size so we don't resolve to the already-
-  // reset "page 1" location.
+  // Apply font size and re-seek as one serialized navigation task. epub.js does
+  // not cancel an in-flight manager.display call when a newer display starts.
+  const fontRenderInitializedRef = useRef(false)
   useEffect(() => {
-    const rendition = renditionRef.current
-    if (!rendition) return
-    // rendition.manager is attached only after start() runs, which is queued
-    // behind book.opened. Calling currentLocation() before that throws.
-    // Wait for `started` so the initial fontPct apply (and any later apply
-    // triggered while the book is still opening) is well-timed.
-    const apply = () => {
-      const progressRef = (window as unknown as {
-        __onwardEpubReaderProgress?: { lastLocationHref?: string | null; lastLocationCfi?: string | null }
-      }).__onwardEpubReaderProgress ?? null
-      const anchor = progressRef?.lastLocationCfi || progressRef?.lastLocationHref || null
-
-      try { rendition.themes.fontSize(`${fontPct}%`) } catch { /* ignore */ }
-
-      if (!anchor) return
-
-      // epub.js's stylesheet-only fontSize change shouldn't navigate, but
-      // the DefaultViewManager may still nudge the scroll position during
-      // reflow. Re-seek on the next animation frame to pin the user back
-      // where they were.
-      window.requestAnimationFrame(() => {
-        try { void rendition.display(anchor) } catch { /* ignore */ }
-      })
+    if (!fontRenderInitializedRef.current) {
+      fontRenderInitializedRef.current = true
+      return
     }
-
-    const started = rendition.started as Promise<void> | undefined
-    if (started && typeof started.then === 'function') {
-      void started.then(apply).catch(() => apply())
-    } else {
-      apply()
-    }
+    const progress = (window as unknown as {
+      __onwardEpubReaderProgress?: EpubReaderProgress
+    }).__onwardEpubReaderProgress
+    const anchor = progress?.lastLocationCfi || progress?.lastLocationHref || undefined
+    void requestNavigationRef.current?.({ kind: 'font', target: anchor, fontPct, reason: 'font' })
   }, [fontPct])
 
   const goPrev = useCallback(() => {
-    void renditionRef.current?.prev()
+    void requestNavigationRef.current?.({ kind: 'previous', reason: 'toolbar' })
   }, [])
   const goNext = useCallback(() => {
-    void renditionRef.current?.next()
+    void requestNavigationRef.current?.({ kind: 'next', reason: 'toolbar' })
   }, [])
 
   const runSearch = useCallback(
@@ -759,16 +852,14 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
                       type="button"
                       className="project-editor-epub-search-hit"
                       onClick={() => {
-                        // Navigate to the hit's chapter. We build our own
-                        // pseudo-CFI from (href, index) during search; epub.js
-                        // won't accept it as a CFI, but `href` is a valid
-                        // spine target that takes the user close to the
-                        // match. Wrap in try/catch so an invalid target
-                        // never kicks the rendition into an empty state.
-                        try {
-                          if (hit.href) void renditionRef.current?.display(hit.href)
-                        } catch {
-                          /* ignore */
+                        // Search produces a pseudo-CFI, so navigate by the
+                        // matching spine href through the serialized queue.
+                        if (hit.href) {
+                          void requestNavigationRef.current?.({
+                            kind: 'display',
+                            target: hit.href,
+                            reason: 'search'
+                          })
                         }
                         setSearchHitsOpen(false)
                       }}

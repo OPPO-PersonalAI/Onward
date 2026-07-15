@@ -90,8 +90,10 @@ linkService.setViewer(pdfViewer);
 
 let currentLoadingTask = null;
 let currentDocument = null;
+let pagesInitialized = false;
 let currentScaleSetting = DEFAULT_SCALE_VALUE;
 let searchDebounceTimer = null;
+let readingStatePostTimer = null;
 let openToken = 0;
 let pendingPasswordUpdate = null;
 let passwordCancelledLoad = false;
@@ -116,7 +118,9 @@ function bindHostMessages() {
   window.addEventListener("message", event => {
     const data = event.data;
     if (!data || typeof data !== "object") return;
-    if (data.type === "onward:pdf:theme") {
+    if (data.type === "onward:pdf:requestReady") {
+      postReadyToHost();
+    } else if (data.type === "onward:pdf:theme") {
       applyThemeFromHost(data.vars || {});
     } else if (data.type === "onward:pdf:i18n") {
       i18nDict = { ...I18N_DEFAULTS, ...(data.strings || {}) };
@@ -148,7 +152,10 @@ function bindHostMessages() {
       }
     }
   });
-  // Notify host that viewer is ready.
+  postReadyToHost();
+}
+
+function postReadyToHost() {
   try {
     window.parent.postMessage({ type: "onward:pdf:ready" }, "*");
   } catch (_error) {
@@ -346,7 +353,6 @@ function bindViewerEvents() {
   );
 }
 
-let readingStatePostTimer = null;
 function queueReadingStatePost() {
   if (readingStatePostTimer) clearTimeout(readingStatePostTimer);
   readingStatePostTimer = setTimeout(() => {
@@ -355,25 +361,40 @@ function queueReadingStatePost() {
   }, 250);
 }
 
-function postReadingState() {
+function readReadingState() {
+  return {
+    page: pdfViewer.currentPageNumber,
+    scrollTop: els.viewerContainer.scrollTop,
+    scale: currentScaleSetting
+  };
+}
+
+function postReadingStateMessage(type) {
   if (!currentDocument) return;
   try {
     window.parent.postMessage({
-      type: "onward:pdf:state",
-      page: pdfViewer.currentPageNumber,
-      scrollTop: els.viewerContainer.scrollTop,
-      scale: currentScaleSetting
+      type,
+      ...readReadingState()
     }, "*");
   } catch (_err) {
     /* ignore */
   }
 }
 
+function postReadingState() {
+  postReadingStateMessage("onward:pdf:state");
+}
+
+function postReadingStateReady() {
+  postReadingStateMessage("onward:pdf:stateReady");
+}
+
 let pendingRestoreState = null;
 function applyRestoreStateIfReady() {
-  if (!pendingRestoreState || !currentDocument) return;
+  if (!pendingRestoreState || !currentDocument || !pagesInitialized) return false;
   const state = pendingRestoreState;
   pendingRestoreState = null;
+  const restoreOpenToken = openToken;
   try {
     if (typeof state.scale === "string" && state.scale.length > 0) {
       pdfViewer.currentScaleValue = state.scale;
@@ -384,15 +405,22 @@ function applyRestoreStateIfReady() {
   if (Number.isFinite(state.page)) {
     pdfViewer.currentPageNumber = clamp(Number(state.page), 1, currentDocument.numPages);
   }
-  if (Number.isFinite(state.scrollTop)) {
-    requestAnimationFrame(() => {
+  requestAnimationFrame(() => {
+    if (restoreOpenToken !== openToken || !currentDocument || !pagesInitialized) return;
+    if (Number.isFinite(state.scrollTop)) {
       els.viewerContainer.scrollTop = Math.max(0, Number(state.scrollTop));
+    }
+    requestAnimationFrame(() => {
+      if (restoreOpenToken !== openToken || !currentDocument || !pagesInitialized) return;
+      postReadingStateReady();
     });
-  }
+  });
+  return true;
 }
 
 async function openPdfUrl(url, displayName) {
   const token = ++openToken;
+  pagesInitialized = false;
   clearError();
   els.fileName.textContent = displayName || "";
   els.fileName.title = displayName || "";
@@ -452,6 +480,7 @@ async function openPdfUrl(url, displayName) {
       pdfViewer.currentScaleValue = DEFAULT_SCALE_VALUE;
       pdfViewer.currentPageNumber = 1;
       els.viewerContainer.scrollTop = 0;
+      pagesInitialized = true;
       applyRestoreStateIfReady();
     },
     { once: true }
@@ -482,8 +511,14 @@ async function openPdfUrl(url, displayName) {
 
 async function resetCurrentDocument() {
   closePasswordDialog();
+  pagesInitialized = false;
   currentScaleSetting = DEFAULT_SCALE_VALUE;
   passwordCancelledLoad = false;
+
+  if (readingStatePostTimer) {
+    clearTimeout(readingStatePostTimer);
+    readingStatePostTimer = null;
+  }
 
   pdfViewer.setDocument(null);
   linkService.setDocument(null, null);

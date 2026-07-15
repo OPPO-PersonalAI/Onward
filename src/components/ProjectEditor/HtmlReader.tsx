@@ -5,7 +5,16 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '../../i18n/useI18n'
-import type { HtmlPreviewScrollState } from '../../utils/html-file'
+import {
+  isHtmlPreviewScrollRestoreVerified,
+  isSameHtmlPreviewFile,
+  normalizeHtmlPreviewScrollState,
+  normalizeHtmlPreviewZoomFactor,
+  shouldAttemptHtmlPreviewScrollRestore,
+  type HtmlPreviewScrollState
+} from '../../utils/html-file'
+
+export type HtmlReaderScrollRestoreStatus = 'idle' | 'waiting' | 'restoring' | 'restored' | 'failed'
 
 export type HtmlReaderState = {
   browserId: string
@@ -20,6 +29,8 @@ export type HtmlReaderState = {
   canGoBack: boolean
   canGoForward: boolean
   error: string | null
+  scrollRestoreStatus: HtmlReaderScrollRestoreStatus
+  restoredScrollY: number | null
 }
 
 interface HtmlReaderProps {
@@ -28,6 +39,7 @@ interface HtmlReaderProps {
   filePath: string
   reloadKey: number
   isActive: boolean
+  zoomFactor: number
   restoreScrollState?: HtmlPreviewScrollState | null
   onEscape: () => void
   onStateChange?: (state: HtmlReaderState | null) => void
@@ -41,6 +53,7 @@ export function HtmlReader({
   filePath,
   reloadKey,
   isActive,
+  zoomFactor,
   restoreScrollState,
   onEscape,
   onStateChange
@@ -53,7 +66,13 @@ export function HtmlReader({
   const isActiveRef = useRef(isActive)
   const stateRef = useRef<HtmlReaderState | null>(null)
   const restoreScrollStateRef = useRef<HtmlPreviewScrollState | null>(restoreScrollState ?? null)
+  const zoomFactorRef = useRef(normalizeHtmlPreviewZoomFactor(zoomFactor))
   const restoredReloadKeyRef = useRef<number | null>(null)
+  const targetNavigationConfirmedRef = useRef(false)
+  const targetLoadSettledRef = useRef(false)
+  const zoomAppliedRef = useRef(false)
+  const restoreInFlightRef = useRef(false)
+  const restoreGenerationRef = useRef(0)
 
   const updateState = useCallback((patch: Partial<HtmlReaderState>) => {
     const current = stateRef.current
@@ -99,18 +118,92 @@ export function HtmlReader({
     rafRef.current = requestAnimationFrame(syncBounds)
   }, [syncBounds])
 
+  const attemptScrollRestore = useCallback(async () => {
+    const id = browserIdRef.current
+    const current = stateRef.current
+    const targetState = restoreScrollStateRef.current
+    if (!id || !current || !targetState) return
+    if (!shouldAttemptHtmlPreviewScrollRestore({
+      activeBrowserId: id,
+      expectedBrowserId: current.browserId,
+      activeReloadKey: current.reloadKey,
+      expectedReloadKey: reloadKey,
+      targetNavigationConfirmed: targetNavigationConfirmedRef.current,
+      loadSettled: targetLoadSettledRef.current,
+      zoomApplied: zoomAppliedRef.current,
+      hasTargetState: true,
+      restoreInFlight: restoreInFlightRef.current,
+      restored: restoredReloadKeyRef.current === current.reloadKey
+    })) return
+
+    const generation = restoreGenerationRef.current
+    restoreInFlightRef.current = true
+    updateState({ scrollRestoreStatus: 'restoring', restoredScrollY: null })
+    try {
+      const result = await window.electronAPI.browser.restoreScrollState(id, targetState)
+      const latest = stateRef.current
+      if (
+        restoreGenerationRef.current !== generation
+        || browserIdRef.current !== id
+        || latest?.browserId !== id
+        || latest.reloadKey !== reloadKey
+      ) return
+
+      const restoredState = normalizeHtmlPreviewScrollState(result.state)
+      if (result.success && isHtmlPreviewScrollRestoreVerified(targetState.y, restoredState)) {
+        restoredReloadKeyRef.current = reloadKey
+        updateState({
+          scrollRestoreStatus: 'restored',
+          restoredScrollY: restoredState?.y ?? null
+        })
+        return
+      }
+      updateState({
+        scrollRestoreStatus: 'failed',
+        restoredScrollY: restoredState?.y ?? null
+      })
+    } catch {
+      if (restoreGenerationRef.current === generation && browserIdRef.current === id) {
+        updateState({ scrollRestoreStatus: 'failed', restoredScrollY: null })
+      }
+    } finally {
+      if (restoreGenerationRef.current === generation && browserIdRef.current === id) {
+        restoreInFlightRef.current = false
+      }
+    }
+  }, [reloadKey, updateState])
+
   useEffect(() => {
     isActiveRef.current = isActive
     scheduleSyncBounds()
   }, [isActive, scheduleSyncBounds])
 
   useEffect(() => {
-    restoreScrollStateRef.current = restoreScrollState ?? null
-  }, [restoreScrollState])
+    zoomFactorRef.current = normalizeHtmlPreviewZoomFactor(zoomFactor)
+  }, [zoomFactor])
+
+  useEffect(() => {
+    restoreScrollStateRef.current = normalizeHtmlPreviewScrollState(restoreScrollState)
+    if (!restoreScrollStateRef.current) {
+      updateState({ scrollRestoreStatus: 'idle', restoredScrollY: null })
+      return
+    }
+    if (restoredReloadKeyRef.current !== reloadKey) {
+      updateState({ scrollRestoreStatus: 'waiting', restoredScrollY: null })
+    }
+    void attemptScrollRestore()
+  }, [attemptScrollRestore, reloadKey, restoreScrollState, updateState])
 
   useEffect(() => {
     const id = `project-editor-html-${++htmlReaderIdCounter}`
+    const generation = restoreGenerationRef.current + 1
+    restoreGenerationRef.current = generation
     browserIdRef.current = id
+    restoredReloadKeyRef.current = null
+    targetNavigationConfirmedRef.current = false
+    targetLoadSettledRef.current = false
+    zoomAppliedRef.current = false
+    restoreInFlightRef.current = false
     const initialState: HtmlReaderState = {
       browserId: id,
       filePath,
@@ -123,37 +216,63 @@ export function HtmlReader({
       reloadKey,
       canGoBack: false,
       canGoForward: false,
-      error: null
+      error: null,
+      scrollRestoreStatus: restoreScrollStateRef.current ? 'waiting' : 'idle',
+      restoredScrollY: null
     }
     stateRef.current = initialState
     setState(initialState)
     onStateChange?.(initialState)
 
-    window.electronAPI.browser.create(id, url, { allowFile: true, fileRoot: rootPath }).then((result) => {
-      if (browserIdRef.current !== id) return
-      if (!result.success) {
-        updateState({ ready: false, isLoading: false, error: result.error ?? 'Failed to create HTML Preview' })
-        return
+    void (async () => {
+      try {
+        const result = await window.electronAPI.browser.create(id, url, { allowFile: true, fileRoot: rootPath })
+        if (restoreGenerationRef.current !== generation || browserIdRef.current !== id) return
+        if (!result.success) {
+          updateState({ ready: false, isLoading: false, error: result.error ?? 'Failed to create HTML Preview' })
+          return
+        }
+
+        const zoomResult = await window.electronAPI.browser.setZoomFactor(id, zoomFactorRef.current)
+        if (restoreGenerationRef.current !== generation || browserIdRef.current !== id) return
+        zoomAppliedRef.current = Boolean(zoomResult.success)
+
+        const nav = await window.electronAPI.browser.getNavState(id)
+        if (restoreGenerationRef.current !== generation || browserIdRef.current !== id) return
+        if (nav) {
+          const isTargetDocument = isSameHtmlPreviewFile(nav.url, url)
+          targetNavigationConfirmedRef.current = isTargetDocument
+          targetLoadSettledRef.current = isTargetDocument && !nav.isLoading
+          updateState({
+            url: nav.url,
+            title: nav.title,
+            ready: true,
+            isLoading: nav.isLoading,
+            loadCount: isTargetDocument && !nav.isLoading ? 1 : 0,
+            canGoBack: nav.canGoBack,
+            canGoForward: nav.canGoForward
+          })
+        } else {
+          updateState({ ready: true })
+        }
+        void attemptScrollRestore()
+        requestAnimationFrame(() => {
+          syncBounds()
+          requestAnimationFrame(syncBounds)
+        })
+      } catch (error) {
+        if (restoreGenerationRef.current !== generation || browserIdRef.current !== id) return
+        updateState({ ready: false, isLoading: false, error: String(error) })
       }
-      updateState({ ready: true })
-      // Seed nav state once; onNavStateChanged keeps it fresh afterwards.
-      void window.electronAPI.browser.getNavState(id).then((nav) => {
-        if (browserIdRef.current !== id || !nav) return
-        updateState({ canGoBack: nav.canGoBack, canGoForward: nav.canGoForward })
-      }).catch(() => {
-        // Nav state stays at its safe default (both disabled) on failure.
-      })
-      requestAnimationFrame(() => {
-        syncBounds()
-        requestAnimationFrame(syncBounds)
-      })
-    }).catch((error) => {
-      if (browserIdRef.current !== id) return
-      updateState({ ready: false, isLoading: false, error: String(error) })
-    })
+    })()
 
     return () => {
+      restoreGenerationRef.current += 1
       browserIdRef.current = null
+      targetNavigationConfirmedRef.current = false
+      targetLoadSettledRef.current = false
+      zoomAppliedRef.current = false
+      restoreInFlightRef.current = false
       stateRef.current = null
       setState(null)
       onStateChange?.(null)
@@ -165,7 +284,7 @@ export function HtmlReader({
         rafRef.current = 0
       }
     }
-  }, [filePath, onStateChange, reloadKey, rootPath, syncBounds, updateState, url])
+  }, [attemptScrollRestore, filePath, onStateChange, reloadKey, rootPath, syncBounds, updateState, url])
 
   useEffect(() => {
     const placeholder = placeholderRef.current
@@ -189,6 +308,9 @@ export function HtmlReader({
   useEffect(() => {
     const unsubUrl = window.electronAPI.browser.onUrlChanged((id, nextUrl) => {
       if (id !== browserIdRef.current) return
+      const isTargetDocument = isSameHtmlPreviewFile(nextUrl, url)
+      targetNavigationConfirmedRef.current = isTargetDocument
+      targetLoadSettledRef.current = false
       updateState({ url: nextUrl })
     })
     const unsubTitle = window.electronAPI.browser.onTitleChanged((id, nextTitle) => {
@@ -198,21 +320,12 @@ export function HtmlReader({
     const unsubLoading = window.electronAPI.browser.onLoadingChanged((id, loading) => {
       if (id !== browserIdRef.current) return
       const current = stateRef.current
+      targetLoadSettledRef.current = !loading && targetNavigationConfirmedRef.current
       updateState({
         isLoading: loading,
         loadCount: !loading && current ? current.loadCount + 1 : current?.loadCount ?? 0
       })
-      if (!loading && current && restoredReloadKeyRef.current !== current.reloadKey) {
-        const targetState = restoreScrollStateRef.current
-        if (targetState) {
-          restoredReloadKeyRef.current = current.reloadKey
-          window.setTimeout(() => {
-            const browserId = browserIdRef.current
-            if (!browserId || browserId !== id) return
-            void window.electronAPI.browser.restoreScrollState(browserId, targetState)
-          }, 50)
-        }
-      }
+      if (!loading) void attemptScrollRestore()
     })
     const unsubNav = window.electronAPI.browser.onNavStateChanged((id, navState) => {
       if (id !== browserIdRef.current) return
@@ -230,7 +343,7 @@ export function HtmlReader({
       unsubNav()
       unsubEscape()
     }
-  }, [onEscape, updateState])
+  }, [attemptScrollRestore, onEscape, updateState, url])
 
   return (
     <div className="project-editor-html-reader" data-file-path={filePath}>

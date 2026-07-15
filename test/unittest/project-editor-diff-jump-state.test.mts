@@ -9,6 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  buildDiffLocateRouteTarget,
   buildDiffReturnBarState,
   findDiffFileForEditorPath,
   resolveNavigationFilePath
@@ -110,6 +111,26 @@ test('findDiffFileForEditorPath compares case-insensitively on Windows', () => {
   assert.equal(match?.filename, 'SRC/App.ts')
 })
 
+test('findDiffFileForEditorPath uses changeType to disambiguate staged and unstaged rows', () => {
+  const staged = {
+    ...file('src/app.ts'),
+    changeType: 'staged' as const,
+    resourceGroup: 'index' as const,
+    originalRef: 'HEAD' as const,
+    modifiedRef: 'index' as const
+  }
+  const unstaged = file('src/app.ts')
+  const match = findDiffFileForEditorPath({
+    diff: diff([staged, unstaged]),
+    editorRoot: '/repo',
+    editorFilePath: 'src/app.ts',
+    platform: 'darwin',
+    changeType: 'unstaged'
+  } as Parameters<typeof findDiffFileForEditorPath>[0] & { changeType: 'unstaged' })
+
+  assert.equal(match?.changeType, 'unstaged')
+})
+
 test('buildDiffReturnBarState disables jump while checking or when target is absent', () => {
   assert.deepEqual(buildDiffReturnBarState({
     hasDiffReturnContext: true,
@@ -151,4 +172,19 @@ test('buildDiffReturnBarState disables jump while checking or when target is abs
     diffJumpChecking: false,
     activeFilePath: 'src/app.ts'
   }).jumpEnabled, true)
+})
+
+test('buildDiffLocateRouteTarget preserves the source panel root for nested repositories', () => {
+  assert.deepEqual(buildDiffLocateRouteTarget({
+    filename: 'nested-target.ts',
+    repoRoot: '/repo/nested-repo',
+    changeType: 'unstaged'
+  }, '/repo'), {
+    filePath: 'nested-target.ts',
+    repoRoot: '/repo/nested-repo',
+    panelRoot: '/repo',
+    changeType: 'unstaged'
+  })
+
+  assert.equal(buildDiffLocateRouteTarget(null, '/repo'), null)
 })

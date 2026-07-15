@@ -58,7 +58,9 @@ import { PreviewSearchBar } from './PreviewSearch/PreviewSearchBar'
 import type { PreviewSearchHandle } from './PreviewSearch/PreviewSearchBar'
 import { SqliteViewer } from './SqliteViewer'
 import { PdfReader, type PdfReaderHandle } from './PdfReader'
-import { EpubReader, type EpubReaderHandle } from './EpubReader'
+import { mergePdfReaderState } from './pdfReaderState'
+import { EpubReader, type EpubReaderHandle, type EpubReaderProgress } from './EpubReader'
+import { isEpubFrameContentReady } from './epubReaderState'
 import { HtmlReader, type HtmlReaderState } from './HtmlReader'
 import { HtmlPreviewSearchBar, type HtmlPreviewSearchResult } from './HtmlPreviewSearchBar'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
@@ -74,7 +76,7 @@ import {
   HTML_PREVIEW_MIN_ZOOM_FACTOR,
   isHtmlPreviewRefreshShortcut,
   isHtmlPath,
-  isSameHtmlPreviewDocument,
+  isSameHtmlPreviewFile,
   normalizeHtmlPreviewScrollState,
   normalizeHtmlPreviewZoomFactor,
   stepHtmlPreviewZoomFactor,
@@ -105,11 +107,19 @@ import {
 } from './quickFileUtils'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from './setiFileIconTheme'
 import {
-  buildDiffReturnBarState,
+  buildDiffLocateRouteTarget,
   findDiffFileForEditorPath,
   resolveNavigationFilePath,
   type DiffJumpTarget
 } from './diffJumpState'
+import {
+  buildSubpageReturnBarState,
+  canConsumeProjectEditorOpenRequest,
+  isResourceBackedSoftSnapshot,
+  shouldForceHtmlPreviewForNavigation,
+  shouldReloadResourceBackedViewer,
+  type SubpageReturnSource
+} from './navigationState'
 import { performanceTrace } from '../../utils/performance-trace'
 import './ProjectEditor.css'
 
@@ -397,15 +407,19 @@ type ProjectEditorSoftCloseSnapshot = {
   isPdf: boolean
   isEpub: boolean
   isHtml: boolean
+  isLargeFile: boolean
   isMarkdownPreviewOpen: boolean
   isMarkdownEditorVisible: boolean
   outlineTarget: OutlineTarget
 }
 
-type DiffReturnContext = {
+type SourceReturnContext = {
   terminalId: string
+  source: SubpageReturnSource
   filePath: string | null
   repoRoot: string | null
+  panelRoot: string | null
+  changeType: DiffJumpTarget['changeType'] | null
   createdAt: number
 }
 
@@ -1243,7 +1257,7 @@ export function ProjectEditor({
     // transplant the foreign page's offset onto the freshly remounted home
     // document; instead let the home document render from the top.
     const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
-    const onHomeDocument = isSameHtmlPreviewDocument(reader?.url ?? null, homeUrl)
+    const onHomeDocument = isSameHtmlPreviewFile(reader?.url ?? null, homeUrl)
     if (browserId && onHomeDocument) {
       const scrollResult = await window.electronAPI.browser.getScrollState(browserId)
       if (activeFilePathRef.current !== targetPath) return
@@ -1488,10 +1502,10 @@ export function ProjectEditor({
   const profileRunRef = useRef(false)
   const autotestRunRef = useRef(false)
   const autotestBootstrapLogRef = useRef<string | null>(null)
-  const openGitDiffRef = useRef<(source?: 'user' | 'debug', target?: { filePath?: string | null; repoRoot?: string | null }) => Promise<void>>(async () => {})
+  const openGitDiffRef = useRef<(source?: 'user' | 'debug', target?: { filePath?: string | null; repoRoot?: string | null; panelRoot?: string | null; changeType?: DiffJumpTarget['changeType'] | null }) => Promise<void>>(async () => {})
   const lastHandledOpenRequestRef = useRef<number | null>(null)
-  const [diffReturnContext, setDiffReturnContext] = useState<DiffReturnContext | null>(null)
-  const diffReturnContextRef = useRef<DiffReturnContext | null>(null)
+  const [sourceReturnContext, setSourceReturnContext] = useState<SourceReturnContext | null>(null)
+  const sourceReturnContextRef = useRef<SourceReturnContext | null>(null)
   const [diffJumpTarget, setDiffJumpTarget] = useState<DiffJumpTarget | null>(null)
   const diffJumpTargetRef = useRef<DiffJumpTarget | null>(null)
   const setDiffJumpTargetValue = useCallback((nextTarget: DiffJumpTarget | null) => {
@@ -1502,8 +1516,8 @@ export function ProjectEditor({
   const diffJumpCheckTokenRef = useRef(0)
 
   useEffect(() => {
-    diffReturnContextRef.current = diffReturnContext
-  }, [diffReturnContext])
+    sourceReturnContextRef.current = sourceReturnContext
+  }, [sourceReturnContext])
 
   const originalContentRef = useRef('')
   const originalModelVersionRef = useRef<number | null>(null)
@@ -1761,6 +1775,7 @@ export function ProjectEditor({
   const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
 
   const restoreTokenRef = useRef(0)
+  const [initializedScopeKey, setInitializedScopeKey] = useState<string | null>(null)
   /** Unified per-file position & view state memory. Key = normalized file path (no scope). */
   const fileMemoryRef = useRef<Map<string, import('../../types/tab').FileViewMemory>>(new Map())
   const [missingFileNotice, setMissingFileNotice] = useState<{
@@ -2660,7 +2675,13 @@ export function ProjectEditor({
     const oTop = oKey ? outlineScrollTopRef.current.get(oKey) : undefined
     if (typeof oTop === 'number') entry.outlineScrollTop = oTop
 
-	    // 4. Markdown view mode
+    // 4. Resource-backed reader state must be captured before its iframe unmounts.
+    if (isPdfRef.current) {
+      const pdfState = pdfReaderRef.current?.getCurrentState()
+      if (pdfState) Object.assign(entry, mergePdfReaderState(entry, pdfState))
+    }
+
+	    // 5. Markdown view mode
 	    if (isMarkdownPath(filePath)) {
 	      entry.isPreviewOpen = isMarkdownPreviewOpenRef.current
 	      entry.isEditorVisible = isMarkdownEditorVisibleRef.current
@@ -2690,7 +2711,7 @@ export function ProjectEditor({
     // capturing there would transplant another page's offset into this
     // file's memory. Keep the last on-home offset instead.
     const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
-    if (!isSameHtmlPreviewDocument(htmlReaderStateRef.current?.url ?? null, homeUrl)) {
+    if (!isSameHtmlPreviewFile(htmlReaderStateRef.current?.url ?? null, homeUrl)) {
       const skippedPayload = { ph: 'i', site, skipped: 'off-home' }
       if (site === 'poll') {
         perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED, skippedPayload)
@@ -3419,6 +3440,7 @@ export function ProjectEditor({
       isPdf: isPdfRef.current,
       isEpub: isEpubRef.current,
       isHtml: isHtmlRef.current,
+      isLargeFile: largeFileStateRef.current !== null,
       isMarkdownPreviewOpen: isMarkdownPreviewOpenRef.current,
       isMarkdownEditorVisible: isMarkdownEditorVisibleRef.current,
       outlineTarget: outlineTargetRef.current
@@ -3840,12 +3862,6 @@ export function ProjectEditor({
     })
     return unsubscribe
   }, [setHtmlPreviewZoomFactorState])
-
-  useEffect(() => {
-    const browserId = htmlReaderState?.browserId
-    if (!browserId) return
-    void window.electronAPI.browser.setZoomFactor(browserId, htmlPreviewZoomFactorRef.current)
-  }, [htmlReaderState?.browserId])
 
   useEffect(() => {
     if (!htmlPreviewSearchOpen) return
@@ -5145,7 +5161,20 @@ export function ProjectEditor({
       }
     }
 
-    if (currentActiveFilePath === path && !options?.forceReload) {
+    const shouldReloadMissingViewerResource = shouldReloadResourceBackedViewer({
+      activeFilePath: currentActiveFilePath,
+      requestedFilePath: path,
+      hasUsablePreviewResource: Boolean(
+        imagePreviewUrl
+        || pdfPreviewUrl
+        || epubPreviewUrl
+        || htmlPreviewUrlRef.current
+        || isSqliteRef.current
+        || largeFileStateRef.current
+      )
+    })
+
+    if (currentActiveFilePath === path && !options?.forceReload && !shouldReloadMissingViewerResource) {
       setSelectedPath(path)
       if (source === 'user' && options?.trackRecent) {
         touchRecentFile(path)
@@ -5242,7 +5271,7 @@ export function ProjectEditor({
       return
     }
 
-    if (diffReturnContextRef.current) {
+    if (sourceReturnContextRef.current?.source === 'diff') {
       setDiffJumpTargetValue(null)
     }
 
@@ -5598,6 +5627,14 @@ export function ProjectEditor({
 
     const isMarkdownFile = isMarkdownPath(path)
     const shouldEnableMarkdown = shouldEnableMarkdownForOpen(source, isMarkdownFile)
+    if (shouldForceHtmlPreviewForNavigation({
+      isHtml: htmlFile,
+      forceReload: options?.forceReload === true,
+      previewOpen: isMarkdownPreviewOpenRef.current
+    })) {
+      isMarkdownPreviewOpenRef.current = true
+      setIsMarkdownPreviewOpen(true)
+    }
     // Self-heal the preview-open state for an explicit markdown open. After a
     // project-editor reopen (e.g. PMN-40 -> PMN-41) the openFile call can latch a
     // racing snapshot in which `isMarkdownPreviewOpenRef.current` is still false,
@@ -5666,8 +5703,11 @@ export function ProjectEditor({
     beginPreviewRestore,
     clearActiveFileState,
     confirmDiscardChanges,
+    epubPreviewUrl,
+    imagePreviewUrl,
     isMarkdownPreviewOpen,
     loadLargeFileChunk,
+    pdfPreviewUrl,
     removeQuickFileEntries,
     requestConfirm,
     requestFileOpenChoice,
@@ -5951,21 +5991,40 @@ export function ProjectEditor({
   }, [isOpen, rootPath])
 
   useEffect(() => {
-    if (!isOpen || !openRequest) return
-    if (lastHandledOpenRequestRef.current === openRequest.id) return
-    if (!_terminalId || openRequest.terminalId !== _terminalId) return
-    if (!rootPath) return
+    if (!openRequest) return
+    const canConsume = canConsumeProjectEditorOpenRequest({
+      isOpen,
+      alreadyHandled: lastHandledOpenRequestRef.current === openRequest.id,
+      requestTerminalId: openRequest.terminalId,
+      editorTerminalId: _terminalId,
+      currentRoot: rootPath,
+      expectedRoot: openRequest.expectedRoot ?? openRequest.repoRoot ?? cwd,
+      hasFileTarget: Boolean(openRequest.filePath),
+      scopeReady: !openRequest.filePath || initializedScopeKey === getScrollScopeKey(
+        buildProjectEditorScope(_terminalId, rootPath ?? cwd ?? null)
+      ),
+      platform: window.electronAPI.platform
+    })
+    if (!canConsume) return
 
     lastHandledOpenRequestRef.current = openRequest.id
-    if (openRequest.source === 'diff' || openRequest.returnTarget === 'diff') {
-      setDiffReturnContext({
+    const returnSource = openRequest.returnTarget === 'diff' || openRequest.returnTarget === 'history'
+      ? openRequest.returnTarget
+      : openRequest.source === 'diff' || openRequest.source === 'history'
+        ? openRequest.source
+        : null
+    if (returnSource) {
+      setSourceReturnContext({
         terminalId: openRequest.terminalId,
+        source: returnSource,
         filePath: openRequest.diffFilePath ?? openRequest.filePath ?? null,
         repoRoot: openRequest.diffRepoRoot ?? openRequest.repoRoot ?? null,
+        panelRoot: openRequest.panelRoot ?? openRequest.diffRepoRoot ?? openRequest.repoRoot ?? null,
+        changeType: openRequest.changeType ?? null,
         createdAt: Date.now()
       })
     } else {
-      setDiffReturnContext(null)
+      setSourceReturnContext(null)
     }
 
     if (!openRequest.filePath) {
@@ -5980,8 +6039,14 @@ export function ProjectEditor({
       if (hasSubpageReturnSnapshot) {
         // Subpage-return snapshots are one-shot: consume on apply.
         editorSoftCloseSnapshotsRef.current.delete(currentScopeKey)
-        applyEditorSoftCloseSnapshot(softCloseSnapshot)
+        const requiresResourceReload = isResourceBackedSoftSnapshot(softCloseSnapshot)
+        if (requiresResourceReload) {
+          resetActiveFileState()
+        } else {
+          applyEditorSoftCloseSnapshot(softCloseSnapshot)
+        }
         if (
+          !requiresResourceReload &&
           softCloseSnapshot.path &&
           isMarkdownPath(softCloseSnapshot.path) &&
           softCloseSnapshot.isMarkdownPreviewOpen &&
@@ -6019,8 +6084,19 @@ export function ProjectEditor({
       }
       return
     }
+    if (!rootPath) return
 
-    if (cwd && normalizeComparablePath(rootPath) !== normalizeComparablePath(cwd)) return
+    const currentScope = buildProjectEditorScope(_terminalId, rootRef.current ?? cwd ?? null)
+    const currentScopeKey = getScrollScopeKey(currentScope)
+    const softCloseSnapshot = editorSoftCloseSnapshotsRef.current.peek(currentScopeKey)
+    if (isProjectEditorSoftCloseSnapshotForScope(softCloseSnapshot, currentScope, 'subpage-return')) {
+      // An explicit file jump supersedes the one-shot Editor restore. Leaving
+      // it in the store would let the later scope effect overwrite the target.
+      editorSoftCloseSnapshotsRef.current.delete(currentScopeKey)
+      if (isResourceBackedSoftSnapshot(softCloseSnapshot)) {
+        resetActiveFileState()
+      }
+    }
 
     const navigationPath = resolveNavigationFilePath({
       editorRoot: rootPath,
@@ -6042,7 +6118,8 @@ export function ProjectEditor({
 
     void openFile(navigationPath, 'user', {
       trackRecent: true,
-      missingBehavior: 'empty-state'
+      missingBehavior: 'empty-state',
+      forceReload: true
     })
   }, [
     applyEditorSoftCloseSnapshot,
@@ -6050,9 +6127,11 @@ export function ProjectEditor({
     clearActiveFileState,
     cwd,
     isOpen,
+    initializedScopeKey,
     locale,
     openFile,
     openRequest,
+    resetActiveFileState,
     resetPreviewRestoreState,
     rootPath,
     showStatus,
@@ -6061,13 +6140,13 @@ export function ProjectEditor({
 
   useEffect(() => {
     if (isOpen) return
-    setDiffReturnContext(null)
+    setSourceReturnContext(null)
     setDiffJumpTargetValue(null)
     setDiffJumpChecking(false)
   }, [isOpen, setDiffJumpTargetValue])
 
   useEffect(() => {
-    if (!isOpen || !diffReturnContext || !rootPath || !activeFilePath) {
+    if (!isOpen || sourceReturnContext?.source !== 'diff' || !rootPath || !activeFilePath) {
       setDiffJumpTargetValue(null)
       setDiffJumpChecking(false)
       return
@@ -6079,11 +6158,22 @@ export function ProjectEditor({
     void window.electronAPI.git.getDiff(rootPath, { scope: 'full' })
       .then((result) => {
         if (diffJumpCheckTokenRef.current !== token) return
+        const sourceEditorPath = sourceReturnContext.filePath
+          ? resolveNavigationFilePath({
+              editorRoot: rootPath,
+              filePath: sourceReturnContext.filePath,
+              repoRoot: sourceReturnContext.repoRoot,
+              platform: window.electronAPI.platform
+            })
+          : null
         const match = findDiffFileForEditorPath({
           diff: result as GitDiffResult,
           editorRoot: rootPath,
           editorFilePath: activeFilePath,
-          platform: window.electronAPI.platform
+          platform: window.electronAPI.platform,
+          changeType: sourceEditorPath === activeFilePath
+            ? sourceReturnContext.changeType
+            : null
         })
         setDiffJumpTargetValue(match
           ? {
@@ -6103,7 +6193,7 @@ export function ProjectEditor({
           setDiffJumpChecking(false)
         }
       })
-  }, [activeFilePath, diffReturnContext, isOpen, rootPath, setDiffJumpTargetValue])
+  }, [activeFilePath, isOpen, rootPath, setDiffJumpTargetValue, sourceReturnContext])
 
   useEffect(() => {
     const currentScope = buildProjectEditorScope(_terminalId, rootRef.current ?? cwd ?? null)
@@ -6116,6 +6206,7 @@ export function ProjectEditor({
         }
       }
       lastEditorScopeRef.current = null
+      setInitializedScopeKey(null)
       wasOpenRef.current = false
       return
     }
@@ -6137,11 +6228,37 @@ export function ProjectEditor({
       // longer clears this scope's snapshot.
       const currentScopeKey = getScrollScopeKey(currentScope)
       const scopedSoftCloseSnapshot = editorSoftCloseSnapshotsRef.current.get(currentScopeKey)
-      const hadSubpageReturnSnapshot = scopedSoftCloseSnapshot?.kind === 'subpage-return'
-      if (hadSubpageReturnSnapshot) {
+      const pendingExplicitFileOpen = Boolean(
+        openRequest?.filePath
+        && canConsumeProjectEditorOpenRequest({
+          isOpen,
+          alreadyHandled: lastHandledOpenRequestRef.current === openRequest.id,
+          requestTerminalId: openRequest.terminalId,
+          editorTerminalId: _terminalId,
+          currentRoot: rootRef.current,
+          expectedRoot: openRequest.expectedRoot ?? openRequest.repoRoot ?? cwd,
+          hasFileTarget: true,
+          scopeReady: true,
+          platform: window.electronAPI.platform
+        })
+      )
+      const hasStoredSubpageReturnSnapshot = scopedSoftCloseSnapshot?.kind === 'subpage-return'
+      const hadSubpageReturnSnapshot = hasStoredSubpageReturnSnapshot && !pendingExplicitFileOpen
+      const subpageSnapshotRequiresReload = Boolean(
+        hadSubpageReturnSnapshot
+        && scopedSoftCloseSnapshot
+        && isResourceBackedSoftSnapshot(scopedSoftCloseSnapshot)
+      )
+      if (hasStoredSubpageReturnSnapshot) {
         // Subpage-return snapshots are one-shot: consume on apply.
         editorSoftCloseSnapshotsRef.current.delete(currentScopeKey)
-        applyEditorSoftCloseSnapshot(scopedSoftCloseSnapshot)
+      }
+      if (hadSubpageReturnSnapshot) {
+        if (subpageSnapshotRequiresReload) {
+          resetActiveFileState()
+        } else {
+          applyEditorSoftCloseSnapshot(scopedSoftCloseSnapshot)
+        }
       }
       if (scopeChanged || !wasOpenRef.current) {
         // Ownership reconciliation for the same-root Task switch: the live
@@ -6177,7 +6294,7 @@ export function ProjectEditor({
           } else {
             resetActiveFileState()
           }
-        } else if (liveViewIsForeign && !hadSubpageReturnSnapshot) {
+        } else if (liveViewIsForeign && (!hadSubpageReturnSnapshot || subpageSnapshotRequiresReload)) {
           // No snapshot for this scope: never keep a foreign file on screen.
           resetActiveFileState()
         }
@@ -6200,7 +6317,7 @@ export function ProjectEditor({
           )
         }
         restoredStateRef.current = getProjectEditorState(currentScope)
-        hasRestoredStateRef.current = false
+        hasRestoredStateRef.current = pendingExplicitFileOpen
         restoringStateRef.current = false
 
         // Load unified per-file memory from persisted fileStates
@@ -6216,6 +6333,7 @@ export function ProjectEditor({
         if (!storedState?.fileStates && storedState?.activeFilePath && backCompatEntry) {
           fileMemoryRef.current.set(storedState.activeFilePath, backCompatEntry)
         }
+        setInitializedScopeKey(currentScopeKey)
 
         const markdownRestorePath =
           storedState?.activeFilePath && isMarkdownPath(storedState.activeFilePath)
@@ -6439,6 +6557,7 @@ export function ProjectEditor({
     finalizeProjectEditorReopenRestore,
     getProjectEditorState,
     isOpen,
+    openRequest,
     persistProjectEditorState,
     resetActiveFileState,
     resetPreviewRestoreState,
@@ -8160,7 +8279,7 @@ export function ProjectEditor({
 
   const handleOpenGitDiff = useCallback(async (
     source: 'user' | 'debug' = 'user',
-    targetFile?: { filePath?: string | null; repoRoot?: string | null }
+    targetFile?: { filePath?: string | null; repoRoot?: string | null; panelRoot?: string | null; changeType?: DiffJumpTarget['changeType'] | null }
   ) => {
     if (!_terminalId) return
     if (DEBUG_PROJECT_EDITOR) {
@@ -8211,7 +8330,9 @@ export function ProjectEditor({
       intent: targetFile?.filePath ? 'jump' : 'switch',
       entryPoint: targetFile?.filePath ? 'deep-link' : 'subpage-switcher',
       filePath: targetFile?.filePath ?? null,
-      repoRoot: targetFile?.repoRoot ?? null
+      repoRoot: targetFile?.repoRoot ?? null,
+      panelRoot: targetFile?.panelRoot ?? null,
+      changeType: targetFile?.changeType ?? null
     }
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {
       target: 'diff',
@@ -8233,28 +8354,34 @@ export function ProjectEditor({
   ])
 
   const handleBackToDiff = useCallback(async () => {
-    if (!diffReturnContextRef.current) return false
-    await handleOpenGitDiff('user')
+    const context = sourceReturnContextRef.current
+    if (context?.source !== 'diff') return false
+    await handleOpenGitDiff('user', { panelRoot: context.panelRoot })
     return true
   }, [handleOpenGitDiff])
 
   const handleJumpToDiff = useCallback(async () => {
     const target = diffJumpTargetRef.current
-    if (!target) return false
+    const context = sourceReturnContextRef.current
+    const routeTarget = buildDiffLocateRouteTarget(
+      target,
+      context?.source === 'diff' ? context.panelRoot : null
+    )
+    if (!target || !routeTarget) return false
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF, {
       terminalId: _terminalId,
       filename: target.filename,
       repoRoot: target.repoRoot,
       changeType: target.changeType
     })
-    await handleOpenGitDiff('user', {
-      filePath: target.filename,
-      repoRoot: target.repoRoot
-    })
+    await handleOpenGitDiff('user', routeTarget)
     return true
   }, [_terminalId, handleOpenGitDiff])
 
-  const handleOpenGitHistory = useCallback(async (source: 'user' | 'debug' = 'user') => {
+  const handleOpenGitHistory = useCallback(async (
+    source: 'user' | 'debug' = 'user',
+    panelRoot?: string | null
+  ) => {
     if (!_terminalId) return
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('githistory:open:start', {
@@ -8285,7 +8412,8 @@ export function ProjectEditor({
       target: 'history',
       from: 'editor',
       intent: 'switch',
-      entryPoint: 'subpage-switcher'
+      entryPoint: 'subpage-switcher',
+      panelRoot: panelRoot ?? null
     }
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {
       target: 'history',
@@ -8302,6 +8430,19 @@ export function ProjectEditor({
     persistProjectEditorState,
     resetActiveFileState
   ])
+
+  const handleBackToSource = useCallback(async () => {
+    const context = sourceReturnContextRef.current
+    if (context?.source === 'diff') {
+      await handleOpenGitDiff('user', { panelRoot: context.panelRoot })
+      return true
+    }
+    if (context?.source === 'history') {
+      await handleOpenGitHistory('user', context.panelRoot)
+      return true
+    }
+    return false
+  }, [handleOpenGitDiff, handleOpenGitHistory])
 
   const handleSelectSubpage = useCallback((target: SubpageId) => {
     if (target === 'diff') {
@@ -8333,10 +8474,17 @@ export function ProjectEditor({
         )
       },
       getLastProjectEditorReopenRestore: () => lastProjectEditorReopenRestoreRef.current,
-      getDiffReturnBarState: () => buildDiffReturnBarState({
-        hasDiffReturnContext: Boolean(diffReturnContextRef.current),
-        diffJumpTarget: diffJumpTargetRef.current,
-        diffJumpChecking,
+      getSourceReturnBarState: () => buildSubpageReturnBarState({
+        source: sourceReturnContextRef.current?.source ?? null,
+        jumpTarget: diffJumpTargetRef.current,
+        jumpChecking: diffJumpChecking,
+        activeFilePath: activeFilePathRef.current
+      }),
+      triggerSourceReturnBack: async () => handleBackToSource(),
+      getDiffReturnBarState: () => buildSubpageReturnBarState({
+        source: sourceReturnContextRef.current?.source === 'diff' ? 'diff' : null,
+        jumpTarget: diffJumpTargetRef.current,
+        jumpChecking: diffJumpChecking,
         activeFilePath: activeFilePathRef.current
       }),
       triggerDiffReturnBack: async () => handleBackToDiff(),
@@ -8534,7 +8682,9 @@ export function ProjectEditor({
         return {
           visible: Boolean(iframe),
           src: iframe?.src ?? null,
-          filePath: activeFilePathRef.current
+          filePath: activeFilePathRef.current,
+          stateReady: pdfReaderRef.current?.isStateReady() ?? false,
+          currentState: pdfReaderRef.current?.getCurrentState() ?? null
         }
       },
       isEpubReaderVisible: () => {
@@ -8545,6 +8695,7 @@ export function ProjectEditor({
         const root: ParentNode = modalRef.current ?? document
         const container = root.querySelector('.project-editor-epub-reader') as HTMLElement | null
         const contentNode = container?.querySelector('.project-editor-epub-content') as HTMLElement | null
+        const scrollNode = contentNode?.querySelector('.epub-container') as HTMLElement | null
         // TOC now lives in the shared OutlinePanel; fall back to the state
         // snapshot so this stays accurate regardless of whether the panel
         // is currently visible (e.g. outline collapsed by the user).
@@ -8553,25 +8704,62 @@ export function ProjectEditor({
         const fontSizeLabel = container?.querySelector('.project-editor-epub-fontsize-value')?.textContent?.trim() ?? null
         const errorNode = container?.querySelector('.project-editor-epub-error') as HTMLElement | null
         const errorMessage = errorNode?.textContent?.trim() ?? null
-        // Content is rendered when epub.js has added any descendant node (it injects
-        // a wrapper <div> and an <iframe>) or when text content exists in the DOM.
-        const hasContent = Boolean(
-          contentNode && (
-            contentNode.querySelector('iframe') ||
-            contentNode.childElementCount > 0 ||
-            (contentNode.textContent && contentNode.textContent.trim().length > 0)
-          )
+        const frame = contentNode?.querySelector<HTMLIFrameElement>('iframe') ?? null
+        let bodyChildCount = 0
+        let bodyTextLength = 0
+        let bodyFontSizePx: number | null = null
+        try {
+          const body = frame?.contentDocument?.body ?? null
+          bodyChildCount = body?.childElementCount ?? 0
+          bodyTextLength = body?.textContent?.trim().length ?? 0
+          if (body && frame?.contentWindow) {
+            const parsedFontSize = Number.parseFloat(frame.contentWindow.getComputedStyle(body).fontSize)
+            bodyFontSizePx = Number.isFinite(parsedFontSize) ? parsedFontSize : null
+          }
+        } catch {
+          // The EPUB frame is same-origin in normal operation. Treat an
+          // inaccessible frame as not ready instead of accepting its wrapper.
+        }
+        const hasContent = isEpubFrameContentReady({
+          hasFrame: Boolean(frame),
+          bodyChildCount,
+          bodyTextLength
+        })
+        const progress = (window as unknown as {
+          __onwardEpubReaderProgress?: EpubReaderProgress
+        }).__onwardEpubReaderProgress
+        const progressIsCurrentFile = progress?.filePath === activeFilePathRef.current
+        const stateReady = Boolean(
+          progressIsCurrentFile
+          && progress.stateReady
+          && progress.latestAttemptId > 0
+          && progress.settledAttemptId === progress.latestAttemptId
+          && progress.readyAttemptId === progress.latestAttemptId
+          && hasContent
+          && tocNodes.length >= 2
         )
-        const progress = (window as unknown as { __onwardEpubReaderProgress?: { lastLocationHref?: string | null } }).__onwardEpubReaderProgress
         return {
           visible: Boolean(container),
           hasContent,
+          stateReady,
           tocCount: tocNodes.length,
           fontSizeLabel,
           filePath: activeFilePathRef.current,
           errorMessage,
           contentHtmlLen: contentNode?.innerHTML?.length ?? 0,
-          currentLocationHref: progress?.lastLocationHref ?? null
+          currentLocationHref: progress?.lastLocationHref ?? null,
+          currentLocationCfi: progress?.lastLocationCfi ?? null,
+          sessionId: progressIsCurrentFile ? progress?.sessionId ?? null : null,
+          latestAttemptId: progressIsCurrentFile ? progress?.latestAttemptId ?? null : null,
+          settledAttemptId: progressIsCurrentFile ? progress?.settledAttemptId ?? null : null,
+          readyAttemptId: progressIsCurrentFile ? progress?.readyAttemptId ?? null : null,
+          latestTarget: progressIsCurrentFile ? progress?.latestTarget ?? null : null,
+          appliedFontPct: progressIsCurrentFile ? progress?.appliedFontPct ?? null : null,
+          bodyFontSizePx,
+          scrollTop: scrollNode?.scrollTop ?? 0,
+          maxScrollTop: scrollNode
+            ? Math.max(0, scrollNode.scrollHeight - scrollNode.clientHeight)
+            : 0
         }
       },
       isHtmlReaderVisible: () => {
@@ -8594,6 +8782,8 @@ export function ProjectEditor({
           canGoBack: state.canGoBack,
           canGoForward: state.canGoForward,
           error: state.error,
+          scrollRestoreStatus: state.scrollRestoreStatus,
+          restoredScrollY: state.restoredScrollY,
           preservedScrollState: htmlPreviewScrollStateRef.current
         }
       },
@@ -8627,6 +8817,8 @@ export function ProjectEditor({
             readyState: document.readyState,
             bodyText: (document.body && document.body.innerText ? document.body.innerText : '').slice(0, 20000),
             bodyDatasetMarker: document.body ? document.body.dataset.onwardHtmlPreviewFixture || null : null,
+            relativeScriptMarker: document.body ? document.body.dataset.onwardRelativeScript || null : null,
+            navigationAccent: getComputedStyle(document.documentElement).getPropertyValue('--navigation-accent').trim() || null,
             externalReady: Boolean(window.__ONWARD_HTML_EXTERNAL_READY),
             localReady: Boolean(window.__ONWARD_HTML_LOCAL_READY),
             saveMarker: document.querySelector('[data-save-marker]') ? document.querySelector('[data-save-marker]').textContent : null,
@@ -10842,13 +11034,8 @@ export function ProjectEditor({
                           onOutlineLoaded={setPdfOutlineSymbols}
                           onPageChange={setPdfActivePage}
                           onStateChange={(state) => {
-                            const current = fileMemoryRef.current.get(normalized) ?? {}
-                            const merged: FileViewMemory = {
-                              ...current,
-                              pdfPageNumber: state.page,
-                              pdfScrollTop: state.scrollTop,
-                              ...(state.scale ? { pdfScale: state.scale } : {})
-                            }
+                            const current = fileMemoryRef.current.get(normalized)
+                            const merged = mergePdfReaderState(current, state)
                             upsertFileMemory(normalized, merged)
                             scheduleProjectStateSave()
                           }}
@@ -10906,6 +11093,7 @@ export function ProjectEditor({
                     <div className="project-editor-split" ref={previewLayoutRef}>
                       <div className="project-editor-editor-pane" style={{ flex: '1 1 0%' }}>
                         <EpubReader
+                          key={activeFilePath}
                           ref={epubReaderRef}
                           previewBuffer={epubPreviewBuffer}
                           filePath={activeFilePath}
@@ -11270,6 +11458,7 @@ export function ProjectEditor({
                             filePath={activeFilePath}
                             reloadKey={htmlPreviewReloadKey}
                             isActive={isOpen && isHtmlPreviewVisible}
+                            zoomFactor={htmlPreviewZoomFactor}
                             restoreScrollState={htmlPreviewScrollState}
                             onEscape={() => {
                               if (htmlPreviewSearchOpenRef.current) {
@@ -11351,26 +11540,32 @@ export function ProjectEditor({
           </div>
         </div>
 
-        {diffReturnContext && (
+        {sourceReturnContext && (
           <div className="project-editor-diff-return-bar">
             <button
               type="button"
               className="project-editor-diff-return-button"
-              onClick={() => void handleBackToDiff()}
+              data-testid="project-editor-source-return-back"
+              onClick={() => void handleBackToSource()}
             >
-              {t('projectEditor.diffReturn.back')}
+              {sourceReturnContext.source === 'diff'
+                ? t('projectEditor.sourceReturn.backToDiff')
+                : t('projectEditor.sourceReturn.backToHistory')}
             </button>
-            <button
-              type="button"
-              className="project-editor-diff-return-button primary"
-              onClick={() => void handleJumpToDiff()}
-              disabled={!diffJumpTarget || diffJumpChecking}
-              title={diffJumpTarget
-                ? t('projectEditor.diffReturn.jumpTitle')
-                : t('projectEditor.diffReturn.jumpDisabled')}
-            >
-              {diffJumpChecking ? t('projectEditor.diffReturn.checking') : t('projectEditor.diffReturn.jump')}
-            </button>
+            {sourceReturnContext.source === 'diff' && (
+              <button
+                type="button"
+                className="project-editor-diff-return-button primary"
+                data-testid="project-editor-source-return-jump"
+                onClick={() => void handleJumpToDiff()}
+                disabled={!diffJumpTarget || diffJumpChecking}
+                title={diffJumpTarget
+                  ? t('projectEditor.diffReturn.jumpTitle')
+                  : t('projectEditor.diffReturn.jumpDisabled')}
+              >
+                {diffJumpChecking ? t('projectEditor.diffReturn.checking') : t('projectEditor.diffReturn.jump')}
+              </button>
+            )}
           </div>
         )}
 

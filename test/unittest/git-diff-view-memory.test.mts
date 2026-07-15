@@ -8,9 +8,14 @@ import assert from 'node:assert/strict'
 import type { GitFileStatus } from '../../src/types/electron.ts'
 import {
   buildGitDiffFileKey,
+  buildGitDiffSelectionSnapshot,
   clearGitDiffMemorySelection,
   clearGitDiffMemorySelectionWhenEmpty,
+  mergeGitDiffSnapshotScroll,
+  resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
+  resolveGitDiffSnapshotSelection,
+  shouldRestoreGitDiffSnapshotScroll,
   type DiffViewMemory
 } from '../../src/components/GitDiffViewer/diffViewMemory.ts'
 
@@ -54,6 +59,82 @@ describe('git diff view memory', () => {
 
     const restored = resolveGitDiffRestoredSelection(files, '/repo', memory, null)
     assert.equal(restored?.filename, 'existing.md')
+  })
+
+  it('restores the exact staged or unstaged entry when both share one path', () => {
+    const files = [
+      gitFile('dual-state.ts', 'unstaged'),
+      gitFile('dual-state.ts', 'staged')
+    ]
+    const stagedKey = buildGitDiffFileKey('/repo', files[1])
+    const memory: DiffViewMemory = {
+      selectedFileKey: stagedKey,
+      entries: {}
+    }
+
+    const restored = resolveGitDiffRestoredSelection(files, '/repo', memory, null)
+    assert.equal(restored?.changeType, 'staged')
+  })
+
+  it('builds path and key atomically from the same live staged selection', () => {
+    const liveFile = gitFile('dual-state.ts', 'staged')
+    const snapshot = buildGitDiffSelectionSnapshot('/repo', liveFile)
+
+    assert.equal(snapshot.selectedFilePath, 'dual-state.ts')
+    assert.equal(snapshot.selectedFileKey, buildGitDiffFileKey('/repo', liveFile))
+    assert.match(snapshot.selectedFileKey ?? '', /::staged::/)
+  })
+
+  it('rejects a stale key that points to a different path before falling back to the snapshot path', () => {
+    const navigate = gitFile('navigate.ts', 'unstaged')
+    const stagedDualState = gitFile('dual-state.ts', 'staged')
+    const restored = resolveGitDiffSnapshotSelection(
+      [navigate, stagedDualState],
+      '/repo',
+      {
+        selectedFilePath: 'dual-state.ts',
+        selectedFileKey: buildGitDiffFileKey('/repo', navigate)
+      }
+    )
+
+    assert.equal(restored?.filename, 'dual-state.ts')
+    assert.equal(restored?.changeType, 'staged')
+  })
+
+  it('does not fall back from a missing staged snapshot identity to the unstaged entry at the same path', () => {
+    const stagedDualState = gitFile('dual-state.ts', 'staged')
+    const restored = resolveGitDiffSnapshotSelection(
+      [gitFile('dual-state.ts', 'unstaged')],
+      '/repo',
+      buildGitDiffSelectionSnapshot('/repo', stagedDualState)
+    )
+
+    assert.equal(restored, null)
+  })
+
+  it('does not fall back from a missing unstaged snapshot identity to the staged entry at the same path', () => {
+    const unstagedDualState = gitFile('dual-state.ts', 'unstaged')
+    const restored = resolveGitDiffSnapshotSelection(
+      [gitFile('dual-state.ts', 'staged')],
+      '/repo',
+      buildGitDiffSelectionSnapshot('/repo', unstagedDualState)
+    )
+
+    assert.equal(restored, null)
+  })
+
+  it('keeps path-only legacy snapshots compatible', () => {
+    const restored = resolveGitDiffSnapshotSelection(
+      [gitFile('legacy.ts', 'unstaged')],
+      '/repo',
+      {
+        selectedFilePath: 'legacy.ts',
+        selectedFileKey: null
+      }
+    )
+
+    assert.equal(restored?.filename, 'legacy.ts')
+    assert.equal(restored?.changeType, 'unstaged')
   })
 
   it('falls back to memory entry path matching when the stored key is stale', () => {
@@ -130,5 +211,83 @@ describe('git diff view memory', () => {
     clearGitDiffMemorySelection(memory)
     assert.equal(memory.selectedFileKey, null)
     assert.deepEqual(memory.entries[key]?.anchor, { line: 8, scrollTop: 120 })
+  })
+
+  it('merges an authoritative subpage snapshot scroll into the exact file entry', () => {
+    const file = gitFile('long.ts')
+    const key = buildGitDiffFileKey('/repo', file)
+    const memory: DiffViewMemory = {
+      selectedFileKey: null,
+      entries: {
+        [key]: {
+          fileKey: key,
+          filePath: file.filename,
+          anchor: { line: 64, scrollTop: 80 },
+          scrollTop: 80,
+          signature: 'same-content',
+          updatedAt: 1
+        }
+      }
+    }
+
+    assert.equal(mergeGitDiffSnapshotScroll(memory, file, key, 2402, 2), true)
+    assert.equal(memory.selectedFileKey, key)
+    assert.deepEqual(memory.entries[key], {
+      fileKey: key,
+      filePath: file.filename,
+      originalFilename: undefined,
+      anchor: { line: 64, scrollTop: 2402 },
+      scrollTop: 2402,
+      signature: 'same-content',
+      updatedAt: 2
+    })
+  })
+
+  it('rejects invalid subpage snapshot scroll values without changing memory', () => {
+    const file = gitFile('long.ts')
+    const key = buildGitDiffFileKey('/repo', file)
+    const memory: DiffViewMemory = { selectedFileKey: null, entries: {} }
+
+    assert.equal(mergeGitDiffSnapshotScroll(memory, file, key, Number.NaN), false)
+    assert.equal(mergeGitDiffSnapshotScroll(memory, file, key, -1), false)
+    assert.deepEqual(memory, { selectedFileKey: null, entries: {} })
+  })
+
+  it('does not reuse staged memory when merging an unstaged snapshot for the same path', () => {
+    const staged = gitFile('dual-state.ts', 'staged')
+    const unstaged = gitFile('dual-state.ts', 'unstaged')
+    const stagedKey = buildGitDiffFileKey('/repo', staged)
+    const unstagedKey = buildGitDiffFileKey('/repo', unstaged)
+    const memory: DiffViewMemory = {
+      selectedFileKey: stagedKey,
+      entries: {
+        [stagedKey]: {
+          fileKey: stagedKey,
+          filePath: staged.filename,
+          anchor: { line: 50, scrollTop: 900 },
+          scrollTop: 900,
+          signature: 'staged-content',
+          updatedAt: 1
+        }
+      }
+    }
+
+    assert.equal(mergeGitDiffSnapshotScroll(memory, unstaged, unstagedKey, 120, 2), true)
+    assert.equal(memory.entries[unstagedKey]?.signature, null)
+    assert.deepEqual(memory.entries[unstagedKey]?.anchor, { line: null, scrollTop: 120 })
+    assert.equal(memory.entries[stagedKey]?.signature, 'staged-content')
+  })
+
+  it('restores pixels only while the diff content signature remains unchanged', () => {
+    assert.equal(shouldRestoreGitDiffSnapshotScroll(null, 'current'), true)
+    assert.equal(shouldRestoreGitDiffSnapshotScroll('same', 'same'), true)
+    assert.equal(shouldRestoreGitDiffSnapshotScroll('before', 'after'), false)
+  })
+
+  it('clamps a snapshot scroll when the viewport grows and rejects invalid geometry', () => {
+    assert.equal(resolveGitDiffSnapshotScrollTop(2400, 3000, 500), 2400)
+    assert.equal(resolveGitDiffSnapshotScrollTop(2400, 3000, 900), 2100)
+    assert.equal(resolveGitDiffSnapshotScrollTop(Number.NaN, 3000, 500), null)
+    assert.equal(resolveGitDiffSnapshotScrollTop(10, 3000, -1), null)
   })
 })
