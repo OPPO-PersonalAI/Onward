@@ -1404,6 +1404,18 @@ export interface BrowserAPI {
   onFindShortcutPressed: (callback: (id: string) => void) => () => void
   onReloadShortcutPressed: (callback: (id: string) => void) => () => void
   onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => () => void
+  onWebviewInput: (callback: (webContentsId: number, action: 'escape' | 'reload' | 'zoom-in' | 'zoom-out' | 'zoom-reset') => void) => () => void
+}
+
+export interface HtmlPreviewAPI {
+  createSession: (rootPath: string, filePath: string, reloadKey: number) => Promise<{
+    success: boolean
+    sessionId?: string
+    url?: string
+    error?: string
+  }>
+  releaseSession: (sessionId: string) => Promise<boolean>
+  validateNavigation: (sessionId: string, url: string) => Promise<boolean>
 }
 
 export interface FeedbackDiagnosticBundleVerificationCheck {
@@ -1471,6 +1483,7 @@ export interface ElectronAPI {
   changelog: ChangelogAPI
   updater: UpdaterAPI
   browser: BrowserAPI
+  htmlPreview: HtmlPreviewAPI
   feedback: FeedbackAPI
   codingAgentConfig: CodingAgentConfigAPI
   codingAgent: CodingAgentAPI
@@ -2481,6 +2494,25 @@ const browserAPI: BrowserAPI = {
     return () => {
       ipcRenderer.removeListener(IPC.BROWSER_ZOOM_FACTOR_CHANGED, listener)
     }
+  },
+  onWebviewInput: (callback) => {
+    const listener = (_: Electron.IpcRendererEvent, webContentsId: number, action: 'escape' | 'reload' | 'zoom-in' | 'zoom-out' | 'zoom-reset') => {
+      callback(webContentsId, action)
+    }
+    ipcRenderer.on(IPC.BROWSER_WEBVIEW_INPUT, listener)
+    return () => ipcRenderer.removeListener(IPC.BROWSER_WEBVIEW_INPUT, listener)
+  }
+}
+
+const htmlPreviewAPI: HtmlPreviewAPI = {
+  createSession: (rootPath, filePath, reloadKey) => {
+    return ipcRenderer.invoke(IPC.HTML_PREVIEW_CREATE_SESSION, rootPath, filePath, reloadKey)
+  },
+  releaseSession: (sessionId) => {
+    return ipcRenderer.invoke(IPC.HTML_PREVIEW_RELEASE_SESSION, sessionId)
+  },
+  validateNavigation: (sessionId, url) => {
+    return ipcRenderer.invoke(IPC.HTML_PREVIEW_VALIDATE_NAVIGATION, sessionId, url)
   }
 }
 
@@ -2550,6 +2582,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   changelog: changelogAPI,
   updater: updaterAPI,
   browser: browserAPI,
+  htmlPreview: htmlPreviewAPI,
   feedback: feedbackAPI,
   codingAgentConfig: codingAgentConfigAPI,
   codingAgent: codingAgentAPI,

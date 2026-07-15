@@ -52,6 +52,9 @@ import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 import { performanceTrace } from './performance-trace'
 import { traceStore, runRotationStressForAutotest } from './trace-store'
+import { htmlPreviewProtocolManager } from './html-preview-protocol'
+import { browserViewManager } from './browser-view-manager'
+import { isAllowedOpenBrowserGuestUrl } from '../../src/utils/browser-url'
 
 // ONWARD_SMOKE_LAUNCH=1 makes the main process self-quit once the main window
 // renderer finishes loading, after writing a ready marker to the path in
@@ -68,6 +71,7 @@ let isQuitting = false
 let installUpdateOnQuit = false
 let windowStateSaveTimer: ReturnType<typeof setTimeout> | null = null
 let lastNormalBounds: { x: number; y: number; width: number; height: number } | null = null
+const hardenedBrowserSessions = new WeakSet<Electron.Session>()
 
 // Single-instance lock keys on the resolved userData path; we MUST set
 // userData (via initializeAppIdentity) BEFORE requesting the lock so the
@@ -463,7 +467,8 @@ function createWindow(displayName: string): void {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false // Required for node-pty
+      sandbox: false, // Required for node-pty
+      webviewTag: true
     }
   }
   if (savedWindowState.x !== undefined && savedWindowState.y !== undefined) {
@@ -472,6 +477,77 @@ function createWindow(displayName: string): void {
   }
 
   mainWindow = new BrowserWindow(windowOptions)
+
+  mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    const src = params.src || 'about:blank'
+    if (process.env.ONWARD_AUTOTEST === '1') console.log('[BrowserWebview] will-attach', src)
+    if (!isAllowedOpenBrowserGuestUrl(src)) {
+      event.preventDefault()
+      return
+    }
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.nodeIntegrationInSubFrames = false
+    webPreferences.contextIsolation = true
+    webPreferences.sandbox = true
+    webPreferences.webSecurity = true
+    webPreferences.allowRunningInsecureContent = false
+    params.partition = 'persist:browser'
+    delete params.allowpopups
+  })
+
+  mainWindow.webContents.on('did-attach-webview', (_event, guestContents) => {
+    browserViewManager.registerDomWebview(guestContents.id)
+    guestContents.once('destroyed', () => browserViewManager.unregisterDomWebview(guestContents.id))
+    if (process.env.ONWARD_AUTOTEST === '1') console.log('[BrowserWebview] did-attach', guestContents.id, guestContents.getURL())
+    if (process.env.ONWARD_AUTOTEST === '1') {
+      guestContents.on('did-start-loading', () => console.log('[BrowserWebview] did-start-loading', guestContents.id, guestContents.getURL()))
+      guestContents.on('did-finish-load', () => console.log('[BrowserWebview] did-finish-load', guestContents.id, guestContents.getURL()))
+      guestContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        console.warn('[BrowserWebview] did-fail-load', { id: guestContents.id, errorCode, errorDescription, validatedURL, isMainFrame })
+      })
+      setTimeout(() => {
+        if (!guestContents.isDestroyed()) {
+          console.log('[BrowserWebview] delayed-state', guestContents.id, guestContents.getURL(), guestContents.isLoading())
+        }
+      }, 1000)
+    }
+    const guestSession = guestContents.session
+    if (!hardenedBrowserSessions.has(guestSession)) {
+      hardenedBrowserSessions.add(guestSession)
+      guestSession.setPermissionCheckHandler(() => false)
+      guestSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+      guestSession.on('will-download', (event) => event.preventDefault())
+    }
+
+    guestContents.setWindowOpenHandler(({ url }) => {
+      if (isAllowedOpenBrowserGuestUrl(url)) void guestContents.loadURL(url)
+      return { action: 'deny' }
+    })
+    guestContents.on('will-navigate', (event, url) => {
+      if (!isAllowedOpenBrowserGuestUrl(url)) event.preventDefault()
+    })
+    guestContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return
+      const key = input.key.toLowerCase()
+      const modifier = input.meta || input.control
+      let action: 'escape' | 'reload' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | null = null
+      if (key === 'escape' && !input.alt && !modifier) {
+        action = 'escape'
+      } else if (modifier && !input.alt && key === 'r') {
+        action = 'reload'
+      } else if (modifier && !input.alt && (key === '+' || key === '=')) {
+        action = 'zoom-in'
+      } else if (modifier && !input.alt && (key === '-' || key === '_')) {
+        action = 'zoom-out'
+      } else if (modifier && !input.alt && key === '0') {
+        action = 'zoom-reset'
+      }
+      if (!action) return
+      event.preventDefault()
+      mainWindow?.webContents.send(IPC.BROWSER_WEBVIEW_INPUT, guestContents.id, action)
+    })
+  })
 
   // Track normal (non-maximized, non-fullscreen) bounds for accurate restoration
   lastNormalBounds = mainWindow.getBounds()
@@ -664,6 +740,7 @@ app.whenReady().then(async () => {
   // the single-instance lock and appInfo agree on identity. Module-scope
   // call already invoked initializeAppIdentity(); no need to repeat.
   const appInfo = earlyAppInfo
+  htmlPreviewProtocolManager.register()
   performanceTrace.start()
   performanceTrace.startEventLoopMonitor()
   performanceTrace.initialize()

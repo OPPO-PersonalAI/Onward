@@ -60,7 +60,9 @@ import { SqliteViewer } from './SqliteViewer'
 import { PdfReader, type PdfReaderHandle } from './PdfReader'
 import { EpubReader, type EpubReaderHandle } from './EpubReader'
 import { HtmlReader, type HtmlReaderState } from './HtmlReader'
+import { getHtmlPreviewController } from '../../utils/html-preview-bridge'
 import { HtmlPreviewSearchBar, type HtmlPreviewSearchResult } from './HtmlPreviewSearchBar'
+import { BrowserRefreshIcon } from '../BrowserToolbarIcons'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { usePathCopy } from '../../hooks/usePathCopy'
 import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
@@ -1242,12 +1244,12 @@ export function ProjectEditor({
     // document. If the user navigated away via a link, capturing here would
     // transplant the foreign page's offset onto the freshly remounted home
     // document; instead let the home document render from the top.
-    const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
+    const homeUrl = reader?.homeUrl ?? withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
     const onHomeDocument = isSameHtmlPreviewDocument(reader?.url ?? null, homeUrl)
     if (browserId && onHomeDocument) {
-      const scrollResult = await window.electronAPI.browser.getScrollState(browserId)
+      const scrollResult = await getHtmlPreviewController(browserId)?.getScrollState()
       if (activeFilePathRef.current !== targetPath) return
-      updateHtmlPreviewScrollState(scrollResult.success
+      updateHtmlPreviewScrollState(scrollResult?.success
         ? normalizeHtmlPreviewScrollState(scrollResult.state)
         : null)
     } else {
@@ -1281,18 +1283,19 @@ export function ProjectEditor({
       perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_NAV, { action, source, rejected: 'no-browser' })
       return false
     }
+    const controller = getHtmlPreviewController(browserId)
+    if (!controller) return false
     let ok = false
     if (action === 'back') {
-      ok = await window.electronAPI.browser.goBack(browserId)
+      ok = await controller.goBack()
     } else if (action === 'forward') {
-      ok = await window.electronAPI.browser.goForward(browserId)
+      ok = await controller.goForward()
     } else if (action === 'reload') {
       // Hard reload: inherits the removed force-refresh button's guarantee of
       // fresh disk content (CSS/JS subresources included).
-      ok = await window.electronAPI.browser.reload(browserId, { ignoreCache: true })
+      ok = await controller.reload()
     } else {
-      const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
-      ok = homeUrl ? await window.electronAPI.browser.navigate(browserId, homeUrl) : false
+      ok = await controller.home()
     }
     if (!ok) {
       perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_NAV, { action, source, rejected: 'ipc-false' })
@@ -1321,7 +1324,7 @@ export function ProjectEditor({
   const stopHtmlPreviewSearch = useCallback(() => {
     const browserId = htmlReaderStateRef.current?.browserId
     if (browserId) {
-      void window.electronAPI.browser.stopFindInPage(browserId, 'clearSelection')
+      void getHtmlPreviewController(browserId)?.stopFindInPage()
     }
     resetHtmlPreviewSearchResult()
   }, [resetHtmlPreviewSearchResult])
@@ -1360,8 +1363,8 @@ export function ProjectEditor({
     const nextZoomFactor = setHtmlPreviewZoomFactorState(zoomFactor, source)
     const browserId = htmlReaderStateRef.current?.browserId
     if (!browserId) return false
-    const result = await window.electronAPI.browser.setZoomFactor(browserId, nextZoomFactor)
-    return Boolean(result.success)
+    const result = await getHtmlPreviewController(browserId)?.setZoomFactor(nextZoomFactor)
+    return Boolean(result?.success)
   }, [setHtmlPreviewZoomFactorState])
   const stepHtmlPreviewZoom = useCallback((
     direction: 'in' | 'out' | 'reset',
@@ -1376,7 +1379,7 @@ export function ProjectEditor({
     const browserId = htmlReaderStateRef.current?.browserId
     if (!browserId) return
     if (!query.trim()) {
-      void window.electronAPI.browser.stopFindInPage(browserId, 'clearSelection')
+      void getHtmlPreviewController(browserId)?.stopFindInPage()
       resetHtmlPreviewSearchResult()
       return
     }
@@ -1385,7 +1388,7 @@ export function ProjectEditor({
       forward: options.forward ?? true,
       findNext: Boolean(options.findNext)
     })
-    void window.electronAPI.browser.findInPage(browserId, query, {
+    void getHtmlPreviewController(browserId)?.findInPage(query, {
       forward: options.forward ?? true,
       findNext: options.findNext ?? false,
       matchCase: false
@@ -2298,7 +2301,7 @@ export function ProjectEditor({
     canGoBack: htmlReaderState?.canGoBack ?? false,
     canGoForward: htmlReaderState?.canGoForward ?? false,
     currentUrl: htmlReaderState?.url ?? null,
-    homeUrl: htmlPreviewUrlWithReload
+    homeUrl: htmlReaderState?.homeUrl ?? htmlPreviewUrlWithReload
   }), [htmlPreviewUrlWithReload, htmlReaderState])
   const isMarkdownRenderAllowed = isMarkdownPreviewVisible && isMarkdownRenderEnabled
   const isMarkdownWorkerActive = isOpen && isMarkdownRenderAllowed
@@ -2689,7 +2692,7 @@ export function ProjectEditor({
     // Browser-style nav can move the preview off the opened file's document;
     // capturing there would transplant another page's offset into this
     // file's memory. Keep the last on-home offset instead.
-    const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
+    const homeUrl = htmlReaderStateRef.current?.homeUrl ?? withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
     if (!isSameHtmlPreviewDocument(htmlReaderStateRef.current?.url ?? null, homeUrl)) {
       const skippedPayload = { ph: 'i', site, skipped: 'off-home' }
       if (site === 'poll') {
@@ -2701,8 +2704,8 @@ export function ProjectEditor({
     }
     let scrollState: HtmlPreviewScrollState | null = null
     try {
-      const scrollResult = await window.electronAPI.browser.getScrollState(browserId)
-      if (!scrollResult.success) return
+      const scrollResult = await getHtmlPreviewController(browserId)?.getScrollState()
+      if (!scrollResult?.success) return
       scrollState = normalizeHtmlPreviewScrollState(scrollResult.state)
     } catch {
       return
@@ -3803,48 +3806,9 @@ export function ProjectEditor({
   }, [captureHtmlPreviewScrollMemory, isHtmlPreviewVisible])
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.browser.onFoundInPage((id, result) => {
-      if (id !== htmlReaderStateRef.current?.browserId) return
-      updateHtmlPreviewSearchResult({
-        matches: Math.max(0, result.matches),
-        activeMatchOrdinal: Math.max(0, result.activeMatchOrdinal),
-        finalUpdate: Boolean(result.finalUpdate)
-      })
-    })
-    return unsubscribe
-  }, [updateHtmlPreviewSearchResult])
-
-  useEffect(() => {
-    const unsubscribe = window.electronAPI.browser.onFindShortcutPressed((id) => {
-      if (id !== htmlReaderStateRef.current?.browserId) return
-      openHtmlPreviewSearch()
-    })
-    return unsubscribe
-  }, [openHtmlPreviewSearch])
-
-  useEffect(() => {
-    const unsubscribe = window.electronAPI.browser.onReloadShortcutPressed((id) => {
-      if (id !== htmlReaderStateRef.current?.browserId) return
-      void handleHtmlPreviewNav('reload', 'shortcut')
-    })
-    return unsubscribe
-  }, [handleHtmlPreviewNav])
-
-  useEffect(() => {
-    const unsubscribe = window.electronAPI.browser.onZoomFactorChanged((id, zoomFactor, source) => {
-      if (id !== htmlReaderStateRef.current?.browserId) return
-      setHtmlPreviewZoomFactorState(
-        zoomFactor,
-        source === 'shortcut' ? 'webcontents-shortcut' : 'toolbar'
-      )
-    })
-    return unsubscribe
-  }, [setHtmlPreviewZoomFactorState])
-
-  useEffect(() => {
     const browserId = htmlReaderState?.browserId
     if (!browserId) return
-    void window.electronAPI.browser.setZoomFactor(browserId, htmlPreviewZoomFactorRef.current)
+    void getHtmlPreviewController(browserId)?.setZoomFactor(htmlPreviewZoomFactorRef.current)
   }, [htmlReaderState?.browserId])
 
   useEffect(() => {
@@ -8600,7 +8564,7 @@ export function ProjectEditor({
       getHtmlPreviewNavState: () => {
         if (!activeFilePathRef.current || !isHtmlRef.current) return null
         const state = htmlReaderStateRef.current
-        const homeUrl = withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
+        const homeUrl = state?.homeUrl ?? withHtmlPreviewReloadKey(htmlPreviewUrlRef.current, htmlPreviewReloadKeyRef.current)
         return {
           browserId: state?.browserId ?? null,
           url: state?.url ?? null,
@@ -8620,7 +8584,7 @@ export function ProjectEditor({
         if (!activeFilePathRef.current || !isHtmlRef.current) return null
         const state = htmlReaderStateRef.current
         if (!state?.browserId) return null
-        const result = await window.electronAPI.browser.evaluateForTest(state.browserId, `(() => {
+        const result = await getHtmlPreviewController(state.browserId)?.evaluateForTest(`(() => {
           const images = Array.from(document.images || []);
           return {
             title: document.title,
@@ -8641,10 +8605,10 @@ export function ProjectEditor({
             clientWidth: document.documentElement.clientWidth || window.innerWidth || 0
           };
         })()`)
-        if (!result.success) {
+        if (!result?.success) {
           return {
             success: false,
-            error: result.error ?? 'Failed to inspect HTML Preview'
+            error: result?.error ?? 'Failed to inspect HTML Preview'
           }
         }
         return {
@@ -8652,10 +8616,15 @@ export function ProjectEditor({
           ...(result.value as Record<string, unknown>)
         }
       },
+      evaluateHtmlPreviewForTest: async (script: string) => {
+        const browserId = htmlReaderStateRef.current?.browserId
+        if (!browserId) return null
+        return getHtmlPreviewController(browserId)?.evaluateForTest(script) ?? null
+      },
       setHtmlPreviewScrollForTest: async (y: number) => {
         const state = htmlReaderStateRef.current
         if (!activeFilePathRef.current || !isHtmlRef.current || !state?.browserId) return false
-        const result = await window.electronAPI.browser.restoreScrollState(state.browserId, {
+        const result = await getHtmlPreviewController(state.browserId)?.restoreScrollState({
           x: 0,
           y,
           scrollWidth: 0,
@@ -8663,7 +8632,7 @@ export function ProjectEditor({
           clientWidth: 0,
           clientHeight: 0
         })
-        return result.success
+        return Boolean(result?.success)
       },
       getHtmlPreviewZoomFactor: () => htmlPreviewZoomFactorRef.current,
       setHtmlPreviewZoomFactor: async (zoomFactor: number) => {
@@ -8675,8 +8644,8 @@ export function ProjectEditor({
       getHtmlPreviewBrowserZoomFactor: async () => {
         const browserId = htmlReaderStateRef.current?.browserId
         if (!browserId) return null
-        const result = await window.electronAPI.browser.getZoomFactor(browserId)
-        return result.success ? result.zoomFactor ?? null : null
+        const result = await getHtmlPreviewController(browserId)?.getZoomFactor()
+        return result?.success ? result.zoomFactor ?? null : null
       },
       getImageFilePreviewState,
       getFileBrowserScrollTop: () => fileTreeContainerRef.current?.scrollTop ?? 0,
@@ -11171,10 +11140,7 @@ export function ProjectEditor({
                                 disabled={!htmlPreviewNav.reloadEnabled}
                                 onClick={() => void handleHtmlPreviewNav('reload')}
                               >
-                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                                  <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-7.068 2H.534a.25.25 0 0 0-.192.41l1.966 2.36a.25.25 0 0 0 .384 0l1.966-2.36A.25.25 0 0 0 4.466 9z" />
-                                  <path d="M8 3a5 5 0 0 1 4.546 2.914.5.5 0 1 0 .908-.428A6 6 0 0 0 2.11 5.84L1.58 4.39A.5.5 0 0 0 .64 4.61l1.2 3.6a.5.5 0 0 0 .638.316l3.6-1.2a.5.5 0 1 0-.316-.948L3.9 7.077A5 5 0 0 1 8 3zm6.42 5.39a.5.5 0 0 0-.638-.316l-3.6 1.2a.5.5 0 1 0 .316.948l1.862-.62A5 5 0 0 1 8 13a5 5 0 0 1-4.546-2.914.5.5 0 0 0-.908.428A6 6 0 0 0 13.89 10.16l.53 1.45a.5.5 0 1 0 .94-.22l-1.2-3.6a.5.5 0 0 0-.26-.28z" />
-                                </svg>
+                                <BrowserRefreshIcon />
                               </button>
                             </div>
                             <button
@@ -11265,7 +11231,6 @@ export function ProjectEditor({
                         />
                         <div className="project-editor-html-preview-body">
                           <HtmlReader
-                            url={htmlPreviewUrlWithReload}
                             rootPath={(rootRef.current ?? rootPath ?? '') as string}
                             filePath={activeFilePath}
                             reloadKey={htmlPreviewReloadKey}
@@ -11277,6 +11242,18 @@ export function ProjectEditor({
                                 return
                               }
                               void handleRequestClose()
+                            }}
+                            onFoundInPage={(result) => {
+                              updateHtmlPreviewSearchResult({
+                                matches: Math.max(0, result.matches),
+                                activeMatchOrdinal: Math.max(0, result.activeMatchOrdinal),
+                                finalUpdate: Boolean(result.finalUpdate)
+                              })
+                            }}
+                            onFindShortcut={openHtmlPreviewSearch}
+                            onReloadShortcut={() => void handleHtmlPreviewNav('reload', 'shortcut')}
+                            onZoomShortcut={(direction) => {
+                              void stepHtmlPreviewZoom(direction, 'shortcut')
                             }}
                             onStateChange={updateHtmlReaderState}
                           />
@@ -11512,6 +11489,7 @@ export function ProjectEditor({
                 </button>
                 <button
                   className="project-editor-context-item"
+                  data-context-action="new-file"
                   onClick={() => {
                     closeContextMenu()
                     void handleNewFile(contextMenu.targetType === 'dir' ? (contextMenu.targetPath ?? '') : '')
@@ -11626,6 +11604,7 @@ export function ProjectEditor({
                   <>
                     <button
                       className="project-editor-context-item"
+                      data-context-action="rename"
                       onClick={() => {
                         closeContextMenu()
                         void handleRename(contextMenu.targetPath ?? undefined)

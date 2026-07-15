@@ -12,6 +12,11 @@
   background: var(--bg-1);
 }
 
+.browser-panel-cell.browser-panel-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .browser-panel-nav {
   display: flex;
   align-items: center;
@@ -21,6 +26,20 @@
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   flex-shrink: 0;
+}
+
+.browser-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.browser-panel-navigation-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .browser-panel-nav-btn {
@@ -92,6 +111,20 @@
   background: #111317;
 }
 
+.browser-panel-webview-host {
+  position: absolute;
+  inset: 0;
+}
+
+.browser-panel-webview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  z-index: 0;
+}
+
 .browser-panel-placeholder-hint {
   position: absolute;
   top: 50%;
@@ -120,6 +153,10 @@
   display: flex;
   align-items: center;
   gap: 2px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-1);
   flex-shrink: 0;
 }
 
@@ -163,4 +200,3 @@
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
-

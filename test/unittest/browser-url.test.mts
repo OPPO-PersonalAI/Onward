@@ -9,11 +9,28 @@ import assert from 'node:assert/strict'
 import {
   clampAutoRefreshIntervalMs,
   formatAutoRefreshInterval,
+  isAllowedOpenBrowserGuestUrl,
   isLocalOrPrivateHost,
   localPathToFileUrl,
   looksLikeLocalPath,
   resolveBrowserInputToUrl
 } from '../../src/utils/browser-url.ts'
+
+test('OBURL-U-00 allows only Open Browser guest navigation schemes', () => {
+  for (const url of [
+    'about:blank',
+    'http://localhost:3000/',
+    'https://example.com/',
+    'file:///tmp/page.html',
+    'data:text/html,hello',
+    'blob:https://example.com/1234'
+  ]) {
+    assert.equal(isAllowedOpenBrowserGuestUrl(url), true, `${url} should be allowed`)
+  }
+  for (const url of ['javascript:alert(1)', 'ftp://example.com/file', 'mailto:test@example.com', 'not a url']) {
+    assert.equal(isAllowedOpenBrowserGuestUrl(url), false, `${url} should be rejected`)
+  }
+})
 
 test('OBURL-U-01 resolves explicit and empty input', () => {
   assert.equal(resolveBrowserInputToUrl(''), null)

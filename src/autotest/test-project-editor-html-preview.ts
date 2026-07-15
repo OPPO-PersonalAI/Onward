@@ -150,27 +150,23 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
   }
 
   const injectDomMutation = async (marker: string): Promise<boolean> => {
-    const browserId = getApi()?.getHtmlReaderState?.()?.browserId
-    if (!browserId) return false
-    const result = await window.electronAPI.browser.evaluateForTest(browserId, `(() => {
+    const result = await getApi()?.evaluateHtmlPreviewForTest?.(`(() => {
       const el = document.createElement('p');
       el.textContent = ${JSON.stringify(marker)};
       document.body.appendChild(el);
       return true;
     })()`)
-    return Boolean(result.success)
+    return Boolean(result?.success)
   }
 
   const clickPreviewLink = async (linkId: string): Promise<boolean> => {
-    const browserId = getApi()?.getHtmlReaderState?.()?.browserId
-    if (!browserId) return false
-    const result = await window.electronAPI.browser.evaluateForTest(browserId, `(() => {
+    const result = await getApi()?.evaluateHtmlPreviewForTest?.(`(() => {
       const link = document.getElementById(${JSON.stringify(linkId)});
       if (!link) return false;
       link.click();
       return true;
     })()`)
-    return Boolean(result.success) && result.value === true
+    return Boolean(result?.success) && result?.value === true
   }
 
   const dispatchRefreshShortcut = () => {
@@ -241,6 +237,70 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
       .map((node) => node.textContent?.trim() ?? '')
   })
   if (htmlPreviewHeaderText !== 'HTML Preview' || cancelled()) return results
+
+  const htmlFrame = document.querySelector<HTMLIFrameElement>('iframe.project-editor-html-preview-frame')
+  record('PHTML-04c-preview-uses-dom-iframe', Boolean(
+    htmlFrame &&
+    htmlFrame.getAttribute('sandbox')?.includes('allow-scripts') &&
+    htmlFrame.src.startsWith('onward-html-preview://')
+  ), {
+    hasFrame: Boolean(htmlFrame),
+    sandbox: htmlFrame?.getAttribute('sandbox') ?? null,
+    src: htmlFrame?.src ?? null
+  })
+  if (!htmlFrame || cancelled()) return results
+
+  const contextTarget = document.querySelector<HTMLElement>('.project-editor-tree-root')
+  const frameRect = htmlFrame.getBoundingClientRect()
+  const overlayTrials: Array<{ menuAbove: boolean; dialogAbove: boolean }> = []
+  for (let trial = 0; trial < 5; trial += 1) {
+    contextTarget?.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: frameRect.left + 24,
+      clientY: frameRect.top + 24
+    }))
+    const menuOpened = await waitFor(
+      `phtml-dom-menu-open-${trial}`,
+      () => Boolean(document.querySelector('.project-editor-context-menu')),
+      2000,
+      40
+    )
+    const menu = document.querySelector<HTMLElement>('.project-editor-context-menu')
+    const menuRect = menu?.getBoundingClientRect()
+    const menuPoint = menuRect
+      ? document.elementFromPoint(menuRect.left + Math.min(12, menuRect.width / 2), menuRect.top + Math.min(12, menuRect.height / 2))
+      : null
+    const menuAbove = Boolean(menuOpened && menu && menuPoint && (menuPoint === menu || menu.contains(menuPoint)))
+
+    const newFileButton = menu?.querySelector<HTMLButtonElement>('[data-context-action="new-file"]')
+    newFileButton?.click()
+    const dialogOpened = await waitFor(
+      `phtml-dom-dialog-open-${trial}`,
+      () => Boolean(document.querySelector('.project-editor-dialog-overlay')),
+      2000,
+      40
+    )
+    const dialog = document.querySelector<HTMLElement>('.project-editor-dialog')
+    const dialogRect = dialog?.getBoundingClientRect()
+    const dialogPoint = dialogRect
+      ? document.elementFromPoint(dialogRect.left + dialogRect.width / 2, dialogRect.top + dialogRect.height / 2)
+      : null
+    const dialogAbove = Boolean(dialogOpened && dialog && dialogPoint && (dialogPoint === dialog || dialog.contains(dialogPoint)))
+    overlayTrials.push({ menuAbove, dialogAbove })
+
+    document.querySelector<HTMLButtonElement>('.project-editor-dialog-btn:not(.primary)')?.click()
+    document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+    await sleep(40)
+  }
+  record('PHTML-04d-host-overlays-cover-preview-five-times', Boolean(
+    contextTarget && overlayTrials.length === 5 && overlayTrials.every((trial) => trial.menuAbove && trial.dialogAbove)
+  ), {
+    hasContextTarget: Boolean(contextTarget),
+    frameRect: { x: frameRect.x, y: frameRect.y, width: frameRect.width, height: frameRect.height },
+    overlayTrials
+  })
+  if (!overlayTrials.every((trial) => trial.menuAbove && trial.dialogAbove) || cancelled()) return results
 
   if (!runSaveFlow) {
     return results

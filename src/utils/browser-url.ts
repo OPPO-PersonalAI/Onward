@@ -16,6 +16,17 @@
 
 export const AUTO_REFRESH_MIN_INTERVAL_MS = 5000
 
+const OPEN_BROWSER_GUEST_PROTOCOLS = new Set(['about:', 'http:', 'https:', 'file:', 'data:', 'blob:'])
+
+/** Allow only the navigation schemes supported by the sandboxed Open Browser guest. */
+export function isAllowedOpenBrowserGuestUrl(rawUrl: string): boolean {
+  try {
+    return OPEN_BROWSER_GUEST_PROTOCOLS.has(new URL(rawUrl).protocol)
+  } catch {
+    return false
+  }
+}
+
 // Preset intervals (ms) shown in the Auto Refresh native menu. The smallest is the 5s product
 // floor; the ladder spans seconds and minutes. `null` interval = Auto Refresh off.
 export const AUTO_REFRESH_PRESETS_MS: number[] = [5000, 10000, 30000, 60000, 300000, 600000, 1800000]

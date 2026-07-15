@@ -1181,6 +1181,18 @@ export interface BrowserAPI {
   onFindShortcutPressed: (callback: (id: string) => void) => () => void
   onReloadShortcutPressed: (callback: (id: string) => void) => () => void
   onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => () => void
+  onWebviewInput: (callback: (webContentsId: number, action: 'escape' | 'reload' | 'zoom-in' | 'zoom-out' | 'zoom-reset') => void) => () => void
+}
+
+export interface HtmlPreviewAPI {
+  createSession: (rootPath: string, filePath: string, reloadKey: number) => Promise<{
+    success: boolean
+    sessionId?: string
+    url?: string
+    error?: string
+  }>
+  releaseSession: (sessionId: string) => Promise<boolean>
+  validateNavigation: (sessionId: string, url: string) => Promise<boolean>
 }
 
 export interface FeedbackDiagnosticBundleVerificationCheck {
@@ -1306,6 +1318,7 @@ export interface ElectronAPI {
   changelog: ChangelogAPI
   updater: UpdaterAPI
   browser: BrowserAPI
+  htmlPreview: HtmlPreviewAPI
   feedback: FeedbackAPI
   codingAgentConfig: CodingAgentConfigAPI
   codingAgent: CodingAgentAPI

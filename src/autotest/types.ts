@@ -567,6 +567,7 @@ export interface ProjectEditorDebugApi {
     clientHeight?: number
     clientWidth?: number
   } | null>
+  evaluateHtmlPreviewForTest?: (script: string) => Promise<{ success: boolean; value?: unknown; error?: string } | null>
   setHtmlPreviewScrollForTest?: (y: number) => Promise<boolean>
   getHtmlPreviewZoomFactor?: () => number
   setHtmlPreviewZoomFactor?: (zoomFactor: number) => Promise<boolean>
