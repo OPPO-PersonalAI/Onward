@@ -120,6 +120,9 @@ export const PERF_TRACE_EVENT = {
   RENDERER_TERMINAL_SPLIT_ADD: 'renderer:terminal.split-add',
   RENDERER_GITDIFF_OPEN: 'renderer:gitdiff.open',
   RENDERER_GITHISTORY_OPEN: 'renderer:githistory.open',
+  // Fired when the file list resolves without auto-selecting a file (diff pane
+  // shows the placeholder instead of auto-expanding the first file's diff).
+  RENDERER_GITHISTORY_DEFAULT_FILE_RESOLVED: 'renderer:githistory.default-file-resolved',
   RENDERER_SETTINGS_OPEN: 'renderer:settings.open',
   RENDERER_CHANGELOG_OPEN: 'renderer:changelog.open',
 

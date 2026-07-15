@@ -21,6 +21,10 @@ import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
+import { perfTraceDiagnostic } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { resolveDefaultSelectedFile } from './defaultFileSelection'
+import { DiffEmptyState } from '../common/DiffEmptyState'
 import type { ProjectEditorOpenEventDetail, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { SubpagePanelButton, SubpagePanelShell, SubpageSwitcher, type SubpagePanelShellState } from '../SubpageSwitcher'
 import {
@@ -1213,30 +1217,41 @@ export function GitHistoryViewer({
       setDiffPatch('')
       return
     }
-    setSelectedFile((prev) => {
-      if (prev && files.some(file => file.filename === prev.filename)) {
-        selectedFileRef.current = prev
-        return prev
-      }
-      const storedFile = selectionRef.current.selectedFile
-      if (storedFile) {
-        const match = files.find(file => file.filename === storedFile)
-        if (match) {
-          selectedFileRef.current = match
-          return match
-        }
-      }
-      selectedFileRef.current = files[0]
-      return files[0]
-    })
+    // Do NOT auto-expand a file diff on entry / commit switch: a large file
+    // would trigger a heavy render the instant the view opens, which is the lag
+    // this change removes. Only preserve an in-session selection that still
+    // exists in the new list; otherwise resolve to null and let the diff pane
+    // fall through to its placeholder. See defaultFileSelection.ts.
+    const previous = selectedFileRef.current
+    const next = resolveDefaultSelectedFile(files, previous)
+    selectedFileRef.current = next
+    setSelectedFile(next)
+    if (!next) {
+      // Diagnostic breadcrumb (off hot path, fires on commit-selection change):
+      // if a future report claims "Git History auto-expands a big file on entry
+      // again", this event pins whether we resolved to the placeholder state.
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GITHISTORY_DEFAULT_FILE_RESOLVED, {
+        resolved: 'placeholder',
+        fileCount: files.length
+      })
+    }
   }, [files, selectionInfo.isContiguous, selectionInfo.head, selectionInfo.base, isOpen])
 
   useEffect(() => {
     if (!isOpen) return
     if (!selectionInfo.isContiguous || !selectionInfo.head || !selectionInfo.base) return
     if (!selectedFile) {
+      // No file selected → nothing is loading. Reset diffLoading here so a diff
+      // load that was still in flight when the selection cleared cannot leave
+      // isLoading() stuck true: bumping the tokens below supersedes that load,
+      // so its own finally block (guarded by a token-match) will NOT clear the
+      // flag. Before the "no auto-expand on entry" change, every commit switch
+      // auto-selected files[0] and its load's setDiffLoading(true→false) cycle
+      // implicitly healed this; now that the diff pane can stay on the
+      // placeholder, this branch is the only place that can.
       ++patchTokenRef.current
       ++fileContentTokenRef.current
+      setDiffLoading(false)
       setDiffPatch('')
       setSelectedFileContent(null)
       return
@@ -2064,9 +2079,10 @@ export function GitHistoryViewer({
     }
     if (!selectedFile) {
       return (
-        <div className="git-history-no-selection">
-          {t('gitHistory.diff.noFileSelected')}
-        </div>
+        <DiffEmptyState
+          title={t('gitHistory.diff.clickToView.title')}
+          description={t('gitHistory.diff.clickToView.desc')}
+        />
       )
     }
     if (diffError) {
