@@ -822,6 +822,10 @@ export const PERF_TRACE_EVENT = {
   RENDERER_PROJECT_EDITOR_HTML_SCROLL_CAPTURED: 'renderer:project-editor.html-scroll-captured',
   // Renderer: persisted HTML scroll seeded back into the preview on reopen.
   RENDERER_PROJECT_EDITOR_HTML_SCROLL_RESTORED: 'renderer:project-editor.html-scroll-restored',
+  // Renderer: remembered HTML preview zoom re-applied once the iframe session
+  // became ready on (re)open (ph=i). Breadcrumb for "zoom reverted to 1 after a
+  // warm subpage round-trip" — shows whether the ready-gated reapply fired.
+  RENDERER_PROJECT_EDITOR_HTML_ZOOM_RESTORED: 'renderer:project-editor.html-zoom-restored',
   // Renderer: persist refused to write an active file that was opened under a
   // different scope (cross-Task contamination guard; site=snapshot|restore-null).
   RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED: 'renderer:project-editor.persist-active-file-guarded',

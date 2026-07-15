@@ -3844,6 +3844,13 @@ export function ProjectEditor({
     // `ready` re-runs this once the frame's onLoad lands (parallel to how scroll
     // restore retries via handleFrameLoad), so the zoom survives the round trip.
     if (!browserId || !htmlReaderState?.ready) return
+    // Diagnostic breadcrumb (off hot path, fires once per ready session): if a
+    // future report claims "HTML preview zoom reverts to 1 after a subpage round
+    // trip", this pins whether the ready-gated reapply fired and with what zoom.
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_ZOOM_RESTORED, {
+      ph: 'i',
+      zoomFactor: htmlPreviewZoomFactorRef.current
+    })
     void getHtmlPreviewController(browserId)?.setZoomFactor(htmlPreviewZoomFactorRef.current)
   }, [htmlReaderState?.browserId, htmlReaderState?.ready])
 
