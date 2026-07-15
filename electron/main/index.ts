@@ -50,6 +50,7 @@ import { TELEMETRY_RESET_CONSENT } from './telemetry/telemetry-constants'
 import { startSessionHeartbeat, stopSessionHeartbeat, getSessionDurationMs } from './telemetry/telemetry-session-tracker'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
+import { broadcastGpuProcessGone } from './gpu-crash-recovery'
 import { performanceTrace } from './performance-trace'
 import { traceStore, runRotationStressForAutotest } from './trace-store'
 
@@ -89,6 +90,24 @@ app.on('second-instance', () => {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.focus()
   }
+})
+
+// GPU helper crash (Electron 39 ANGLE-Metal, deterministic on macOS Space
+// switches — see gpu-crash-recovery.ts). App-level listener registered ONCE
+// at module scope: broadcast so renderers force-recreate WebGL, because
+// Chromium does NOT deliver webglcontextlost on this crash path.
+app.on('child-process-gone', (_event, details) => {
+  if (details.type !== 'GPU') return
+  console.log('[App] gpu-process-gone', details.reason, details.exitCode)
+  const notified = broadcastGpuProcessGone({
+    reason: details.reason,
+    exitCode: details.exitCode ?? 0
+  })
+  console.log('[App] gpu-process-gone broadcast', notified)
+  getTelemetryService().track('error/gpuProcessCrash', {
+    reason: details.reason,
+    exitCode: details.exitCode ?? 0
+  })
 })
 
 // Ask the renderer to flush all pending debounced state saves (prompt height,

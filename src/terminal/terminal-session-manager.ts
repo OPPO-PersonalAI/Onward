@@ -141,6 +141,11 @@ const VISIBLE_PENDING_DATA_MAX_BYTES = 8 * 1024 * 1024
 // for terminal updates — visually smooth while leaving ~70% of each frame
 // budget free for user input, React renders, and other UI work.
 const VISIBLE_WRITE_THROTTLE_MS = 20
+// Spacing between hidden-tab WebGL disposals (see queueStaggeredDeactivation).
+// Back-to-back context destruction is the ANGLE-Metal GPU-crash trigger
+// window; ~2 frames of separation breaks the burst without keeping hidden
+// tabs on the GPU for a perceptible time.
+const STAGGERED_DEACTIVATE_INTERVAL_MS = 32
 const INTERACTIVE_BOOST_WINDOW_MS = 250
 
 const DEFAULT_COLS = 80
@@ -192,6 +197,11 @@ export class TerminalSessionManager {
   private activeInteractiveTerminalId: string | null = null
   private surfaceRestoreTimeoutId: number | null = null
   private surfaceRestoreAnimationFrameId: number | null = null
+  // Hidden-tab WebGL disposals pending the staggered pump (see
+  // queueStaggeredDeactivation). Set preserves insertion order and gives
+  // O(1) cancellation when a terminal turns visible again while queued.
+  private staggeredDeactivateQueue = new Set<string>()
+  private staggeredDeactivateTimerId: number | null = null
   private rendererRecoveryCount = 0
   // Autotest-only: cache the WEBGL_lose_context extension for each terminal
   // so the repro can call `restoreContext()` on the same instance that was
@@ -1030,6 +1040,9 @@ export class TerminalSessionManager {
     this.syncMainOutputVisibility(session)
 
     if (visible) {
+      // A pending staggered disposal is obsolete the moment the terminal is
+      // visible again — the addon was never torn down, so just drop the entry.
+      this.staggeredDeactivateQueue.delete(id)
       // Flush buffered data that accumulated while hidden
       this.flushPendingData(session)
       this.outputScheduler.markDirty(id, this.shouldUseInteractiveBoost(session))
@@ -1039,10 +1052,45 @@ export class TerminalSessionManager {
       }
     } else {
       if (session.open) {
-        this.applyRendererLifecycle(session, 'hidden')
+        // Hidden-tab WebGL teardown is deferred to a one-per-frame pump:
+        // back-to-back dispose of N contexts is the trigger window for the
+        // Electron 39 ANGLE-Metal GPU-process crash (IOSurface release path)
+        // observed on every tab switch with 6 panes. The terminal is hidden,
+        // so nobody can see the one-frame-per-pane delay.
+        this.queueStaggeredDeactivation(id)
       }
       this.outputScheduler.removeDirty(id)
     }
+  }
+
+  private queueStaggeredDeactivation(id: string): void {
+    this.staggeredDeactivateQueue.add(id)
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_DEACTIVATE_STAGGERED, {
+      queuedCount: this.staggeredDeactivateQueue.size
+    })
+    if (this.staggeredDeactivateTimerId !== null) return
+    // setTimeout, NOT requestAnimationFrame: the pump must keep draining
+    // when the window is occluded (rAF is fully paused there, which would
+    // freeze the queue and leave hidden tabs holding WebGL indefinitely).
+    // The interval only needs to break up back-to-back destruction — the
+    // ANGLE-Metal crash trigger — not align with paint.
+    const pump = () => {
+      this.staggeredDeactivateTimerId = null
+      const next = this.staggeredDeactivateQueue.values().next()
+      if (next.done) return
+      const nextId = next.value
+      this.staggeredDeactivateQueue.delete(nextId)
+      const session = this.sessions.get(nextId)
+      // Re-validate at execution time: the session may have become visible
+      // again, been disposed, or closed while queued.
+      if (session && !session.visible && session.open && session.status !== 'disposed') {
+        this.applyRendererLifecycle(session, 'hidden')
+      }
+      if (this.staggeredDeactivateQueue.size > 0) {
+        this.staggeredDeactivateTimerId = window.setTimeout(pump, STAGGERED_DEACTIVATE_INTERVAL_MS)
+      }
+    }
+    this.staggeredDeactivateTimerId = window.setTimeout(pump, STAGGERED_DEACTIVATE_INTERVAL_MS)
   }
 
   setOutputVisibility(id: string, visible: boolean): void {
@@ -1250,6 +1298,39 @@ export class TerminalSessionManager {
    * switch-back had to recreate N contexts and re-rasterize the shared glyph
    * atlas before the compositor had any frame to show.
    */
+  /**
+   * GPU-process crash recovery. Chromium does not deliver webglcontextlost
+   * on the Electron 39 ANGLE-Metal crash path, so the per-terminal loss
+   * fallback never fires — force-recreate every visible pane's WebGL
+   * against the respawned GPU process instead of recovering by luck.
+   */
+  recoverRendererSurfacesAfterGpuCrash(info: { reason: string; simulated?: boolean }): number {
+    let sessionCount = 0
+    let recreatedCount = 0
+    let failedCount = 0
+    for (const session of this.sessions.values()) {
+      if (!session.visible || !session.open || session.status === 'disposed') continue
+      sessionCount += 1
+      try {
+        const result = session.renderer.forceRecreateWebgl('gpu-process-gone')
+        if (result.webglActive) recreatedCount += 1
+        else failedCount += 1
+        this.forceFit(session.id)
+      } catch (error) {
+        failedCount += 1
+        console.warn('[GpuCrashRecovery] recreate threw', session.id, error)
+      }
+    }
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_GPU_CRASH_RECOVERY, {
+      sessionCount,
+      recreatedCount,
+      failedCount,
+      reason: info.reason,
+      simulated: Boolean(info.simulated)
+    })
+    return recreatedCount
+  }
+
   noteDocumentHiddenKeepAlive(): { webglSessions: number; visibleSessions: number } {
     let webglSessions = 0
     let visibleSessions = 0
@@ -1525,6 +1606,7 @@ export class TerminalSessionManager {
     session.pendingDataBytes = 0
     this.outputScheduler.unregisterTarget(id)
     this.outputVisibilityState.delete(id)
+    this.staggeredDeactivateQueue.delete(id)
     this.clearPendingRestoreAnimationFrame(session)
     this.clearPendingGeometryRefreshAnimationFrame(session)
     if (this.sessions.size === 1) {
@@ -1600,6 +1682,24 @@ export class TerminalSessionManager {
 }
 
 export const terminalSessionManager = new TerminalSessionManager()
+
+// GPU-process crash recovery subscription. Deliberately NOT a module-scope
+// side effect (a top-level electronAPI access here changed bundle
+// initialization order and destabilized the whole TFA suite) — the first
+// mounted TerminalGrid calls this from an effect; the guard makes it
+// idempotent across tabs and remounts. Chromium never delivers
+// webglcontextlost on the Electron 39 ANGLE-Metal Space-switch crash, so
+// the main process watches child-process-gone and this listener
+// force-recreates every visible pane's WebGL against the respawned GPU
+// process.
+let gpuCrashRecoverySubscribed = false
+export function ensureGpuCrashRecoverySubscription(): void {
+  if (gpuCrashRecoverySubscribed) return
+  gpuCrashRecoverySubscribed = true
+  window.electronAPI?.system?.onGpuProcessGone?.((info) => {
+    terminalSessionManager.recoverRendererSurfacesAfterGpuCrash(info)
+  })
+}
 
 // Expose for E2E testing via CDP (Chrome DevTools Protocol)
 ;(window as any).__terminalSessionManager = terminalSessionManager

@@ -1048,6 +1048,12 @@ export interface GitDiffDebugStats {
   }
 }
 
+export interface SystemAPI {
+  onGpuProcessGone: (
+    callback: (info: { reason: string; exitCode: number; simulated: boolean }) => void
+  ) => () => void
+}
+
 export interface DebugAPI {
   enabled: boolean
   perfTraceEnabled: boolean
@@ -1076,6 +1082,7 @@ export interface DebugAPI {
   virtualCursorDisabled: boolean
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
+  simulateGpuProcessGone: () => Promise<{ success: boolean; notified?: number; error?: string }>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
   getMainWorkMetrics: () => Promise<Record<string, unknown>>
@@ -1311,6 +1318,7 @@ export interface ElectronAPI {
   codingAgent: CodingAgentAPI
   telemetry: TelemetryAPI
   debug: DebugAPI
+  system: SystemAPI
   platform: 'darwin' | 'win32' | 'linux'
 }
 
