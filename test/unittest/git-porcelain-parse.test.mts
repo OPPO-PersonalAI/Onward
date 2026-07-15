@@ -17,6 +17,7 @@ import {
   buildGitResourceFields,
   makeGitFileStatus,
   normalizeGitStatusCode,
+  parseBranchAb,
   parseStatusPorcelainV2Z
 } from '../../electron/main/git-porcelain-parse.ts'
 
@@ -171,6 +172,61 @@ test('parseStatusPorcelainV2Z carries the literal (initial) oid for a commit-les
   const out = '# branch.oid (initial)\n# branch.head (initial)\n\0'
   const result = parseStatusPorcelainV2Z(out, '/repo')
   assert.equal(result.branchOid, '(initial)')
+})
+
+// ---------------------------------------------------------------------------
+// parseBranchAb (# branch.ab +A -B) — ahead/behind counts
+// ---------------------------------------------------------------------------
+
+test('parseBranchAb parses +ahead -behind', () => {
+  assert.deepEqual(parseBranchAb('+2 -1'), { ahead: 2, behind: 1 })
+  assert.deepEqual(parseBranchAb('+0 -0'), { ahead: 0, behind: 0 })
+  assert.deepEqual(parseBranchAb('+17 -0'), { ahead: 17, behind: 0 })
+})
+
+test('parseBranchAb tolerates extra whitespace', () => {
+  assert.deepEqual(parseBranchAb('  +3   -4  '), { ahead: 3, behind: 4 })
+})
+
+test('parseBranchAb returns null on malformed payloads (degrade to no-upstream)', () => {
+  assert.equal(parseBranchAb(''), null)
+  assert.equal(parseBranchAb('+2'), null) // missing behind token
+  assert.equal(parseBranchAb('-1'), null) // missing ahead token
+  assert.equal(parseBranchAb('garbage'), null)
+})
+
+test('parseStatusPorcelainV2Z surfaces ahead/behind from # branch.ab', () => {
+  // Upstream configured: git emits branch.upstream + branch.ab.
+  const out = '# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -1\n\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.ahead, 2)
+  assert.equal(result.behind, 1)
+  assert.equal(result.status, 'clean')
+})
+
+test('parseStatusPorcelainV2Z ahead-only (unpushed commits, up to date on remote)', () => {
+  const out = '# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +3 -0\n\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.ahead, 3)
+  assert.equal(result.behind, 0)
+})
+
+test('parseStatusPorcelainV2Z leaves ahead/behind undefined with NO upstream (no # branch.ab)', () => {
+  // A local-only branch: git omits branch.upstream and branch.ab entirely.
+  const out = '# branch.oid abc123\n# branch.head local-only\n\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.ahead, undefined)
+  assert.equal(result.behind, undefined)
+})
+
+test('parseStatusPorcelainV2Z carries ahead/behind alongside a dirty working tree', () => {
+  // ahead/behind are orthogonal to the file changes: both must survive.
+  const out = '# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +1 -2\n\0'
+    + '1 .M N... 100644 100644 100644 h1 h2 src/app.ts\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.ahead, 1)
+  assert.equal(result.behind, 2)
+  assert.equal(result.status, 'modified')
 })
 
 test('parseStatusPorcelainV2Z reports short SHA for detached HEAD', () => {

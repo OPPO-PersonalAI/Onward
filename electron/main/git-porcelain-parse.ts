@@ -114,6 +114,22 @@ export interface ParsedStatus {
    * header is absent (empty output / `--branch` not requested).
    */
   branchOid: string | null
+  /**
+   * Commits the current branch is AHEAD of its upstream by, parsed from the
+   * `# branch.ab +<ahead> -<behind>` header (porcelain v2 `--branch`). This is
+   * computed against the LOCAL remote-tracking ref (e.g. `origin/main`), so it
+   * is always accurate for "do I have unpushed commits" and needs no network.
+   * `undefined` when there is no upstream / no `# branch.ab` line (a local-only
+   * branch, detached HEAD, or a pruned upstream ref).
+   */
+  ahead?: number
+  /**
+   * Commits the current branch is BEHIND its upstream by (the `-<behind>` in
+   * `# branch.ab`). Only as fresh as the last `git fetch` — the upstream ref is
+   * a local snapshot — so a `0` can be stale until a fetch updates the ref.
+   * `undefined` under the same conditions as {@link ahead}.
+   */
+  behind?: number
   status: TerminalGitStatus
   files: GitFileStatus[]
 }
@@ -129,8 +145,10 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
   const files: GitFileStatus[] = []
   let branch: string | null = null
   let branchOid: string | null = null
+  let ahead: number | undefined
+  let behind: number | undefined
   const categories = new Set<GitChangeCategory>()
-  if (!output) return { branch, branchOid, status: 'clean', files }
+  if (!output) return { branch, branchOid, ahead, behind, status: 'clean', files }
 
   const tokens = output.split('\0')
   let i = 0
@@ -146,6 +164,15 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
           branch = headerLine.slice('# branch.head '.length).trim()
         } else if (headerLine.startsWith('# branch.oid ')) {
           branchOid = headerLine.slice('# branch.oid '.length).trim()
+        } else if (headerLine.startsWith('# branch.ab ')) {
+          // Format: `# branch.ab +<ahead> -<behind>`. Only emitted when the
+          // branch has an upstream whose commit is present locally; absent for
+          // a local-only branch / detached HEAD, so ahead/behind stay undefined.
+          const abParsed = parseBranchAb(headerLine.slice('# branch.ab '.length))
+          if (abParsed) {
+            ahead = abParsed.ahead
+            behind = abParsed.behind
+          }
         }
       }
       i += 1
@@ -252,5 +279,28 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
     branch = branchOid ? branchOid.slice(0, 7) : null
   }
 
-  return { branch, branchOid, status: deriveTerminalGitStatus(categories), files }
+  return { branch, branchOid, ahead, behind, status: deriveTerminalGitStatus(categories), files }
+}
+
+/**
+ * Parse the `+<ahead> -<behind>` payload of a `# branch.ab` header. Returns
+ * `null` on any malformed input so a garbled header degrades to "no upstream
+ * info" (undefined ahead/behind) rather than throwing or reporting bogus
+ * counts. Tolerant of extra whitespace; requires both a `+` and a `-` token.
+ */
+export function parseBranchAb(payload: string): { ahead: number; behind: number } | null {
+  const tokens = payload.trim().split(/\s+/)
+  let ahead: number | null = null
+  let behind: number | null = null
+  for (const token of tokens) {
+    if (token.startsWith('+')) {
+      const n = Number.parseInt(token.slice(1), 10)
+      if (Number.isFinite(n)) ahead = n
+    } else if (token.startsWith('-')) {
+      const n = Number.parseInt(token.slice(1), 10)
+      if (Number.isFinite(n)) behind = n
+    }
+  }
+  if (ahead === null || behind === null) return null
+  return { ahead, behind }
 }

@@ -41,6 +41,7 @@ import { testGitLargeFileConfirmation } from './test-git-large-file-confirmation
 import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitStateMirrorSubscriptionLeak } from './test-git-state-mirror-subscription-leak'
 import { testGitStateMirrorGitCommandFreshness } from './test-git-state-mirror-git-command-freshness'
+import { testGitAutofetchAheadBehind } from './test-git-autofetch-ahead-behind'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
 import { testProjectEditorMultiTerminalScope } from './test-project-editor-multi-terminal-scope'
@@ -713,6 +714,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase5.497:begin')
       const results = await testGitStateMirrorGitCommandFreshness(ctx)
       collectSuiteResults('GitStateMirrorGitCommandFreshness', results)
+      await sleep(300)
+    }
+
+    // Phase 5.4975: Git ahead/behind + background auto-fetch (AB-*). Isolated
+    // like the freshness suite: its runner sets ONWARD_AUTOTEST_SUITE + a bare
+    // remote fixture, so an 'all' run never restarts earlier suites.
+    if (!ctx.cancelled() && shouldRun('git-autofetch-ahead-behind')) {
+      log('phase5.4975:begin')
+      const results = await testGitAutofetchAheadBehind(ctx)
+      collectSuiteResults('GitAutofetchAheadBehind', results)
       await sleep(300)
     }
 

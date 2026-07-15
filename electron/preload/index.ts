@@ -1260,6 +1260,7 @@ export interface DebugAPI {
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
   gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
+  gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
   flushPerfTrace: () => Promise<PerformanceTraceStatus>
@@ -2281,6 +2282,9 @@ const debugAPI: DebugAPI = {
   },
   gitInitForAutotest: (payload: { dir: string }) => {
     return ipcRenderer.invoke('debug:autotest-git-init', payload) as Promise<{ ok: boolean; error?: string }>
+  },
+  gitAutofetchForAutotest: (payload: { repoRoot: string }) => {
+    return ipcRenderer.invoke('debug:autotest-git-autofetch', payload) as Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>
   },
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => {
     if (!perfTraceEnabled) return

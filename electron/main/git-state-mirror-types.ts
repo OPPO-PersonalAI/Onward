@@ -65,6 +65,20 @@ export interface MirrorState {
    * Undefined on non-repo / git-status failure.
    */
   refsDigest?: string
+  /**
+   * Commits ahead of the branch's upstream (the `+N` in `# branch.ab`). Parsed
+   * for free from the same status call — the `--branch` flag is already
+   * requested. Always accurate for "unpushed commits" (local-only computation).
+   * Undefined when there is no upstream / no `# branch.ab` line.
+   */
+  ahead?: number
+  /**
+   * Commits behind the branch's upstream (the `-N` in `# branch.ab`). Computed
+   * against the LOCAL remote-tracking ref, so it is only as fresh as the last
+   * `git fetch`; the background auto-fetch scheduler keeps it current. Undefined
+   * under the same conditions as {@link ahead}.
+   */
+  behind?: number
   /** Status colour bucket — drives the terminal-grid-branch--{status} className. */
   status: TerminalGitStatus | null
   /** File list (unstaged + staged + untracked). Empty array when clean. */

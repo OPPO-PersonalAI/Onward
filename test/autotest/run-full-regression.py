@@ -157,6 +157,10 @@ SCRIPTS: List[str] = [
     # when no watcher event fired (a non-git cwd has no watcher, so the fresh
     # detection is uniquely attributable to the fix).
     "test/autotest/run-gsm-git-command-freshness-autotest.sh",
+    # Git ahead/behind + background auto-fetch (AB-*): a local bare remote + clones
+    # engineered to each ahead/behind state prove `# branch.ab` reaches the mirror
+    # snapshot end-to-end, and the autotest-only force-fetch flips a stale behind.
+    "test/autotest/run-git-autofetch-ahead-behind-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
     "test/autotest/run-repo-prewarm-autotest.sh",

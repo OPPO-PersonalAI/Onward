@@ -466,6 +466,8 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       branch: parsed.branch,
       branchOid: parsed.branchOid ?? undefined,
       refsDigest,
+      ahead: parsed.ahead,
+      behind: parsed.behind,
       status: parsed.status,
       files: parsed.files,
       capturedAt,

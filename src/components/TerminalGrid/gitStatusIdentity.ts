@@ -23,6 +23,14 @@ export interface TerminalGitDisplayState {
   branch: string | null
   repoName: string | null
   status: TerminalGitStatus | null
+  /**
+   * Commits ahead of / behind the upstream. Sourced ONLY from the mirror
+   * snapshot — the legacy `TerminalGitInfo` RPC path has no ahead/behind, so
+   * these are `null` until a mirror snapshot resolves. Undefined-in-snapshot
+   * (no upstream) also collapses to `null` here.
+   */
+  ahead: number | null
+  behind: number | null
 }
 
 function collapsePathSegments(value: string): string {
@@ -163,6 +171,8 @@ export function resolveTerminalGitDisplayState(input: {
     legacyMatchesCwd,
     branch: mirror?.branch ?? (legacyMatchesCwd ? input.terminalInfo?.branch : null) ?? null,
     repoName: mirror?.repoName ?? (legacyMatchesCwd ? input.terminalInfo?.repoName : null) ?? null,
-    status: mirror?.status ?? (legacyMatchesCwd ? input.terminalInfo?.status : null) ?? null
+    status: mirror?.status ?? (legacyMatchesCwd ? input.terminalInfo?.status : null) ?? null,
+    ahead: mirror?.ahead ?? null,
+    behind: mirror?.behind ?? null
   }
 }

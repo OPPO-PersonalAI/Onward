@@ -391,6 +391,8 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
     out.branch = next.branch
     out.branchOid = next.branchOid
     out.refsDigest = next.refsDigest
+    out.ahead = next.ahead
+    out.behind = next.behind
     out.status = next.status
     out.files = next.files
     out.repos = next.repos
@@ -408,6 +410,13 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
   // ref-blind changeFingerprint would short-circuit it) and getLatest carries the
   // new digest into the next History cache key.
   if (prev.refsDigest !== next.refsDigest) out.refsDigest = next.refsDigest
+  // ahead/behind move on local commit (branchOid) OR a ref-only change (push /
+  // fetch advancing the upstream ref). Surface them so an ahead/behind-only
+  // change (e.g. a background fetch that only moved origin/<branch>) is a
+  // non-empty delta and reaches the badge, instead of being short-circuited by
+  // the >1-key emit gate in the worker entry.
+  if (prev.ahead !== next.ahead) out.ahead = next.ahead
+  if (prev.behind !== next.behind) out.behind = next.behind
   if (prev.status !== next.status) out.status = next.status
   if (prev.submodulesLoading !== next.submodulesLoading) out.submodulesLoading = next.submodulesLoading
   if (!sameFileList(prev.files, next.files)) out.files = next.files

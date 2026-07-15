@@ -44,6 +44,7 @@ import { getUpdateService, applyPendingUpdateOnStartup } from './update-service'
 import { getAppStateStorage } from './app-state-storage'
 import { getSettingsStorage } from './settings-storage'
 import { getTerminalCwd } from './git-utils'
+import { gitAutofetchManager } from './git-autofetch-manager'
 import { getWindowStateStorage } from './window-state-storage'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { TELEMETRY_RESET_CONSENT } from './telemetry/telemetry-constants'
@@ -275,6 +276,7 @@ export async function requestQuit(): Promise<void> {
     // Dispose native subsystems FIRST (window still alive), THEN destroy windows,
     // THEN quit — see destroyAllWindowsForQuit's header for why this order matters.
     logQuitPhase('quit:cleanup-start')
+    gitAutofetchManager.dispose()
     await cleanupIpcHandlers()
     logQuitPhase('quit:cleanup-done')
     destroyAllWindowsForQuit('quit')
@@ -804,6 +806,22 @@ app.whenReady().then(async () => {
       console.error('[API Server] Failed to start:', error)
     })
     getUpdateService().start(mainWindow)
+  }
+
+  // Background git auto-fetch: keep the Task badge's behind count fresh. Gate
+  // fetching on window visibility (hidden/minimized pauses it — the confirmed
+  // hidden-pause strategy) so we do not fetch while the user is away.
+  if (mainWindow) {
+    const win = mainWindow
+    const syncAutofetchVisibility = () => {
+      gitAutofetchManager.setAppVisible(win.isVisible() && !win.isMinimized())
+    }
+    win.on('show', syncAutofetchVisibility)
+    win.on('hide', syncAutofetchVisibility)
+    win.on('minimize', syncAutofetchVisibility)
+    win.on('restore', syncAutofetchVisibility)
+    syncAutofetchVisibility()
+    gitAutofetchManager.start()
   }
 
   app.on('activate', () => {

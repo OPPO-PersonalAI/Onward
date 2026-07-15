@@ -632,7 +632,7 @@ function formatGitError(error: unknown): string {
   return String(error).trim()
 }
 
-async function resolveGitExecutable(): Promise<string | null> {
+export async function resolveGitExecutable(): Promise<string | null> {
   if (cachedGitExecutable !== undefined) return cachedGitExecutable
 
   const candidates: string[] = []

@@ -16,7 +16,11 @@ import {
   resolveTerminalGitDisplayState
 } from '../../src/components/TerminalGrid/gitStatusIdentity.ts'
 
-function snapshot(cwd: string, status: GitStateMirrorSnapshot['status']): GitStateMirrorSnapshot {
+function snapshot(
+  cwd: string,
+  status: GitStateMirrorSnapshot['status'],
+  sync?: { ahead?: number; behind?: number }
+): GitStateMirrorSnapshot {
   return {
     cwd,
     repoRoot: cwd,
@@ -26,7 +30,9 @@ function snapshot(cwd: string, status: GitStateMirrorSnapshot['status']): GitSta
     files: [],
     capturedAt: 100,
     changeFingerprint: status ?? 'none',
-    generation: 1
+    generation: 1,
+    ...(sync?.ahead !== undefined ? { ahead: sync.ahead } : {}),
+    ...(sync?.behind !== undefined ? { behind: sync.behind } : {})
   }
 }
 
@@ -129,6 +135,56 @@ test('canonical-key invariant: multiple raw cwds collapse to one mirrorSnapshots
   assert.equal(Object.keys(post).length, 1)
   assert.equal(post[canonical].status, 'modified')
   assert.equal(post[canonical].generation, 7)
+})
+
+test('surfaces mirror ahead/behind through the display state', () => {
+  const snapshots = mergeMirrorSnapshot({}, snapshot('/private/var/tmp/repo-A', 'clean', { ahead: 2, behind: 1 }))
+  const aliases = mergeMirrorAlias({}, '/var/tmp/repo-A/.', '/private/var/tmp/repo-A')
+  const resolved = resolveTerminalGitDisplayState({
+    cwd: '/var/tmp/repo-A/.',
+    terminalInfo: null,
+    mirrorSnapshots: snapshots,
+    mirrorAliases: aliases
+  })
+  assert.equal(resolved.ahead, 2)
+  assert.equal(resolved.behind, 1)
+})
+
+test('ahead/behind are null when only legacy info exists (no mirror snapshot)', () => {
+  // The legacy TerminalGitInfo RPC has no ahead/behind — the display state must
+  // report null rather than inventing a count, so no arrows render.
+  const resolved = resolveTerminalGitDisplayState({
+    cwd: '/var/tmp/repo-A',
+    terminalInfo: {
+      cwd: '/var/tmp/repo-A',
+      repoRoot: '/var/tmp/repo-A',
+      branch: 'feature/status',
+      repoName: 'repo',
+      status: 'clean'
+    },
+    mirrorSnapshots: {},
+    mirrorAliases: {}
+  })
+  assert.equal(resolved.status, 'clean')
+  assert.equal(resolved.ahead, null)
+  assert.equal(resolved.behind, null)
+})
+
+test('delta merge carries ahead/behind into the snapshot (badge refresh signal)', () => {
+  let snapshots = mergeMirrorSnapshot({}, snapshot('/private/var/tmp/repo-A', 'clean', { ahead: 0, behind: 0 }))
+  // A background fetch advanced origin → behind becomes 1 via a delta.
+  snapshots = mergeMirrorDeltaSnapshot(snapshots, '/private/var/tmp/repo-A', {
+    behind: 1,
+    capturedAt: 200
+  })
+  const resolved = resolveTerminalGitDisplayState({
+    cwd: '/private/var/tmp/repo-A',
+    terminalInfo: null,
+    mirrorSnapshots: snapshots,
+    mirrorAliases: {}
+  })
+  assert.equal(resolved.behind, 1)
+  assert.equal(resolved.ahead, 0)
 })
 
 test('does not fall back to legacy info when cwd identity differs and mirror is absent', () => {

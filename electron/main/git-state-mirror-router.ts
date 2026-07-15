@@ -875,6 +875,53 @@ class GitStateMirrorRouter {
   }
 
   /**
+   * Unique repo roots that the background auto-fetch should keep fresh: one per
+   * distinct `repoRoot` among currently-watched cwds (refCount > 0). A repo we
+   * have already classified as having NO upstream (a real status with
+   * ahead/behind both undefined for every one of its active cwds) is excluded —
+   * fetching it would not change any badge (the "skip no-upstream" decision). A
+   * repo with no snapshot yet is INCLUDED so its first fetch can discover an
+   * upstream; a repo with any upstream-bearing cwd is included.
+   */
+  getAutofetchRepoRoots(): string[] {
+    const byRoot = new Map<string, { hasUpstream: boolean; hasKnownState: boolean }>()
+    for (const [cwd, count] of this.refCounts) {
+      if (count <= 0) continue
+      const state = this.latest.get(cwd)
+      const repoRoot = state?.repoRoot
+      if (!repoRoot) continue
+      const agg = byRoot.get(repoRoot) ?? { hasUpstream: false, hasKnownState: false }
+      // status !== null means the worker produced a real classification for this
+      // cwd (repo resolved + git status parsed), so "no ahead/behind" is a
+      // definitive "no upstream" rather than "not computed yet".
+      if (state && state.status !== null) agg.hasKnownState = true
+      if (state && (state.ahead !== undefined || state.behind !== undefined)) agg.hasUpstream = true
+      byRoot.set(repoRoot, agg)
+    }
+    const out: string[] = []
+    for (const [repoRoot, agg] of byRoot) {
+      if (agg.hasUpstream || !agg.hasKnownState) out.push(repoRoot)
+    }
+    return out
+  }
+
+  /**
+   * Revalidate every active cwd under `repoRoot` (used after a background fetch
+   * advanced that repo's remote-tracking ref, so the mirror re-reads
+   * `# branch.ab` and the badge's ↓behind count refreshes). Each cwd's recompute
+   * dedups per repo in the worker, and emits only on a real delta — an unchanged
+   * repo (fetch pulled nothing) produces no broadcast and no flicker.
+   */
+  revalidateRepoRoot(repoRoot: string, source: string): void {
+    if (!repoRoot) return
+    for (const [cwd, count] of this.refCounts) {
+      if (count <= 0) continue
+      if (this.latest.get(cwd)?.repoRoot !== repoRoot) continue
+      this.postToWorker({ kind: 'revalidate', cwd, source })
+    }
+  }
+
+  /**
    * Tell the worker which repo (by the focused terminal's cwd) is focused, so
    * its always-on reconcile heartbeat polls that repo at 1 s and the rest of
    * the visible repos at 3 s. Forward-only — no git work on main (constraint

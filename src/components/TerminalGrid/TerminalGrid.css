@@ -244,6 +244,43 @@
   box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.35);
 }
 
+/*
+ * Local-ahead (clean tree with unpushed commits) → a brighter grass-green
+ * (#4ADE80 / Tailwind green-400), deliberately distinct from the plain-clean
+ * emerald (#10B981) so "clean but ahead of remote" reads as its own state.
+ */
+.terminal-grid-branch--ahead {
+  border-color: rgba(74, 222, 128, 0.45);
+  background: rgba(74, 222, 128, 0.18);
+}
+
+.terminal-grid-branch--ahead::before {
+  background: rgba(74, 222, 128, 0.95);
+  box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.4);
+}
+
+/*
+ * Ahead / behind commit counts (`↑N` / `↓M`). Direction + number is the primary
+ * signal (per peer convention: VS Code / GitKraken / JetBrains); colour is a
+ * secondary accent — ahead green, behind sky-blue. Tabular numerals keep the
+ * count from jittering the badge width as it changes.
+ */
+.terminal-grid-branch-ahead,
+.terminal-grid-branch-behind {
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.terminal-grid-branch-ahead {
+  color: rgba(74, 222, 128, 0.95);
+}
+
+.terminal-grid-branch-behind {
+  color: rgba(56, 189, 248, 0.95);
+}
+
 .terminal-grid-branch--modified {
   border-color: rgba(234, 179, 8, 0.45);
   background: rgba(234, 179, 8, 0.2);

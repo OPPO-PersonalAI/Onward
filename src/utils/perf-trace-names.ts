@@ -627,6 +627,27 @@ export const PERF_TRACE_EVENT = {
   // App-quit drained the GitStateMirror cooperatively before the runtime froze
   // the worker isolate (the will-quit fire-and-forget fix).
   MAIN_APP_QUIT_GSM_DRAINED: 'main:app.quit-gsm-drained',
+  // Background git auto-fetch (keeps the Task badge's ↓behind count fresh). All
+  // off-hot-path main-process control-flow points, instrumented for diagnostic
+  // visibility (a user "behind is stale / autofetch not working" trace must show
+  // whether a repo was scheduled, whether the fetch ran, and why it failed):
+  //   .scheduled          → a repo entered this tick's due set
+  //   .started (instant)  → a hardened `git fetch` child was spawned
+  //   .succeeded ('X')    → fetch exited 0 (durationMs span); triggers the revalidate below
+  //   .failed ('X')       → fetch failed (durationMs span); reason classified (auth / network / timeout / no-remote)
+  //   .backoff            → the repo's next attempt was pushed out (streak, nextGapMs)
+  //   .skipped-hidden     → a tick produced nothing because the app is hidden
+  //   .triggered-recompute→ a successful fetch asked the mirror to revalidate the repo
+  //   .lifecycle          → the feature started (enabled/disabled by the kill switch) or disposed;
+  //                         a "behind never updates" trace shows whether the loop was even active
+  MAIN_GIT_AUTOFETCH_LIFECYCLE: 'main:git-autofetch.lifecycle',
+  MAIN_GIT_AUTOFETCH_SCHEDULED: 'main:git-autofetch.scheduled',
+  MAIN_GIT_AUTOFETCH_STARTED: 'main:git-autofetch.started',
+  MAIN_GIT_AUTOFETCH_SUCCEEDED: 'main:git-autofetch.succeeded',
+  MAIN_GIT_AUTOFETCH_FAILED: 'main:git-autofetch.failed',
+  MAIN_GIT_AUTOFETCH_BACKOFF: 'main:git-autofetch.backoff',
+  MAIN_GIT_AUTOFETCH_SKIPPED_HIDDEN: 'main:git-autofetch.skipped-hidden',
+  MAIN_GIT_AUTOFETCH_TRIGGERED_RECOMPUTE: 'main:git-autofetch.triggered-recompute',
   RENDERER_TERMINAL_TITLE_BRANCH_RENDERED: 'renderer:terminal-title.branch-rendered',
   RENDERER_TERMINAL_TITLE_COLOR_RENDERED: 'renderer:terminal-title.color-rendered',
   RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',
