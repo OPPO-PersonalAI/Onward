@@ -21,6 +21,7 @@ import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
+import { useGitStateMirror } from '../../hooks/useGitStateMirror'
 import type { ProjectEditorOpenEventDetail, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { SubpagePanelButton, SubpagePanelShell, SubpageSwitcher, type SubpagePanelShellState } from '../SubpageSwitcher'
 import {
@@ -417,11 +418,65 @@ export function GitHistoryViewer({
   const cachedParentCwdRef = useRef<string | null>(cachedParentCwd)
   const lastOpenScopeRef = useRef<{ terminalId: string; cwd: string | null } | null>(null)
   const activeCwd = selectedRepoRoot || historyResult?.cwd || cachedParentCwd || cwd
+  const { snapshot: jumpAvailabilityMirror } = useGitStateMirror(isOpen ? activeCwd : null)
   const activeCwdRef = useRef(activeCwd)
+  const jumpToEditorCheckTokenRef = useRef(0)
+  const jumpToEditorTarget = useMemo(() => {
+    if (!activeCwd || !selectedFile?.filename) return null
+    return {
+      repoRoot: activeCwd,
+      filePath: selectedFile.filename,
+      key: JSON.stringify([activeCwd, selectedFile.filename])
+    }
+  }, [activeCwd, selectedFile?.filename])
+  const [jumpToEditorCheck, setJumpToEditorCheck] = useState<{
+    key: string | null
+    status: 'checking' | 'available' | 'missing'
+  }>({ key: null, status: 'missing' })
+  const jumpToEditorStatus = !selectedFile
+    ? 'no-selection'
+    : !jumpToEditorTarget
+      ? 'missing'
+      : jumpToEditorCheck.key === jumpToEditorTarget.key
+        ? jumpToEditorCheck.status
+        : 'checking'
   const cwdRef = useRef(cwd)
   useEffect(() => {
     activeCwdRef.current = activeCwd
   }, [activeCwd])
+  useEffect(() => {
+    const token = jumpToEditorCheckTokenRef.current + 1
+    jumpToEditorCheckTokenRef.current = token
+    if (!isOpen || !jumpToEditorTarget) {
+      setJumpToEditorCheck({ key: null, status: 'missing' })
+      return
+    }
+
+    const { key, repoRoot, filePath } = jumpToEditorTarget
+    setJumpToEditorCheck({ key, status: 'checking' })
+    void window.electronAPI.project.filesExist(repoRoot, [filePath])
+      .then((exists) => {
+        if (jumpToEditorCheckTokenRef.current !== token) return
+        setJumpToEditorCheck({
+          key,
+          status: exists[0] ? 'available' : 'missing'
+        })
+      })
+      .catch(() => {
+        if (jumpToEditorCheckTokenRef.current !== token) return
+        setJumpToEditorCheck({ key, status: 'missing' })
+      })
+    return () => {
+      if (jumpToEditorCheckTokenRef.current === token) {
+        jumpToEditorCheckTokenRef.current += 1
+      }
+    }
+  }, [
+    isOpen,
+    jumpAvailabilityMirror?.changeFingerprint,
+    jumpAvailabilityMirror?.generation,
+    jumpToEditorTarget
+  ])
   useEffect(() => {
     cwdRef.current = cwd
   }, [cwd])
@@ -1513,6 +1568,11 @@ export function GitHistoryViewer({
         }
         return true
       },
+      getScrollState: () => ({
+        commit: commitScrollTopRef.current,
+        file: fileScrollTopRef.current,
+        diff: diffScrollTopRef.current
+      }),
       getLargeFileConfirmState: () => {
         const state = largeFileConfirmRef.current
         return state ? {
@@ -1682,11 +1742,14 @@ export function GitHistoryViewer({
   }, [terminalId])
 
   const handleOpenEditor = useCallback(() => {
-    if (!terminalId) return
+    if (!terminalId || jumpToEditorStatus !== 'available' || !jumpToEditorTarget) return
     const detail: ProjectEditorOpenEventDetail = {
       terminalId,
-      filePath: selectedFile?.filename ?? null,
-      repoRoot: activeCwd || null
+      filePath: jumpToEditorTarget.filePath,
+      repoRoot: jumpToEditorTarget.repoRoot,
+      source: 'history',
+      returnTarget: 'history',
+      panelRoot: cwd || activeCwd
     }
     window.dispatchEvent(new CustomEvent<SubpageNavigateEventDetail>('subpage:navigate', {
       detail: {
@@ -1696,10 +1759,40 @@ export function GitHistoryViewer({
         intent: 'jump',
         entryPoint: 'deep-link',
         filePath: detail.filePath,
-        repoRoot: detail.repoRoot
+        repoRoot: detail.repoRoot,
+        source: detail.source,
+        returnTarget: detail.returnTarget,
+        panelRoot: detail.panelRoot
       }
     }))
-  }, [activeCwd, selectedFile, terminalId])
+  }, [activeCwd, cwd, jumpToEditorStatus, jumpToEditorTarget, terminalId])
+
+  const renderJumpToEditorAction = useCallback(() => {
+    const disabled = jumpToEditorStatus !== 'available'
+    const title = jumpToEditorStatus === 'no-selection'
+      ? t('gitHistory.jumpToEditorNoSelection')
+      : jumpToEditorStatus === 'checking'
+        ? t('gitHistory.jumpToEditorChecking')
+        : jumpToEditorStatus === 'missing'
+          ? t('gitHistory.jumpToEditorMissing')
+          : t('gitHistory.jumpToEditorTitle')
+    return (
+      <SubpagePanelButton
+        className="git-history-jump-editor"
+        data-testid="git-history-jump-editor"
+        data-jump-status={jumpToEditorStatus}
+        data-jump-file={jumpToEditorTarget?.filePath ?? ''}
+        data-jump-root={jumpToEditorTarget?.repoRoot ?? ''}
+        onClick={handleOpenEditor}
+        disabled={disabled}
+        title={title}
+      >
+        {jumpToEditorStatus === 'checking'
+          ? t('gitHistory.jumpToEditorChecking')
+          : t('gitHistory.jumpToEditor')}
+      </SubpagePanelButton>
+    )
+  }, [handleOpenEditor, jumpToEditorStatus, jumpToEditorTarget, t])
 
   const handleSelectSubpage = useCallback((target: SubpageId) => {
     if (target === 'diff') {
@@ -2247,10 +2340,13 @@ export function GitHistoryViewer({
     feedback: cwdFeedback
   } = useCwdCopyHandler(historyWorkingDirectory, t, 'gitHistory.copyFailed')
   const externalPanelActions = useMemo(() => (
-    <SubpagePanelButton className="git-history-close" onClick={onClose} title={t('gitHistory.returnToTerminal')}>
-      {t('gitHistory.returnToTerminal')}
-    </SubpagePanelButton>
-  ), [onClose, t])
+    <>
+      {renderJumpToEditorAction()}
+      <SubpagePanelButton className="git-history-close" onClick={onClose} title={t('gitHistory.returnToTerminal')}>
+        {t('gitHistory.returnToTerminal')}
+      </SubpagePanelButton>
+    </>
+  ), [onClose, renderJumpToEditorAction, t])
   const externalPanelShellState = useMemo<SubpagePanelShellState>(() => ({
     current: 'history',
     onSelect: handleSelectSubpage,
@@ -2529,6 +2625,7 @@ export function GitHistoryViewer({
             taskTitle={taskTitle}
             actions={(
               <>
+                {renderJumpToEditorAction()}
                 <SubpagePanelButton className="git-history-close" onClick={onClose} title={t('gitHistory.returnToTerminal')}>
                   {t('gitHistory.returnToTerminal')}
                 </SubpagePanelButton>
@@ -2554,6 +2651,7 @@ export function GitHistoryViewer({
                 <SubpageSwitcher current="history" onSelect={handleSelectSubpage} />
               </div>
               <div className="git-history-header-actions">
+                {renderJumpToEditorAction()}
                 <SubpagePanelButton className="git-history-close" onClick={onClose} title={t('gitHistory.returnToTerminal')}>
                   {t('gitHistory.returnToTerminal')}
                 </SubpagePanelButton>

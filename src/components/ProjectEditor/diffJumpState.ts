@@ -21,6 +21,13 @@ export type DiffReturnBarState = {
   activeFilePath: string | null
 }
 
+export type DiffLocateRouteTarget = {
+  filePath: string
+  repoRoot: string | null
+  panelRoot: string | null
+  changeType: GitFileStatus['changeType']
+}
+
 export function normalizeProjectPath(value: string): string {
   return value.replace(/\\/g, '/')
 }
@@ -74,15 +81,20 @@ export function findDiffFileForEditorPath(params: {
   editorRoot: string | null
   editorFilePath: string | null
   platform: DiffJumpPlatform
+  changeType?: GitFileStatus['changeType'] | null
 }): GitFileStatus | null {
-  const { diff, editorRoot, editorFilePath, platform } = params
+  const { diff, editorRoot, editorFilePath, platform, changeType } = params
   if (!diff?.success || !editorRoot || !editorFilePath) return null
   const targetAbsolute = joinProjectPath(editorRoot, editorFilePath)
   if (!targetAbsolute) return null
   const comparableTarget = normalizeComparableProjectPath(targetAbsolute, platform)
   for (const file of diff.files) {
     const fileAbsolute = joinProjectPath(file.repoRoot || diff.cwd, file.filename)
-    if (fileAbsolute && normalizeComparableProjectPath(fileAbsolute, platform) === comparableTarget) {
+    if (
+      fileAbsolute
+      && normalizeComparableProjectPath(fileAbsolute, platform) === comparableTarget
+      && (!changeType || file.changeType === changeType)
+    ) {
       return file
     }
   }
@@ -101,5 +113,18 @@ export function buildDiffReturnBarState(params: {
     jumpEnabled: Boolean(params.diffJumpTarget) && !params.diffJumpChecking,
     checking: params.diffJumpChecking,
     activeFilePath: params.activeFilePath
+  }
+}
+
+export function buildDiffLocateRouteTarget(
+  target: DiffJumpTarget | null,
+  panelRoot: string | null
+): DiffLocateRouteTarget | null {
+  if (!target) return null
+  return {
+    filePath: target.filename,
+    repoRoot: target.repoRoot,
+    panelRoot,
+    changeType: target.changeType
   }
 }

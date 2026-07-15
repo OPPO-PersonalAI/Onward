@@ -17,6 +17,7 @@ import {
   buildSubpageMemoryScopeKey,
   createSubpageStateMemory,
   normalizeSubpageMemoryScope,
+  resolveSubpageMemoryRoot,
   type EditorSubpageSnapshot
 } from '../../src/components/TerminalGrid/subpageStateMemory.ts'
 import { createSubpageLifecycleRegistry } from '../../src/components/TerminalGrid/subpageLifecycle.ts'
@@ -58,6 +59,128 @@ describe('subpage route command semantics', () => {
     assert.equal(detail.entryPoint, 'deep-link')
   })
 
+  it('preserves changeType in a jump target built from the public route input', () => {
+    const command = buildSubpageRouteCommand({
+      intent: 'jump',
+      entryPoint: 'deep-link',
+      terminalId: 'term-1',
+      from: 'editor',
+      target: 'diff',
+      filePath: 'src/App.tsx',
+      repoRoot: '/repo',
+      changeType: 'staged'
+    } as Parameters<typeof buildSubpageRouteCommand>[0] & { changeType: 'staged' })
+
+    assert.equal(
+      (command.targetFile as typeof command.targetFile & { changeType?: string | null })?.changeType,
+      'staged'
+    )
+  })
+
+  it('serializes changeType into the navigation event for an exact diff jump', () => {
+    const command = buildSubpageRouteCommand({
+      intent: 'jump',
+      entryPoint: 'deep-link',
+      terminalId: 'term-1',
+      from: 'editor',
+      target: 'diff',
+      filePath: 'src/App.tsx',
+      repoRoot: '/repo'
+    })
+    const commandWithIdentity = {
+      ...command,
+      targetFile: command.targetFile
+        ? { ...command.targetFile, changeType: 'unstaged' as const }
+        : null
+    }
+
+    const detail = routeCommandToNavigateDetail(commandWithIdentity)
+    assert.equal(
+      (detail as typeof detail & { changeType?: string | null }).changeType,
+      'unstaged'
+    )
+  })
+
+  it('restores changeType when adapting a legacy jump event back into a route command', () => {
+    const command = legacyNavigateDetailToRouteCommand(
+      {
+        terminalId: 'term-1',
+        target: 'diff',
+        filePath: 'src/App.tsx',
+        repoRoot: '/repo',
+        changeType: 'staged'
+      } as Parameters<typeof legacyNavigateDetailToRouteCommand>[0] & { changeType: 'staged' },
+      'editor'
+    )
+
+    assert.ok(command)
+    assert.equal(
+      (command.targetFile as typeof command.targetFile & { changeType?: string | null })?.changeType,
+      'staged'
+    )
+  })
+
+  it('clears every file identity field, including changeType, for a plain switch', () => {
+    const command = buildSubpageRouteCommand({
+      intent: 'switch',
+      entryPoint: 'subpage-switcher',
+      terminalId: 'term-1',
+      from: 'editor',
+      target: 'diff',
+      filePath: 'src/App.tsx',
+      repoRoot: '/repo'
+    })
+    const commandWithIdentity = {
+      ...command,
+      targetFile: command.targetFile
+        ? { ...command.targetFile, changeType: 'unstaged' as const }
+        : null
+    }
+
+    const detail = routeCommandToNavigateDetail(commandWithIdentity)
+    assert.equal(detail.filePath, null)
+    assert.equal(detail.repoRoot, null)
+    assert.equal(
+      (detail as typeof detail & { changeType?: string | null }).changeType,
+      null
+    )
+  })
+
+  it('preserves the source panel root for Back without turning the route into a file jump', () => {
+    const command = buildSubpageRouteCommand({
+      intent: 'switch',
+      entryPoint: 'subpage-switcher',
+      terminalId: 'term-1',
+      from: 'editor',
+      target: 'diff',
+      panelRoot: '/source-repo'
+    })
+
+    assert.equal(shouldApplySubpageTargetFile(command), false)
+    assert.equal(command.targetFile, null)
+    assert.equal(command.panelRoot, '/source-repo')
+    assert.equal(routeCommandToNavigateDetail(command).panelRoot, '/source-repo')
+  })
+
+  it('keeps History as a generic return source without Diff-only assumptions', () => {
+    const detail = routeCommandToNavigateDetail(buildSubpageRouteCommand({
+      intent: 'jump',
+      entryPoint: 'deep-link',
+      terminalId: 'term-1',
+      from: 'history',
+      target: 'editor',
+      source: 'history',
+      returnTarget: 'history',
+      filePath: 'docs/report.html',
+      repoRoot: '/repo'
+    }))
+
+    assert.equal(detail.source, 'history')
+    assert.equal(detail.returnTarget, 'history')
+    assert.equal(detail.filePath, 'docs/report.html')
+    assert.equal(detail.repoRoot, '/repo')
+  })
+
   it('infers legacy navigation without a file target as a switch', () => {
     const command = legacyNavigateDetailToRouteCommand(
       { terminalId: 'term-1', target: 'history' },
@@ -85,6 +208,12 @@ describe('subpage route command semantics', () => {
 })
 
 describe('subpage state memory', () => {
+  it('uses the live panel root before the owner and terminal fallback roots', () => {
+    assert.equal(resolveSubpageMemoryRoot('/repo-b', '/repo-a', '/terminal-repo'), '/repo-b')
+    assert.equal(resolveSubpageMemoryRoot(null, '/repo-a/', '/terminal-repo'), '/repo-a')
+    assert.equal(resolveSubpageMemoryRoot(null, null, '\\terminal-repo\\'), '/terminal-repo')
+  })
+
   it('normalizes scope keys across path separators and trailing slashes', () => {
     const a = buildSubpageMemoryScopeKey({ terminalId: 'term-1', root: '/repo/root/' }, 'editor')
     const b = buildSubpageMemoryScopeKey({ terminalId: 'term-1', root: '/repo/root' }, 'editor')
@@ -92,6 +221,30 @@ describe('subpage state memory', () => {
 
     assert.equal(a, b)
     assert.equal(c.includes('/repo/root'), true)
+  })
+
+  it('treats Windows root casing as the same memory scope', () => {
+    const memory = createSubpageStateMemory()
+    memory.save({ terminalId: 'term-1', root: 'C:\\Repo\\Project' }, {
+      subpage: 'diff',
+      selectedFilePath: 'src/App.tsx',
+      selectedFileKey: 'unstaged:src/App.tsx',
+      scrollTop: 144
+    }, 1)
+
+    const equivalentScope = { terminalId: 'term-1', root: 'c:/repo/project/' }
+    assert.equal(
+      buildSubpageMemoryScopeKey({ terminalId: 'term-1', root: 'C:\\Repo\\Project' }, 'diff'),
+      buildSubpageMemoryScopeKey(equivalentScope, 'diff')
+    )
+    assert.equal(
+      buildSubpageMemoryScopeKey({ terminalId: 'term-1', root: '\\\\Server\\Share\\Repo' }, 'history'),
+      buildSubpageMemoryScopeKey({ terminalId: 'term-1', root: '//server/share/repo/' }, 'history')
+    )
+    assert.equal(memory.read(equivalentScope, 'diff')?.snapshot.selectedFilePath, 'src/App.tsx')
+    assert.equal(memory.list(equivalentScope).length, 1)
+    memory.clear(equivalentScope)
+    assert.equal(memory.list().length, 0)
   })
 
   it('stores independent snapshots per subpage under the same scope', () => {
@@ -118,6 +271,27 @@ describe('subpage state memory', () => {
     assert.equal(memory.read(scope, 'editor')?.snapshot.activeFilePath, 'docs/a.md')
     assert.equal(memory.read(scope, 'diff')?.snapshot.selectedFilePath, 'src/App.tsx')
     assert.equal(memory.list(scope).length, 2)
+  })
+
+  it('preserves all History scroll positions in the subpage snapshot', () => {
+    const memory = createSubpageStateMemory()
+    const scope = normalizeSubpageMemoryScope({ terminalId: 'term-1', root: '/repo' })
+    memory.save(scope, {
+      subpage: 'history',
+      selectedShas: ['abc123'],
+      selectionAnchor: 'abc123',
+      selectedFilePath: 'scroll-state.ts',
+      commitScrollTop: 40,
+      fileScrollTop: 80,
+      diffScrollTop: 320
+    }, 1)
+
+    const snapshot = memory.read(scope, 'history')?.snapshot
+    assert.equal(snapshot?.subpage, 'history')
+    if (snapshot?.subpage !== 'history') assert.fail('expected History snapshot')
+    assert.equal(snapshot.commitScrollTop, 40)
+    assert.equal(snapshot.fileScrollTop, 80)
+    assert.equal(snapshot.diffScrollTop, 320)
   })
 
   it('separates snapshots by tab when tab scope is supplied', () => {

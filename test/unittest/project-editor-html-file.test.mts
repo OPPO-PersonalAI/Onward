@@ -13,9 +13,13 @@ import {
   isHtmlPreviewRefreshShortcut,
   isHtmlPath,
   isSameHtmlPreviewDocument,
+  isSameHtmlPreviewFile,
   normalizeHtmlPreviewDocumentUrl,
   normalizeHtmlPreviewScrollState,
   normalizeHtmlPreviewZoomFactor,
+  isHtmlPreviewScrollRestoreVerified,
+  resolveHtmlPreviewScrollRestoreTarget,
+  shouldAttemptHtmlPreviewScrollRestore,
   stepHtmlPreviewZoomFactor,
   withHtmlPreviewReloadKey
 } from '../../src/utils/html-file.ts'
@@ -232,4 +236,59 @@ test('PEHTML-U-21 pathological URLs normalize without throwing', () => {
   assert.equal(typeof normalizeHtmlPreviewDocumentUrl(longUrl), 'string')
   assert.equal(isSameHtmlPreviewDocument(longUrl, longUrl), true)
   assert.equal(isSameHtmlPreviewDocument(longUrl, 'file:///tmp/a.html'), false)
+})
+
+test('PEHTML-U-22 restores HTML scroll only after the target navigation, load, and zoom are ready', () => {
+  const ready = {
+    activeBrowserId: 'browser-2',
+    expectedBrowserId: 'browser-2',
+    activeReloadKey: 7,
+    expectedReloadKey: 7,
+    targetNavigationConfirmed: true,
+    loadSettled: true,
+    zoomApplied: true,
+    hasTargetState: true,
+    restoreInFlight: false,
+    restored: false
+  }
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore(ready), true)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, targetNavigationConfirmed: false }), false)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, loadSettled: false }), false)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, zoomApplied: false }), false)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, activeBrowserId: 'stale' }), false)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, activeReloadKey: 8 }), false)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, hasTargetState: false }), false)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, restoreInFlight: true }), false)
+  assert.equal(shouldAttemptHtmlPreviewScrollRestore({ ...ready, restored: true }), false)
+})
+
+test('PEHTML-U-23 clamps an HTML restore target to the loaded document range', () => {
+  assert.equal(resolveHtmlPreviewScrollRestoreTarget(720, 2000, 600), 720)
+  assert.equal(resolveHtmlPreviewScrollRestoreTarget(720, 1000, 600), 400)
+  assert.equal(resolveHtmlPreviewScrollRestoreTarget(-20, 1000, 600), 0)
+  assert.equal(resolveHtmlPreviewScrollRestoreTarget(100, 300, 600), 0)
+})
+
+test('PEHTML-U-24 marks HTML scroll restored only after the browser reports the final clamped value', () => {
+  const state = {
+    x: 0,
+    y: 400,
+    scrollWidth: 900,
+    scrollHeight: 1000,
+    clientWidth: 800,
+    clientHeight: 600
+  }
+  assert.equal(isHtmlPreviewScrollRestoreVerified(720, state), true)
+  assert.equal(isHtmlPreviewScrollRestoreVerified(720, { ...state, y: 0 }), false)
+  assert.equal(isHtmlPreviewScrollRestoreVerified(720, null), false)
+})
+
+test('PEHTML-U-25 file identity ignores a structural fragment without decoding filename delimiters', () => {
+  assert.equal(isSameHtmlPreviewFile(
+    'file:///p/a.html?mtime=1#working-route',
+    'file:///p/a.html?mtime=2'
+  ), true)
+  assert.equal(isSameHtmlPreviewFile('file:///p/a.html%23working-route', 'file:///p/a.html#working-route'), false)
+  assert.equal(isSameHtmlPreviewFile('file:///p/a.html?route=one', 'file:///p/a.html?route=two'), false)
+  assert.equal(isSameHtmlPreviewFile('file:///p/a.html#route', 'file:///p/b.html#route'), false)
 })

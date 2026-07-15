@@ -6,7 +6,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutMode, TerminalInfo, TerminalShortcutAction, TerminalFocusRequest } from '../../types/prompt'
-import type { Prompt } from '../../types/electron'
+import type { GitChangeType, Prompt } from '../../types/electron'
 import { resolveLayout, isSameLayoutMode, layoutDataAttr } from '../../utils/layout-mode'
 import { TerminalDropdown } from '../TerminalDropdown'
 import { TerminalTitleMenu } from '../TerminalTitleMenu'
@@ -46,9 +46,10 @@ import {
 } from './subpageRouter'
 import {
   createSubpageStateMemory,
+  resolveSubpageMemoryRoot,
   type SubpageMemoryScope
 } from './subpageStateMemory'
-import { shouldRestoreSubpageOnEnter } from './subpageRestoreDecision'
+import { shouldRestoreStoredSubpageSnapshot } from './subpageRestoreDecision'
 import {
   mergeMirrorAlias,
   mergeMirrorDeltaSnapshot,
@@ -94,10 +95,12 @@ interface TerminalGridProps {
   onOpenProjectEditor: (terminalId: string, options?: {
     filePath?: string | null
     repoRoot?: string | null
+    changeType?: GitChangeType | null
     source?: SubpageId | null
     returnTarget?: SubpageId | null
     diffFilePath?: string | null
     diffRepoRoot?: string | null
+    panelRoot?: string | null
   }) => void
   tabId?: string
   hidden?: boolean
@@ -307,6 +310,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   const [gitDiffNavigationTarget, setGitDiffNavigationTarget] = useState<{
     filePath: string
     repoRoot?: string | null
+    changeType?: GitChangeType | null
     nonce: number
   } | null>(null)
   const [gitHistoryOpen, setGitHistoryOpen] = useState(false)
@@ -2218,18 +2222,19 @@ export const TerminalGrid = memo(function TerminalGrid({
   // View Git Diff — open the shell immediately, then resolve the best cwd for diff loading
   const handleViewGitDiff = useCallback(async (
     terminalId: string,
-    options?: { closeOtherSubpages?: boolean }
+    options?: { closeOtherSubpages?: boolean; preferredRoot?: string | null }
   ) => {
     const currentToken = ++gitDiffOpenTokenRef.current
     const requestedAt = performance.now()
     const terminalInfo = terminalInfos[terminalId]
     const persistedCwd = getPersistedTerminalCwd(terminalId)
-    // An explicit cwd override (set when `git-diff:open` carried a `cwd` in its
-    // detail) takes precedence over every resolved source. It lets callers open
-    // Git Diff against a specific repo deterministically — used by autotests to
-    // target a nested fixture repo whose terminal cwd report is racy/absent.
+    // A route root pins Back to the original source panel. Otherwise, an
+    // explicit cwd override from `git-diff:open` wins over terminal-derived
+    // roots so callers can open a specific repo deterministically.
+    const routeRoot = options?.preferredRoot?.trim() || null
     const cwdOverride = gitDiffCwdOverrideRef.current[terminalId] ?? null
     const initialCwd = resolveGitDiffInitialCwd({
+      routeRoot,
       cwdOverride,
       repoRoot: terminalInfo?.repoRoot ?? null,
       terminalCwd: terminalInfo?.cwd ?? null,
@@ -2288,12 +2293,13 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   const handleViewGitHistory = useCallback(async (
     terminalId: string,
-    options?: { closeOtherSubpages?: boolean }
+    options?: { closeOtherSubpages?: boolean; preferredRoot?: string | null }
   ) => {
     const currentToken = ++gitHistoryOpenTokenRef.current
     const persistedCwd = getPersistedTerminalCwd(terminalId)
     const terminalInfo = terminalInfos[terminalId]
-    const initialCwd = terminalInfo?.repoRoot || terminalInfo?.cwd || persistedCwd
+    const preferredRoot = options?.preferredRoot?.trim() || null
+    const initialCwd = preferredRoot || terminalInfo?.repoRoot || terminalInfo?.cwd || persistedCwd
     const closeOtherSubpages = options?.closeOtherSubpages ?? true
     setGitHistoryTerminalId(terminalId)
     setGitHistoryCwd(initialCwd)
@@ -2307,7 +2313,7 @@ export const TerminalGrid = memo(function TerminalGrid({
     if (closeOtherSubpages) {
       setGitDiffOpen(false)
     }
-    if (terminalInfo?.repoRoot) {
+    if (preferredRoot || terminalInfo?.repoRoot) {
       return
     }
 
@@ -2330,21 +2336,25 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   const resolveSubpageMemoryScope = useCallback((
     terminalId: string,
-    subpage: SubpageId | null
+    subpage: SubpageId | null,
+    preferredRoot?: string | null
   ): SubpageMemoryScope => {
     const terminalInfo = terminalInfos[terminalId]
     const fallbackCwd = terminalInfo?.repoRoot || terminalInfo?.cwd || getPersistedTerminalCwd(terminalId)
-    let root: string | null = fallbackCwd ?? null
+    const panelRoot = subpage
+      ? panelShellStatesRef.current[subpage]?.workingDirectoryPath ?? null
+      : null
+    let ownedRoot: string | null = null
     if (subpage === 'editor' && projectEditorTerminalId === terminalId) {
-      root = projectEditorCwd || fallbackCwd || null
+      ownedRoot = projectEditorCwd || null
     } else if (subpage === 'diff' && gitDiffTerminalId === terminalId) {
-      root = gitDiffCwd || fallbackCwd || null
+      ownedRoot = gitDiffCwd || null
     } else if (subpage === 'history' && gitHistoryTerminalId === terminalId) {
-      root = gitHistoryCwd || fallbackCwd || null
+      ownedRoot = gitHistoryCwd || null
     }
     return {
       terminalId,
-      root,
+      root: resolveSubpageMemoryRoot(preferredRoot ?? panelRoot, ownedRoot, fallbackCwd),
       tabId: _tabId ?? null
     }
   }, [
@@ -2378,14 +2388,21 @@ export const TerminalGrid = memo(function TerminalGrid({
     const target = command.target
     if (!target) return
     const lifecycle = panelShellStatesRef.current[target]?.lifecycle
-    const scope = resolveSubpageMemoryScope(command.terminalId, target)
-    // Restore the saved snapshot ONLY on a genuine cross-subpage switch (came
-    // FROM a different subpage). A fresh open or a same-subpage reopen must open
-    // blank (GDS-31), so clear any stale snapshot for this scope first. A switch
-    // preserves the snapshot saved on the way out, so switching back restores
-    // the prior selection (SN-07 / CDP-06).
-    const isGenuineSwitch = shouldRestoreSubpageOnEnter(command.from, target)
-    if (!isGenuineSwitch) {
+    const routeRoot = target === 'editor'
+      ? command.targetFile?.repoRoot ?? null
+      : command.panelRoot ?? command.targetFile?.repoRoot ?? null
+    const scope = resolveSubpageMemoryScope(command.terminalId, target, routeRoot)
+    // Restore only for a generic cross-subpage switch. A fresh open, same-page
+    // reopen, or explicit file jump must not let stale page memory override the
+    // requested target. Clearing here also makes the explicit target the new
+    // baseline captured on the next leave.
+    const shouldRestoreStoredSnapshot = shouldRestoreStoredSubpageSnapshot({
+      from: command.from,
+      target,
+      intent: command.intent,
+      hasExplicitFileTarget: Boolean(command.targetFile)
+    })
+    if (!shouldRestoreStoredSnapshot) {
       subpageStateMemoryRef.current.clear(scope, target)
     }
     const stored = subpageStateMemoryRef.current.read(scope, target)
@@ -2461,20 +2478,28 @@ export const TerminalGrid = memo(function TerminalGrid({
         ? {
             filePath: command.targetFile.filePath,
             repoRoot: command.targetFile.repoRoot,
+            changeType: command.targetFile.changeType,
             nonce: ++gitDiffNavigationTargetNonceRef.current
           }
         : null)
-      void handleViewGitDiff(command.terminalId, { closeOtherSubpages: false })
+      const preferredRoot = command.panelRoot
+        ?? (shouldApplySubpageTargetFile(command) ? command.targetFile?.repoRoot ?? null : null)
+      void handleViewGitDiff(command.terminalId, { closeOtherSubpages: false, preferredRoot })
     } else if (target === 'history') {
-      void handleViewGitHistory(command.terminalId, { closeOtherSubpages: false })
+      void handleViewGitHistory(command.terminalId, {
+        closeOtherSubpages: false,
+        preferredRoot: command.panelRoot
+      })
     } else if (target === 'editor') {
       void onOpenProjectEditor(command.terminalId, {
         filePath: shouldApplySubpageTargetFile(command) ? command.targetFile?.filePath ?? null : null,
         repoRoot: shouldApplySubpageTargetFile(command) ? command.targetFile?.repoRoot ?? null : null,
+        changeType: shouldApplySubpageTargetFile(command) ? command.targetFile?.changeType ?? null : null,
         source: command.source,
         returnTarget: command.returnTarget,
         diffFilePath: shouldApplySubpageTargetFile(command) ? command.targetFile?.diffFilePath ?? null : null,
-        diffRepoRoot: shouldApplySubpageTargetFile(command) ? command.targetFile?.diffRepoRoot ?? null : null
+        diffRepoRoot: shouldApplySubpageTargetFile(command) ? command.targetFile?.diffRepoRoot ?? null : null,
+        panelRoot: command.panelRoot
       })
     }
 

@@ -151,6 +151,14 @@ export interface GitDiffDebugApi {
   getIsDraftDirty?: () => boolean
   getRestoreNotice: () => { type: 'missing' | 'changed'; message: string; fileName?: string } | null
   getScrollTop: () => number
+  getScrollMetrics: () => {
+    scrollTop: number
+    scrollHeight: number
+    viewportHeight: number
+    maxScrollTop: number
+    modelMatchesSelection: boolean
+    diffReady: boolean
+  } | null
   getFirstVisibleLine: () => number
   scrollToFraction: (fraction: number) => boolean
   scrollToLine: (line: number) => boolean
@@ -299,6 +307,11 @@ export interface GitHistoryDebugApi {
     error: string | null
   } | null
   getDiffError?: () => string | null
+  getScrollState?: () => {
+    commit: number
+    file: number
+    diff: number
+  }
   getImagePreviewState?: () => {
     isImage: boolean
     isSvg: boolean
@@ -449,6 +462,15 @@ export interface ProjectEditorDebugApi {
     markdownCacheMode: 'hit' | 'miss' | 'stale' | 'disabled' | null
     finalizedAt: number
   } | null
+  getSourceReturnBarState?: () => {
+    visible: boolean
+    source: 'diff' | 'history' | null
+    backEnabled: boolean
+    jumpEnabled: boolean
+    checking: boolean
+    activeFilePath: string | null
+  }
+  triggerSourceReturnBack?: () => Promise<boolean>
   getDiffReturnBarState?: () => {
     visible: boolean
     backEnabled: boolean
@@ -501,17 +523,34 @@ export interface ProjectEditorDebugApi {
     visible: boolean
     src: string | null
     filePath: string
+    stateReady: boolean
+    currentState: {
+      page: number
+      scrollTop: number
+      scale: string | null
+    } | null
   } | null
   isEpubReaderVisible?: () => boolean
   getEpubReaderState?: () => {
     visible: boolean
     hasContent: boolean
+    stateReady: boolean
     tocCount: number
     fontSizeLabel: string | null
     filePath: string
     errorMessage: string | null
     contentHtmlLen: number
     currentLocationHref: string | null
+    currentLocationCfi: string | null
+    sessionId: number | null
+    latestAttemptId: number | null
+    settledAttemptId: number | null
+    readyAttemptId: number | null
+    latestTarget: string | null
+    appliedFontPct: number | null
+    bodyFontSizePx: number | null
+    scrollTop: number
+    maxScrollTop: number
   } | null
   isHtmlReaderVisible?: () => boolean
   getHtmlReaderState?: () => {
@@ -527,6 +566,8 @@ export interface ProjectEditorDebugApi {
     canGoBack: boolean
     canGoForward: boolean
     error: string | null
+    scrollRestoreStatus: 'idle' | 'waiting' | 'restoring' | 'restored' | 'failed'
+    restoredScrollY: number | null
     preservedScrollState?: {
       x: number
       y: number
@@ -554,6 +595,8 @@ export interface ProjectEditorDebugApi {
     readyState?: string
     bodyText?: string
     bodyDatasetMarker?: string | null
+    relativeScriptMarker?: string | null
+    navigationAccent?: string | null
     externalReady?: boolean
     localReady?: boolean
     saveMarker?: string | null

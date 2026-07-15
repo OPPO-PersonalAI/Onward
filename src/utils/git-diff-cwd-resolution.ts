@@ -25,6 +25,7 @@
  * through to the next source rather than pinning the diff to "".
  */
 export interface GitDiffCwdSources {
+  routeRoot?: string | null
   cwdOverride?: string | null
   repoRoot?: string | null
   terminalCwd?: string | null
@@ -33,6 +34,7 @@ export interface GitDiffCwdSources {
 
 export function resolveGitDiffInitialCwd(sources: GitDiffCwdSources): string | null {
   const order: Array<string | null | undefined> = [
+    sources.routeRoot,
     sources.cwdOverride,
     sources.repoRoot,
     sources.terminalCwd,

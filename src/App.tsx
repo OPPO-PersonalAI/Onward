@@ -25,7 +25,7 @@ import {
   TerminalFocusRequest
 } from './types/prompt'
 import type { TerminalBatchIssue, TerminalBatchIssueReason } from './types/prompt'
-import type { AppInfo, CurrentChangelogResult, Prompt } from './types/electron.d.ts'
+import type { AppInfo, CurrentChangelogResult, GitChangeType, Prompt } from './types/electron.d.ts'
 import type { TabState, EditorDraft, PromptCleanupConfig, PromptSchedule, ExecutionLogEntry } from './types/tab.d.ts'
 import type { ShortcutAction } from './types/settings.d.ts'
 import type {
@@ -221,10 +221,12 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   onOpenProjectEditor: (terminalId: string, options?: {
     filePath?: string | null
     repoRoot?: string | null
+    changeType?: GitChangeType | null
     source?: SubpageId | null
     returnTarget?: SubpageId | null
-    diffFilePath?: string | null
-    diffRepoRoot?: string | null
+	    diffFilePath?: string | null
+	    diffRepoRoot?: string | null
+	    panelRoot?: string | null
   }) => void
   projectEditorTerminalId: string | null
   projectEditorCwd: string | null
@@ -1424,10 +1426,12 @@ function AppContent({
     options?: {
       filePath?: string | null
       repoRoot?: string | null
+      changeType?: GitChangeType | null
       source?: SubpageId | null
       returnTarget?: SubpageId | null
       diffFilePath?: string | null
       diffRepoRoot?: string | null
+      panelRoot?: string | null
     }
   ) => {
     if (
@@ -1451,6 +1455,7 @@ function AppContent({
       ? retainedScope.cwd
       : null
     const immediateCwd = requestedRepoRoot ?? retainedCwd
+    let resolvedCwdForRequest: string | null = null
     const openToken = ++projectEditorOpenTokenRef.current
     if (activeTab?.terminals.some((terminal) => terminal.id === terminalId) && activeTab.activeTerminalId !== terminalId) {
       updateActiveTab({ activeTerminalId: terminalId })
@@ -1503,6 +1508,7 @@ function AppContent({
       const rawTerminalCwd = resolvedTerminalCwd || immediateCwd || persistedCwd
       const resolvedCwd = resolvedRoot || immediateCwd || persistedCwd
       if (projectEditorOpenTokenRef.current !== openToken) return
+      resolvedCwdForRequest = resolvedCwd
       if (resolvedCwd) {
         lastProjectEditorOpenScopeRef.current = { terminalId, cwd: resolvedCwd }
       }
@@ -1516,6 +1522,7 @@ function AppContent({
     } catch {
       if (projectEditorOpenTokenRef.current !== openToken) return
       const fallbackCwd = immediateCwd || persistedCwd
+      resolvedCwdForRequest = fallbackCwd
       if (fallbackCwd) {
         lastProjectEditorOpenScopeRef.current = { terminalId, cwd: fallbackCwd }
       }
@@ -1533,10 +1540,13 @@ function AppContent({
         terminalId,
         filePath: requestedFilePath,
         repoRoot: options.repoRoot ?? null,
+        expectedRoot: resolvedCwdForRequest,
+        changeType: options.changeType ?? null,
         source: options.source ?? null,
         returnTarget: options.returnTarget ?? null,
         diffFilePath: options.diffFilePath ?? null,
-        diffRepoRoot: options.diffRepoRoot ?? null
+        diffRepoRoot: options.diffRepoRoot ?? null,
+        panelRoot: options.panelRoot ?? null
       })
     }
   }, [activeTab, projectEditorOpen, projectEditorTerminalId, projectEditorDirty, setLastFocusedTerminalId, setTerminalLastCwd, state.projectEditorStates, state.tabs, t, updateActiveTab])
@@ -1609,10 +1619,12 @@ function AppContent({
 	        entryPoint: 'legacy-event',
 	        filePath,
 	        repoRoot: customEvent.detail?.repoRoot ?? null,
+	        changeType: customEvent.detail?.changeType ?? null,
 	        source: customEvent.detail?.source ?? null,
 	        returnTarget: customEvent.detail?.returnTarget ?? null,
 	        diffFilePath: customEvent.detail?.diffFilePath ?? null,
-	        diffRepoRoot: customEvent.detail?.diffRepoRoot ?? null
+	        diffRepoRoot: customEvent.detail?.diffRepoRoot ?? null,
+	        panelRoot: customEvent.detail?.panelRoot ?? null
 	      }
 	      window.dispatchEvent(new CustomEvent<SubpageNavigateEventDetail>('subpage:navigate', { detail }))
 	    }

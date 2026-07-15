@@ -59,9 +59,14 @@ import {
 import { buildClickPhaseTraceRecords } from './clickLatencyTraceEmitter'
 import {
   buildGitDiffFileKey,
+  buildGitDiffSelectionSnapshot,
   clearGitDiffMemorySelection,
   clearGitDiffMemorySelectionWhenEmpty,
+  mergeGitDiffSnapshotScroll,
+  resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
+  resolveGitDiffSnapshotSelection,
+  shouldRestoreGitDiffSnapshotScroll,
   type DiffViewAnchor,
   type DiffViewMemory,
   type DiffViewMemoryEntry
@@ -80,6 +85,10 @@ import { buildOpenSkeletonEntries } from './openSkeletonEntries'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { raceWithTimeout } from '../../utils/race-with-timeout'
 import { isWatchdogTimeoutError, makeWatchdogTimeoutError } from './watchdogTimeoutError'
+import {
+  nextGitDiffNavigationLoadSettledEpoch,
+  resolvePendingGitDiffNavigationSelectionDecision
+} from './gitDiffNavigationSelection'
 import '../../styles/path-copy-toast.css'
 import './GitDiffViewer.css'
 
@@ -402,6 +411,7 @@ type GitDiffFileListViewMode = 'tree' | 'flat'
 type GitDiffNavigationTarget = {
   filePath: string
   repoRoot?: string | null
+  changeType?: GitFileStatus['changeType'] | null
   nonce: number
 }
 
@@ -438,6 +448,7 @@ function cacheMissReasonForLoad(
 type DiffNavigationSelectionTarget = {
   filePath: string
   repoRoot: string | null
+  changeType: GitFileStatus['changeType'] | null
 }
 
 type DiffFileTreeNode = {
@@ -553,7 +564,9 @@ function findDiffFileByNavigationTarget(
   for (const file of result.files) {
     const fileRelative = normalizeComparableGitPath(normalizeDiffDisplayPath(file.filename))
     const fileAbsolute = normalizeComparableGitPath(joinGitPath(file.repoRoot || result.cwd, file.filename))
-    if (fileAbsolute === targetAbsolute || (!target.repoRoot && fileRelative === targetRelative)) {
+    const pathMatches = fileAbsolute === targetAbsolute || (!target.repoRoot && fileRelative === targetRelative)
+    const changeTypeMatches = !target.changeType || file.changeType === target.changeType
+    if (pathMatches && changeTypeMatches) {
       return file
     }
   }
@@ -775,6 +788,14 @@ type GitDiffDebugApi = {
   getIsDraftDirty: () => boolean
   getRestoreNotice: () => { type: 'changed'; message: string; fileName?: string } | null
   getScrollTop: () => number
+  getScrollMetrics: () => {
+    scrollTop: number
+    scrollHeight: number
+    viewportHeight: number
+    maxScrollTop: number
+    modelMatchesSelection: boolean
+    diffReady: boolean
+  } | null
   getFirstVisibleLine: () => number
   scrollToFraction: (fraction: number) => boolean
   scrollToLine: (line: number) => boolean
@@ -1248,6 +1269,7 @@ export function GitDiffViewer({
   const diffMemoryRef = useRef<Record<string, DiffViewMemory>>({})
   const diffRestoreCycleRef = useRef(0)
   const diffRestoreAppliedRef = useRef<{ cycle: number; fileKey: string | null }>({ cycle: 0, fileKey: null })
+  const subpageSnapshotRestoreEpochRef = useRef(0)
   const restoredAnchorRef = useRef<Record<string, RestoredAnchor>>({})
   const diffScrollCaptureTimerRef = useRef<number | null>(null)
   const suppressScrollCaptureRef = useRef(false)
@@ -1326,6 +1348,7 @@ export function GitDiffViewer({
   const loadTokenRef = useRef(0)
   const loadInFlightRef = useRef(false)
   const loadQueuedRef = useRef<{ reset?: boolean; silent?: boolean; force?: boolean } | null>(null)
+  const [navigationLoadSettledEpoch, setNavigationLoadSettledEpoch] = useState(0)
   const loadIdleWaitersRef = useRef<Array<() => void>>([])
   const lastDiffRef = useRef<{ cwd: string; originalCwd: string; at: number; result: GitDiffResult } | null>(null)
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -1474,6 +1497,63 @@ export function GitDiffViewer({
   const getFileKey = useCallback((file: GitFileStatus, repoRoot = activeCwd || '') => {
     return buildGitDiffFileKey(file.repoRoot || repoRoot, file)
   }, [activeCwd])
+  const jumpToEditorCheckTokenRef = useRef(0)
+  const buildJumpToEditorTarget = useCallback((file: GitFileStatus | null) => {
+    if (!file?.filename) return null
+    const repoRoot = file.repoRoot || diffResult?.cwd || activeCwd || null
+    if (!repoRoot) return null
+    return {
+      repoRoot,
+      filePath: file.filename,
+      key: getFileKey(file, repoRoot)
+    }
+  }, [activeCwd, diffResult?.cwd, getFileKey])
+  const jumpToEditorTarget = useMemo(
+    () => buildJumpToEditorTarget(selectedFile),
+    [buildJumpToEditorTarget, selectedFile]
+  )
+  const [jumpToEditorCheck, setJumpToEditorCheck] = useState<{
+    key: string | null
+    status: 'checking' | 'available' | 'missing'
+  }>({ key: null, status: 'missing' })
+  const jumpToEditorStatus = !selectedFile
+    ? 'no-selection'
+    : !jumpToEditorTarget
+      ? 'missing'
+      : jumpToEditorCheck.key === jumpToEditorTarget.key
+        ? jumpToEditorCheck.status
+        : 'checking'
+
+  useEffect(() => {
+    const token = jumpToEditorCheckTokenRef.current + 1
+    jumpToEditorCheckTokenRef.current = token
+    if (!isOpen || !jumpToEditorTarget) {
+      setJumpToEditorCheck({ key: null, status: 'missing' })
+      return
+    }
+
+    const { key, repoRoot, filePath } = jumpToEditorTarget
+    setJumpToEditorCheck({ key, status: 'checking' })
+    void window.electronAPI.project.filesExist(repoRoot, [filePath])
+      .then((exists) => {
+        if (jumpToEditorCheckTokenRef.current !== token) return
+        setJumpToEditorCheck({ key, status: exists[0] ? 'available' : 'missing' })
+      })
+      .catch(() => {
+        if (jumpToEditorCheckTokenRef.current !== token) return
+        setJumpToEditorCheck({ key, status: 'missing' })
+      })
+    return () => {
+      if (jumpToEditorCheckTokenRef.current === token) {
+        jumpToEditorCheckTokenRef.current += 1
+      }
+    }
+  }, [
+    isOpen,
+    jumpToEditorTarget,
+    mirrorSnapshot?.changeFingerprint,
+    mirrorSnapshot?.generation
+  ])
 
   useEffect(() => {
     const current = auxiliaryMirrorRootsRef.current
@@ -1885,9 +1965,20 @@ export function GitDiffViewer({
     if (!memory) return
     const editor = diffEditorRef.current
     if (!editor) return
-    const fileKey = fileKeyOverride ?? selectedFileKey
-    if (!fileKey || !selectedFile) return
+    const file = selectedFileRef.current
+    const fileKey = fileKeyOverride ?? (file ? getFileKey(file) : null)
+    if (!fileKey || !file) return
+    const fileState = fileContentsRef.current[fileKey]
     const modifiedEditor = editor.getModifiedEditor()
+    const expectedModelUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    if (
+      !fileState
+      || fileState.loading
+      || fileState.isBinary
+      || modifiedEditor.getModel()?.uri.toString() !== expectedModelUri
+    ) {
+      return
+    }
     const visibleRanges = modifiedEditor.getVisibleRanges()
     const firstVisibleLine = visibleRanges.length > 0 ? visibleRanges[0].startLineNumber : null
     const scrollTop = modifiedEditor.getScrollTop()
@@ -1895,16 +1986,16 @@ export function GitDiffViewer({
       line: firstVisibleLine,
       scrollTop
     }
-    const signature = selectedFileState && !selectedFileState.isBinary
+    const signature = fileState && !fileState.isBinary
       ? buildDiffSignature(
-        selectedFileState.originalContent ?? '',
-        selectedFileState.draftContent ?? selectedFileState.modifiedContent ?? ''
+        fileState.originalContent ?? '',
+        fileState.draftContent ?? fileState.modifiedContent ?? ''
       )
       : null
     memory.entries[fileKey] = {
       fileKey,
-      filePath: selectedFile.filename,
-      originalFilename: selectedFile.originalFilename,
+      filePath: file.filename,
+      originalFilename: file.originalFilename,
       anchor,
       scrollTop,
       signature,
@@ -1912,10 +2003,9 @@ export function GitDiffViewer({
     }
     memory.selectedFileKey = fileKey
   }, [
-    getMemoryStore,
-    selectedFile,
-    selectedFileKey,
-    selectedFileState
+    activeCwd,
+    getFileKey,
+    getMemoryStore
   ])
 
   const clearCurrentMemorySelection = useCallback(() => {
@@ -3171,6 +3261,7 @@ export function GitDiffViewer({
       } else {
         resolveLoadIdleWaiters()
       }
+      setNavigationLoadSettledEpoch(nextGitDiffNavigationLoadSettledEpoch)
     }
   }, [applyLoadedDiffResult, cwd, cwdPending, getDiffWithWatchdog, markDiffLoadedForTiming, resetViewerState, resolveLoadIdleWaiters, t, waitForLoadIdle])
 
@@ -3435,6 +3526,7 @@ export function GitDiffViewer({
     gitDiffOpenAtRef.current = null
     coldMountRecordedRef.current = false
     if (wasOpenRef.current) {
+      subpageSnapshotRestoreEpochRef.current += 1
       captureDiffView()
       clearCurrentMemorySelection()
       wasOpenRef.current = false
@@ -4362,7 +4454,8 @@ export function GitDiffViewer({
       if (!detail.filePath) return
       pendingNavigationSelectRef.current = {
         filePath: detail.filePath,
-        repoRoot: detail.repoRoot ?? null
+        repoRoot: detail.repoRoot ?? null,
+        changeType: detail.changeType ?? null
       }
       setPendingNavigationSelectNonce((nonce) => nonce + 1)
     }
@@ -4375,21 +4468,29 @@ export function GitDiffViewer({
 
   useEffect(() => {
     const target = pendingNavigationSelectRef.current
-    if (!target || !diffResult?.success) return
     const match = findDiffFileByNavigationTarget(diffResult, target)
-    if (!match) return
+    const decision = resolvePendingGitDiffNavigationSelectionDecision({
+      isOpen,
+      loadInFlight: loadInFlightRef.current,
+      hasDiffResult: Boolean(diffResult?.success),
+      hasTarget: Boolean(target),
+      hasMatch: Boolean(match)
+    })
+    if (decision === 'wait') return
     pendingNavigationSelectRef.current = null
+    if (decision === 'discard' || !match) return
     handleFileSelect(match)
-  }, [diffResult, handleFileSelect, pendingNavigationSelectNonce])
+  }, [diffResult, handleFileSelect, isOpen, navigationLoadSettledEpoch, pendingNavigationSelectNonce])
 
   useEffect(() => {
     if (!isOpen || !navigationTarget?.filePath) return
     pendingNavigationSelectRef.current = {
       filePath: navigationTarget.filePath,
-      repoRoot: navigationTarget.repoRoot ?? null
+      repoRoot: navigationTarget.repoRoot ?? null,
+      changeType: navigationTarget.changeType ?? null
     }
     setPendingNavigationSelectNonce((nonce) => nonce + 1)
-  }, [isOpen, navigationTarget?.filePath, navigationTarget?.nonce, navigationTarget?.repoRoot])
+  }, [isOpen, navigationTarget?.changeType, navigationTarget?.filePath, navigationTarget?.nonce, navigationTarget?.repoRoot])
 
   const clearLineSelection = useCallback(() => {
     setSelectedLineRangeValue(null)
@@ -4445,113 +4546,105 @@ export function GitDiffViewer({
     applyLiveDraftChangeRef.current = applyLiveDraftChange
   }, [applyLiveDraftChange])
 
-  const scheduleDiffRestore = useCallback((editor: monacoTypes.editor.IStandaloneDiffEditor) => {
-    suppressScrollCaptureRef.current = true
-    window.setTimeout(() => {
-      const currentCycle = diffRestoreCycleRef.current
-      const file = selectedFileRef.current
-      const fileKey = file ? getFileKey(file) : null
-      if (!file || !fileKey) {
-        suppressScrollCaptureRef.current = false
-        return
-      }
+  const restoreSubpageSnapshotScroll = useCallback(async (
+    file: GitFileStatus,
+    fileKey: string,
+    scrollTop: number | null | undefined,
+    restoreEpoch: number
+  ): Promise<boolean> => {
+    if (typeof scrollTop !== 'number' || !Number.isFinite(scrollTop) || scrollTop < 0) {
+      return false
+    }
+
+    const expectedModelUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
       if (
-        diffRestoreAppliedRef.current.cycle === currentCycle &&
-        diffRestoreAppliedRef.current.fileKey === fileKey
+        subpageSnapshotRestoreEpochRef.current !== restoreEpoch
+        || !isOpenRef.current
       ) {
-        suppressScrollCaptureRef.current = false
-        return
+        return false
       }
-      const memory = getMemoryStore()
-      if (!memory) {
-        suppressScrollCaptureRef.current = false
-        return
-      }
-      const entry = findMemoryEntry(memory, file, fileKey)
-      if (!entry) {
-        debugLog('restore:no-entry', { fileKey })
-        suppressScrollCaptureRef.current = false
-        return
-      }
-      const headerTitle = file.originalFilename && (file.status === 'R' || file.status === 'C')
-        ? `${file.originalFilename} → ${file.filename}`
-        : file.filename
-      if (file.status === 'D') {
-        diffRestoreAppliedRef.current = { cycle: currentCycle, fileKey }
-        suppressScrollCaptureRef.current = false
-        return
-      }
-      const currentFileState = fileContentsRef.current[fileKey]
-      if (entry.signature && currentFileState && !currentFileState.isBinary) {
+      const liveFile = selectedFileRef.current
+      const liveFileKey = liveFile ? getFileKey(liveFile) : null
+      if (liveFileKey !== fileKey) return false
+
+      const editor = diffEditorRef.current?.getModifiedEditor()
+      const fileState = fileContentsRef.current[fileKey]
+      const modelUri = editor?.getModel()?.uri.toString() ?? null
+      const layoutHeight = editor?.getLayoutInfo().height ?? 0
+      if (
+        editor
+        && fileState
+        && !fileState.loading
+        && !fileState.isBinary
+        && modelUri === expectedModelUri
+        && layoutHeight > 0
+      ) {
         const currentSignature = buildDiffSignature(
-          currentFileState.originalContent ?? '',
-          currentFileState.draftContent ?? currentFileState.modifiedContent ?? ''
+          fileState.originalContent ?? '',
+          fileState.draftContent ?? fileState.modifiedContent ?? ''
         )
-        if (currentSignature !== entry.signature) {
-          diffRestoreAppliedRef.current = { cycle: currentCycle, fileKey }
-          // Banner suppressed by user preference — silently abandon scroll
-          // restoration when the signature mismatches and let the user
-          // land wherever Monaco places them naturally.
-          suppressScrollCaptureRef.current = false
-          return
-        }
-      }
-
-      const modifiedEditor = editor.getModifiedEditor()
-      const lineCount = modifiedEditor.getModel()?.getLineCount() ?? 0
-      let targetLine = entry.anchor?.line ?? null
-      if (targetLine !== null) {
-        if (lineCount <= 0) {
-          window.setTimeout(() => {
-            scheduleDiffRestore(editor)
-          }, 40)
-          return
-        }
-        targetLine = Math.max(1, Math.min(targetLine, lineCount))
-      }
-
-      restoredAnchorRef.current[fileKey] = {
-        line: targetLine,
-        scrollTop: entry.scrollTop
-      }
-
-      if (targetLine) {
-        debugLog('restore:line', { fileKey, line: targetLine })
-      }
-
-      if (entry.scrollTop > 0) {
-        const applyScrollTop = (attempt: number) => {
-          const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
-          if (liveFileKey !== fileKey || diffRestoreCycleRef.current !== currentCycle) return
-          const currentEditor = diffEditorRef.current?.getModifiedEditor()
-          if (!currentEditor) return
-          currentEditor.setScrollTop(entry.scrollTop)
-          if (attempt < 2 && Math.abs(currentEditor.getScrollTop() - entry.scrollTop) > 1) {
-            window.requestAnimationFrame(() => applyScrollTop(attempt + 1))
-            return
+        const previousSignature = getMemoryStore()?.entries[fileKey]?.signature
+        if (!shouldRestoreGitDiffSnapshotScroll(previousSignature, currentSignature)) {
+          diffRestoreAppliedRef.current = {
+            cycle: diffRestoreCycleRef.current,
+            fileKey
           }
-          debugLog('restore:scrollTop-adjust', {
-            fileKey,
-            scrollTop: entry.scrollTop,
-            actualScrollTop: currentEditor.getScrollTop(),
-            attempts: attempt + 1
-          })
+          debugLog('restore:subpage-snapshot:content-changed', { fileKey })
+          return false
         }
-        window.requestAnimationFrame(() => applyScrollTop(0))
-        window.setTimeout(() => applyScrollTop(0), 120)
-      } else if (targetLine) {
-        revealLineNearTopSafe(modifiedEditor, targetLine)
-      } else if (entry.scrollTop > 0) {
-        modifiedEditor.setScrollTop(entry.scrollTop)
-        debugLog('restore:scrollTop', { fileKey, scrollTop: entry.scrollTop })
+        const targetScrollTop = resolveGitDiffSnapshotScrollTop(
+          scrollTop,
+          editor.getScrollHeight(),
+          layoutHeight
+        )
+        if (targetScrollTop === null) return false
+        editor.setScrollTop(targetScrollTop)
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 16))
+
+        const currentFile = selectedFileRef.current
+        const currentFileKey = currentFile ? getFileKey(currentFile) : null
+        const currentEditor = diffEditorRef.current?.getModifiedEditor()
+        if (
+          subpageSnapshotRestoreEpochRef.current !== restoreEpoch
+          || !isOpenRef.current
+          || currentFileKey !== fileKey
+          || currentEditor?.getModel()?.uri.toString() !== expectedModelUri
+        ) {
+          return false
+        }
+
+        currentEditor.setScrollTop(targetScrollTop)
+        const actualScrollTop = currentEditor.getScrollTop()
+        if (Math.abs(actualScrollTop - targetScrollTop) <= 1) {
+          const visibleRanges = currentEditor.getVisibleRanges()
+          restoredAnchorRef.current[fileKey] = {
+            line: visibleRanges.length > 0 ? visibleRanges[0].startLineNumber : null,
+            scrollTop: targetScrollTop
+          }
+          diffRestoreAppliedRef.current = {
+            cycle: diffRestoreCycleRef.current,
+            fileKey
+          }
+          debugLog('restore:subpage-snapshot', {
+            fileKey,
+            requestedScrollTop: scrollTop,
+            targetScrollTop,
+            actualScrollTop
+          })
+          return true
+        }
       }
-      diffRestoreAppliedRef.current = { cycle: currentCycle, fileKey }
-      setDiffRestoreNotice(null)
-      window.setTimeout(() => {
-        suppressScrollCaptureRef.current = false
-      }, 200)
-    }, 80)
-  }, [findMemoryEntry, getFileKey, getMemoryStore, t])
+
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 40))
+    }
+
+    if (subpageSnapshotRestoreEpochRef.current === restoreEpoch) {
+      debugLog('restore:subpage-snapshot:timeout', { fileKey, scrollTop })
+    }
+    return false
+  }, [activeCwd, getFileKey, getMemoryStore])
 
   const handleEditorDidMount = useCallback(
     (editor: monacoTypes.editor.IStandaloneDiffEditor, monaco: typeof monacoTypes) => {
@@ -5242,22 +5335,35 @@ export function GitDiffViewer({
     if (!selectedFile) return t('gitDiff.jumpToEditorDisabled.noFile')
     if (selectedFile.isSubmoduleEntry) return t('gitDiff.jumpToEditorDisabled.submodule')
     if (selectedFile.status === 'D') return t('gitDiff.jumpToEditorDisabled.deleted')
+    if (jumpToEditorStatus === 'checking') return t('gitDiff.jumpToEditorDisabled.checking')
+    if (jumpToEditorStatus === 'missing') return t('gitDiff.jumpToEditorDisabled.missing')
     return null
-  }, [selectedFile, t])
+  }, [jumpToEditorStatus, selectedFile, t])
 
   const handleOpenEditor = useCallback(() => {
     if (!terminalId) return
     if (jumpToEditorDisabledReason) return
-    if (!confirmCloseWithDraft()) return
     const activeFile = selectedFileRef.current ?? selectedFile
+    const activeTarget = buildJumpToEditorTarget(activeFile)
+    if (
+      !activeFile
+      || activeFile.isSubmoduleEntry
+      || activeFile.status === 'D'
+      || !activeTarget
+      || jumpToEditorCheck.key !== activeTarget.key
+      || jumpToEditorCheck.status !== 'available'
+    ) return
+    if (!confirmCloseWithDraft()) return
     const detail: ProjectEditorOpenEventDetail = {
       terminalId,
       filePath: activeFile?.filename ?? null,
       repoRoot: activeFile?.repoRoot || diffResult?.cwd || activeCwd || null,
+      changeType: activeFile?.changeType ?? null,
       source: 'diff',
       returnTarget: 'diff',
       diffFilePath: activeFile?.filename ?? null,
-      diffRepoRoot: activeFile?.repoRoot || diffResult?.cwd || activeCwd || null
+      diffRepoRoot: activeFile?.repoRoot || diffResult?.cwd || activeCwd || null,
+      panelRoot: diffResult?.cwd || activeCwd || null
     }
     persistCurrentDiffSplitRatio()
     captureDiffView()
@@ -5267,7 +5373,8 @@ export function GitDiffViewer({
       terminalId,
       cwd: activeCwd,
       filename: detail.filePath,
-      repoRoot: detail.repoRoot
+      repoRoot: detail.repoRoot,
+      changeType: detail.changeType
     })
     window.dispatchEvent(new CustomEvent<SubpageNavigateEventDetail>('subpage:navigate', {
       detail: {
@@ -5278,18 +5385,22 @@ export function GitDiffViewer({
         entryPoint: 'deep-link',
         filePath: detail.filePath,
         repoRoot: detail.repoRoot,
+        changeType: detail.changeType,
         source: detail.source,
         returnTarget: detail.returnTarget,
         diffFilePath: detail.diffFilePath,
-        diffRepoRoot: detail.diffRepoRoot
+        diffRepoRoot: detail.diffRepoRoot,
+        panelRoot: detail.panelRoot
       }
     }))
   }, [
     activeCwd,
+    buildJumpToEditorTarget,
     captureDiffView,
     confirmCloseWithDraft,
     detachDiffEditor,
     diffResult?.cwd,
+    jumpToEditorCheck,
     jumpToEditorDisabledReason,
     persistCurrentDiffSplitRatio,
     selectedFile,
@@ -5824,6 +5935,25 @@ export function GitDiffViewer({
       getIsDraftDirty: () => isDraftDirtyRef.current,
       getRestoreNotice: () => diffRestoreNotice,
       getScrollTop: () => diffEditorRef.current?.getModifiedEditor().getScrollTop() ?? 0,
+      getScrollMetrics: () => {
+        const editor = diffEditorRef.current
+        const modifiedEditor = editor?.getModifiedEditor()
+        if (!editor || !modifiedEditor) return null
+        const scrollHeight = modifiedEditor.getScrollHeight()
+        const viewportHeight = modifiedEditor.getLayoutInfo().height
+        const file = selectedFileRef.current
+        const expectedModelUri = file ? buildGitDiffModelPath(file, activeCwd, 'modified') : null
+        return {
+          scrollTop: modifiedEditor.getScrollTop(),
+          scrollHeight,
+          viewportHeight,
+          maxScrollTop: Math.max(0, scrollHeight - viewportHeight),
+          modelMatchesSelection: Boolean(
+            expectedModelUri && modifiedEditor.getModel()?.uri.toString() === expectedModelUri
+          ),
+          diffReady: editor.getLineChanges() !== null
+        }
+      },
       getFirstVisibleLine: () => {
         const editor = diffEditorRef.current
         if (!editor) return 0
@@ -7237,6 +7367,10 @@ export function GitDiffViewer({
 	      <SubpagePanelButton
 	        className="git-diff-jump-editor"
 	        data-testid="git-diff-jump-editor"
+	        data-jump-status={jumpToEditorStatus}
+	        data-jump-file={jumpToEditorTarget?.filePath ?? ''}
+	        data-jump-root={jumpToEditorTarget?.repoRoot ?? ''}
+	        data-jump-change-type={selectedFile?.changeType ?? ''}
 	        onClick={handleOpenEditor}
 	        disabled={Boolean(jumpToEditorDisabledReason)}
         title={jumpToEditorDisabledReason ?? t('gitDiff.jumpToEditorTitle')}
@@ -7261,6 +7395,8 @@ export function GitDiffViewer({
     cwdPending,
     handleOpenEditor,
     isRefreshingChanges,
+    jumpToEditorStatus,
+    jumpToEditorTarget,
     jumpToEditorDisabledReason,
     navigateDiffChange,
     refreshChanges,
@@ -7288,13 +7424,26 @@ export function GitDiffViewer({
     onSelect: handleSelectSubpage,
     lifecycle: {
       beforeLeave: () => {
+        subpageSnapshotRestoreEpochRef.current += 1
         persistCurrentDiffSplitRatio()
-        captureDiffView()
+        const liveFile = selectedFileRef.current
+        const liveSelection = buildGitDiffSelectionSnapshot(activeCwd || '', liveFile)
+        captureDiffView(liveSelection.selectedFileKey)
+        const modifiedEditor = diffEditorRef.current?.getModifiedEditor() ?? null
+        const liveFileKey = liveFile ? getFileKey(liveFile) : null
+        const liveFileState = liveFileKey ? fileContentsRef.current[liveFileKey] : null
+        const hasCurrentTextModel = Boolean(
+          liveFile
+          && liveFileState
+          && !liveFileState.loading
+          && !liveFileState.isBinary
+          && modifiedEditor?.getModel()?.uri.toString()
+            === buildGitDiffModelPath(liveFile, activeCwd, 'modified')
+        )
         return {
           subpage: 'diff',
-          selectedFilePath: selectedFileRef.current?.filename ?? null,
-          selectedFileKey,
-          scrollTop: diffEditorRef.current?.getModifiedEditor().getScrollTop() ?? null,
+          ...liveSelection,
+          scrollTop: hasCurrentTextModel ? modifiedEditor?.getScrollTop() ?? null : null,
           splitRatio: diffSplitRatioRef.current
         }
       },
@@ -7304,8 +7453,11 @@ export function GitDiffViewer({
         // restoredSnapshot; a fresh open passes null → stays blank, GDS-31). The
         // open path suppresses auto-restore (openingFromClosed), so this explicit
         // select overrides the blank for the switch-back case (SN-07 / CDP-06).
+        const restoreEpoch = ++subpageSnapshotRestoreEpochRef.current
         const snap = context.restoredSnapshot
         const wantedPath = snap?.subpage === 'diff' ? snap.selectedFilePath : null
+        const wantedKey = snap?.subpage === 'diff' ? snap.selectedFileKey : null
+        const wantedScrollTop = snap?.subpage === 'diff' ? snap.scrollTop : null
         if (!wantedPath) {
           perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBPAGE_RESTORE, {
             terminalId, hadSnapshot: Boolean(snap), restoredFile: null,
@@ -7318,15 +7470,49 @@ export function GitDiffViewer({
         const deadline = Date.now() + COLD_DIFF_RESTORE_BUDGET_MS
         let target: GitFileStatus | null = null
         for (;;) {
+          if (
+            subpageSnapshotRestoreEpochRef.current !== restoreEpoch
+            || !isOpenRef.current
+          ) {
+            return
+          }
           const files = diffResultRef.current?.files ?? []
-          target = files.find((f) => f.filename === wantedPath || f.originalFilename === wantedPath) ?? null
+          const repoRoot = diffResultRef.current?.cwd || activeCwd || ''
+          target = resolveGitDiffSnapshotSelection(files, repoRoot, {
+            selectedFilePath: wantedPath,
+            selectedFileKey: wantedKey
+          })
           if (target || Date.now() >= deadline) break
-          await new Promise((resolve) => setTimeout(resolve, 80))
+          await new Promise((resolve) => window.setTimeout(resolve, 80))
         }
-        if (target) handleFileSelect(target)
+        let snapshotScrollRestored = false
+        if (target) {
+          const targetKey = getFileKey(target)
+          const memory = getMemoryStore()
+          const snapshotScrollMerged = memory
+            ? mergeGitDiffSnapshotScroll(memory, target, targetKey, wantedScrollTop)
+            : false
+          if (snapshotScrollMerged) {
+            diffRestoreAppliedRef.current = {
+              cycle: diffRestoreCycleRef.current,
+              fileKey: null
+            }
+          }
+          handleFileSelect(target)
+          if (snapshotScrollMerged) {
+            snapshotScrollRestored = await restoreSubpageSnapshotScroll(
+              target,
+              targetKey,
+              wantedScrollTop,
+              restoreEpoch
+            )
+          }
+        }
         perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBPAGE_RESTORE, {
           terminalId, hadSnapshot: true, restoredFile: wantedPath,
-          fileFoundInList: Boolean(target), fileCount: diffResultRef.current?.files?.length ?? 0
+          fileFoundInList: Boolean(target),
+          snapshotScrollRestored,
+          fileCount: diffResultRef.current?.files?.length ?? 0
         })
       }
     },
@@ -7339,6 +7525,7 @@ export function GitDiffViewer({
     metaExtra: externalPanelMetaExtra,
     taskTitle
   }), [
+    activeCwd,
     captureDiffView,
     cwdFeedback,
     cwdTitle,
@@ -7348,7 +7535,10 @@ export function GitDiffViewer({
     handleCwdDblClick,
     handleFileSelect,
     handleSelectSubpage,
+    getFileKey,
+    getMemoryStore,
     persistCurrentDiffSplitRatio,
+    restoreSubpageSnapshotScroll,
     selectedFileKey,
     t,
     taskTitle,

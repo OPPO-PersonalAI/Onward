@@ -8,6 +8,19 @@ import assert from 'node:assert/strict'
 import { resolveGitDiffInitialCwd } from '../../src/utils/git-diff-cwd-resolution.ts'
 
 describe('resolveGitDiffInitialCwd', () => {
+  it('prefers a route root over a sticky debug override when returning to a source panel', () => {
+    assert.equal(
+      resolveGitDiffInitialCwd({
+        routeRoot: '/source/repo',
+        cwdOverride: '/debug/repo',
+        repoRoot: '/terminal/repo',
+        terminalCwd: '/terminal/repo/sub',
+        persistedCwd: '/persisted'
+      }),
+      '/source/repo'
+    )
+  })
+
   it('prefers the explicit cwdOverride over every other source', () => {
     assert.equal(
       resolveGitDiffInitialCwd({

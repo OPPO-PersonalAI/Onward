@@ -14,7 +14,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { shouldRestoreSubpageOnEnter } from '../../src/components/TerminalGrid/subpageRestoreDecision.ts'
+import {
+  shouldRestoreStoredSubpageSnapshot,
+  shouldRestoreSubpageOnEnter
+} from '../../src/components/TerminalGrid/subpageRestoreDecision.ts'
 
 test('genuine cross-subpage switch restores the saved snapshot', () => {
   // Editor -> Diff (SN-07) and History -> Diff (CDP-06): from a DIFFERENT subpage.
@@ -34,4 +37,20 @@ test('same-subpage reopen (from === target) opens blank', () => {
   // prior selection on what is really a fresh open.
   assert.equal(shouldRestoreSubpageOnEnter('diff', 'diff'), false)
   assert.equal(shouldRestoreSubpageOnEnter('editor', 'editor'), false)
+})
+
+test('explicit file jump wins over a stored target-page snapshot', () => {
+  assert.equal(shouldRestoreStoredSubpageSnapshot({
+    from: 'editor',
+    target: 'diff',
+    intent: 'jump',
+    hasExplicitFileTarget: true
+  }), false)
+
+  assert.equal(shouldRestoreStoredSubpageSnapshot({
+    from: 'editor',
+    target: 'diff',
+    intent: 'switch',
+    hasExplicitFileTarget: false
+  }), true)
 })

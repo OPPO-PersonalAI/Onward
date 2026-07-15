@@ -52,6 +52,7 @@ import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 import { performanceTrace } from './performance-trace'
 import { traceStore, runRotationStressForAutotest } from './trace-store'
+import { runBoundedDebugQuit } from './debug-quit-lifecycle'
 
 // ONWARD_SMOKE_LAUNCH=1 makes the main process self-quit once the main window
 // renderer finishes loading, after writing a ready marker to the path in
@@ -328,13 +329,15 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
   isQuitting = true
   installUpdateOnQuit = false
 
-  // Bounded teardown. Under autotest / heavy load a single awaited step
+  // Bounded exit. Under autotest / heavy load a single awaited step
   // (telemetry flush, per-terminal cwd snapshot via PTY round-trips, app-state
   // worker flush, PTY shutdown) can be slow enough that this serial chain never
   // reaches app.quit() before the test watchdog (or an impatient user) gives up
-  // — the observed "20/20 passed then never quits -> 280s watchdog kill". Race
-  // the graceful teardown against a hard-exit floor so quit is ALWAYS bounded,
-  // mirroring the DEBUG_QUIT fallback (ipc-handlers.ts: race(shutdown, timeout)
+  // — the observed "20/20 passed then never quits -> 280s watchdog kill".
+  // Keep a hard-exit floor armed across teardown AND app.quit() so exit is
+  // always bounded. Electron can return from app.quit() while native handles
+  // are still preventing the main process from terminating.
+  // This mirrors the DEBUG_QUIT fallback (ipc-handlers.ts: race(shutdown, timeout)
   // -> app.exit(0)). Step order is preserved: persistTerminalCwdSnapshot writes
   // cwds into app-state via setTerminalLastCwds(), so flushAppStateStorage MUST
   // stay AFTER it; persistWindowState is synchronous and runs first, so window
@@ -362,29 +365,18 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
     logQuitPhase('debug-quit:before-app-quit')
   }
 
-  let hardExitTimer: ReturnType<typeof setTimeout> | null = null
-  const hardExitFloor = new Promise<'floor'>((resolve) => {
-    hardExitTimer = setTimeout(() => resolve('floor'), HARD_EXIT_MS)
+  await runBoundedDebugQuit({
+    hardExitMs: HARD_EXIT_MS,
+    gracefulTeardown,
+    scheduleHardExit: (callback, delayMs) => setTimeout(callback, delayMs),
+    requestQuit: () => {
+      app.quit()
+      logQuitPhase('debug-quit:app-quit-returned')
+    },
+    forceExit: (code) => app.exit(code),
+    onHardExit: () => logQuitPhase('debug-quit:hard-exit-floor'),
+    onTeardownError: (error) => console.warn('[debug-quit] graceful teardown error:', error)
   })
-
-  const outcome = await Promise.race<'graceful' | 'floor'>([
-    gracefulTeardown().then((): 'graceful' => 'graceful').catch((error): 'graceful' => {
-      console.warn('[debug-quit] graceful teardown error:', error)
-      return 'graceful'
-    }),
-    hardExitFloor
-  ])
-  if (hardExitTimer) {
-    clearTimeout(hardExitTimer)
-  }
-
-  if (outcome === 'floor') {
-    // Graceful teardown overran the floor — force exit so quit is never unbounded.
-    logQuitPhase('debug-quit:hard-exit-floor')
-    app.exit(0)
-  } else {
-    app.quit()
-  }
   return { success: true }
 }
 

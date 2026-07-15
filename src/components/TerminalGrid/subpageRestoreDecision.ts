@@ -23,3 +23,13 @@ export function shouldRestoreSubpageOnEnter(
 ): boolean {
   return from != null && from !== target
 }
+
+export function shouldRestoreStoredSubpageSnapshot(params: {
+  from: SubpageId | null | undefined
+  target: SubpageId
+  intent: 'open' | 'switch' | 'jump' | 'close' | 'restore'
+  hasExplicitFileTarget: boolean
+}): boolean {
+  if (!shouldRestoreSubpageOnEnter(params.from, params.target)) return false
+  return !(params.intent === 'jump' && params.hasExplicitFileTarget)
+}
