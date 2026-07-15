@@ -793,6 +793,10 @@ body.git-history-resizing .git-history-file-resizer::after {
   text-align: center;
 }
 
+/* Diff-pane empty state (no file selected) now uses the shared
+   <DiffEmptyState> component + .diff-empty-state styles in
+   src/components/common/DiffEmptyState.css, kept identical to Git Diff. */
+
 .git-history-warning-title {
   font-size: var(--font-md);
   color: var(--text-1);

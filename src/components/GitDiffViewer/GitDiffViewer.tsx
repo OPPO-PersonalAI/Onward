@@ -23,6 +23,7 @@ import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useGitStateMirror } from '../../hooks/useGitStateMirror'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
+import { DiffEmptyState } from '../common/DiffEmptyState'
 import type { ProjectEditorOpenEventDetail, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { SubpagePanelButton, SubpagePanelShell, SubpageSwitcher, type SubpagePanelShellState } from '../SubpageSwitcher'
 import {
@@ -6628,8 +6629,11 @@ export function GitDiffViewer({
   const renderDiffDetail = () => {
     if (!selectedFile) {
       return (
-        <div className="git-diff-no-selection">
-          {t('gitDiff.selectFile')}
+        <DiffEmptyState
+          className="git-diff-no-selection"
+          title={t('gitDiff.clickToView.title')}
+          description={t('gitDiff.clickToView.desc')}
+        >
           {/* Context-menu OS actions can fail without a selection — their
               error toast must stay visible in the empty state too. */}
           {copyMessage && (
@@ -6637,7 +6641,7 @@ export function GitDiffViewer({
               {copyMessage.text}
             </span>
           )}
-        </div>
+        </DiffEmptyState>
       )
     }
 

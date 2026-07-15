@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Git History 默认不展开 diff — 占位符与 Logo 设计</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1d2130; --text: #d7dae2;
+    --muted: #8b91a3; --accent: #5ea1ff; --green: #4ade80; --red: #f87171;
+    --amber: #fbbf24; --border: #2a2f40; --code-bg: #12141c; --purple: #a78bfa;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; }
+  nav#toc { position: fixed; top: 0; left: 0; width: 240px; height: 100vh; overflow-y: auto; background: var(--panel); border-right: 1px solid var(--border); padding: 20px 14px; }
+  nav#toc h2 { font-size: 13px; color: var(--muted); margin-bottom: 12px; letter-spacing: 1px; }
+  nav#toc a { display: block; color: var(--text); text-decoration: none; font-size: 13px; padding: 6px 10px; border-radius: 6px; margin-bottom: 2px; }
+  nav#toc a:hover { background: var(--panel2); }
+  nav#toc a.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  main { margin-left: 240px; padding: 36px 48px; max-width: 1000px; }
+  h1 { font-size: 26px; margin-bottom: 8px; }
+  h2 { font-size: 20px; margin: 40px 0 14px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--accent); }
+  h3 { font-size: 16px; margin: 22px 0 10px; }
+  p { margin-bottom: 12px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+  .callout { border-left: 4px solid var(--accent); background: var(--panel2); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .callout.red { border-left-color: var(--red); }
+  .callout.green { border-left-color: var(--green); }
+  .callout.amber { border-left-color: var(--amber); }
+  .callout.purple { border-left-color: var(--purple); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; background: var(--code-bg); padding: 1px 6px; border-radius: 4px; color: #a5c8ff; }
+  a.ext { color: var(--accent); }
+  .pill { display: inline-block; font-size: 11.5px; padding: 2px 10px; border-radius: 999px; margin-right: 6px; }
+  .pill.rec { background: rgba(74,222,128,.15); color: var(--green); }
+  .pill.alt { background: rgba(94,161,255,.15); color: var(--accent); }
+  .pill.warn { background: rgba(251,191,36,.15); color: var(--amber); }
+
+  /* three-pane mock */
+  .mock-row { display: flex; gap: 20px; flex-wrap: wrap; margin: 16px 0; }
+  .mock { flex: 1; min-width: 300px; }
+  .mock-title { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .panes { display: flex; height: 190px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .pane { border-right: 1px solid var(--border); padding: 8px; font-size: 10.5px; overflow: hidden; }
+  .pane:last-child { border-right: none; }
+  .pane.commits { width: 30%; background: var(--panel); }
+  .pane.files { width: 30%; background: var(--panel2); }
+  .pane.diff { width: 40%; background: var(--code-bg); position: relative; }
+  .row { padding: 4px 6px; border-radius: 4px; margin-bottom: 3px; color: var(--muted); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+  .row.sel { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); }
+  .row.dim { opacity: .45; }
+  .diffline { font-family: "SF Mono", monospace; font-size: 9.5px; padding: 1px 4px; white-space: nowrap; }
+  .diffline.add { color: var(--green); background: rgba(74,222,128,.08); }
+  .diffline.del { color: var(--red); background: rgba(248,113,113,.08); }
+  .diffline.ctx { color: var(--muted); }
+  .lag-badge { position: absolute; top: 8px; right: 8px; font-size: 10px; background: rgba(248,113,113,.2); color: var(--red); padding: 2px 8px; border-radius: 999px; }
+  .empty-pane { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: var(--muted); gap: 8px; padding: 12px; }
+  .empty-pane .et { font-size: 12px; color: var(--text); }
+  .empty-pane .es { font-size: 10px; color: var(--muted); }
+
+  /* logo grid */
+  .logo-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin: 16px 0; }
+  .logo-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .logo-card.picked { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .logo-stage { display: flex; align-items: center; gap: 20px; margin-bottom: 12px; }
+  .logo-render { width: 84px; height: 84px; flex-shrink: 0; border-radius: 12px; background: var(--panel2); display: flex; align-items: center; justify-content: center; color: var(--accent); }
+  .logo-render svg { width: 52px; height: 52px; }
+  .logo-mini { width: 22px; height: 22px; color: var(--accent); }
+  .logo-name { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .logo-meta { font-size: 12.5px; color: var(--muted); }
+  .logo-tag { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--code-bg); color: var(--accent); margin-top: 6px; }
+
+  /* empty-state anatomy preview (real render of the proposed placeholder) */
+  .es-preview { border: 1px dashed var(--border); border-radius: 12px; background: var(--code-bg); padding: 40px 20px; display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; margin: 12px 0; }
+  .es-preview .es-icon { width: 56px; height: 56px; color: color-mix(in srgb, var(--accent) 70%, var(--muted)); opacity: .85; }
+  .es-preview .es-title { font-size: 15px; color: var(--text); font-weight: 600; }
+  .es-preview .es-desc { font-size: 13px; color: var(--muted); max-width: 340px; }
+
+  .meta { margin-top: 48px; padding-top: 16px; border-top: 1px dashed var(--border); font-size: 12.5px; color: var(--muted); }
+  .meta table { font-size: 12px; }
+  @media (max-width: 900px) { nav#toc { display: none; } main { margin-left: 0; padding: 24px; } .logo-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#sec-bg">1. 背景与问题</a>
+  <a href="#sec-peer">2. 竞品调研结论</a>
+  <a href="#sec-behavior">3. 当前 vs 提议交互</a>
+  <a href="#sec-scope">4. 默认态方案 A / B</a>
+  <a href="#sec-restore">5. 恢复上次选中的处理</a>
+  <a href="#sec-empty">6. 占位符设计</a>
+  <a href="#sec-logo">7. Logo 候选（4 个）</a>
+  <a href="#sec-copy">8. 文案草案（中英）</a>
+  <a href="#sec-impl">9. 改动点与测试计划</a>
+  <a href="#sec-decision">10. 待决策项</a>
+</nav>
+<main>
+  <h1>Git History 默认不展开 diff — 占位符与 Logo 设计</h1>
+  <p class="sub">进入 Git History 时不再自动渲染"第一个提交的第一个文件"的完整 diff，改为占位符引导 · 竞品调研 + 交互/视觉方案 · 2026-07-15</p>
+
+  <div class="callout purple">
+    <strong>一句话结论：</strong>你的想法与业界主流一致——我查证的成熟产品<strong>没有一个</strong>是"进入历史后自动铺开第一个文件完整 diff"的。
+    改法在代码上很小：<code>renderDiff()</code> 里"未选中文件"的占位符分支<strong>本就存在</strong>，只是被一行"自动选中第一个文件"给架空了。去掉那行、把占位符升级成带 Logo 的空状态即可。
+  </div>
+
+  <h2 id="sec-bg">1. 背景与问题</h2>
+  <div class="card">
+    <p><strong>现象：</strong>进入 Git History 后，左侧默认选中第一个提交，中间列出该提交的变更文件，右侧<strong>自动选中并渲染第一个文件的完整 diff</strong>。当这个文件很大时，进入瞬间就要做一次重量级 diff 渲染，造成明显卡顿。</p>
+    <p><strong>触发点（代码）：</strong><code>GitHistoryViewer.tsx:1229</code> 的 <code>return files[0]</code> —— 文件列表一就绪，就自动把 <code>selectedFile</code> 落到第一个文件；随后 <code>selectedFile</code> 变化的 effect（<code>1234-1261</code>）立即发起 diff 加载与渲染。</p>
+    <p><strong>目标：</strong>进入时<strong>不</strong>自动渲染任何文件 diff，右侧 diff 区显示一个占位符（Logo + 引导文字），提示用户"点击左侧文件查看修改"。这样把"重渲染"从"进入即发生"改成"用户点击才发生"，卡顿消失。</p>
+  </div>
+
+  <h2 id="sec-peer">2. 竞品调研结论</h2>
+  <p>成熟产品的默认态分两类，都比"自动渲染重 diff"轻：</p>
+  <table>
+    <tr><th>产品</th><th>选中提交后，右侧默认是什么</th><th>逐行 diff 何时渲染</th><th>来源</th></tr>
+    <tr>
+      <td><strong>VS Code</strong>（内置源代码管理 / Timeline）</td>
+      <td>不自动打开任何 diff；列出变更文件，点击文件才把 diff 作为标签页打开（<code>git.openDiffOnClick</code>）</td>
+      <td>点击驱动、按需打开</td>
+      <td><a class="ext" href="https://code.visualstudio.com/docs/sourcecontrol/overview">docs</a> · <a class="ext" href="https://github.com/microsoft/vscode/issues/209029">#209029</a></td>
+    </tr>
+    <tr>
+      <td><strong>GitLens</strong>（提交详情 / Inspect）</td>
+      <td>未选中提交时显示"empty boilerplate"空占位</td>
+      <td>选中后加载</td>
+      <td><a class="ext" href="https://github.com/gitkraken/vscode-gitlens/issues/2382">#2382</a></td>
+    </tr>
+    <tr>
+      <td><strong>JetBrains</strong>（Git Log）</td>
+      <td>选中提交只自动列出<strong>变更文件</strong>（轻量），看逐行 diff 需再点文件 / <code>Ctrl+D</code></td>
+      <td>再点一次才展开</td>
+      <td><a class="ext" href="https://www.jetbrains.com/help/idea/log-tab.html">Log tab</a></td>
+    </tr>
+    <tr>
+      <td><strong>Sublime Merge</strong></td>
+      <td>选中提交默认落在"<strong>summary 摘要</strong>"标签，而非某个文件 diff</td>
+      <td>点文件才看 diff</td>
+      <td><a class="ext" href="https://github.com/sublimehq/sublime_merge/issues/1730">#1730</a></td>
+    </tr>
+    <tr>
+      <td><strong>GitKraken / Fork</strong></td>
+      <td>选中提交 → 显示信息 + 变更文件列表；点文件才看 diff（三段式）</td>
+      <td>点文件才渲染</td>
+      <td><a class="ext" href="https://help.gitkraken.com/gitkraken-desktop/diff/">GitKraken</a> · <a class="ext" href="https://git-fork.com/">Fork</a></td>
+    </tr>
+  </table>
+  <div class="callout green">
+    <strong>空状态设计规范（GitLab Pajamas，最具体可照搬）：</strong>四个组成部分 = 插画/图标 + 标题（≤5 个词、动词开头、结尾不加标点）+ 描述（说明"为什么空 + 下一步做什么"）+（可选）单个行动按钮。
+    我们的场景属于 "Blank content" 类。来源：<a class="ext" href="https://design.gitlab.com/patterns/empty-states/">Pajamas · Empty States</a>
+  </div>
+
+  <h2 id="sec-behavior">3. 当前 vs 提议交互</h2>
+  <div class="mock-row">
+    <div class="mock">
+      <div class="mock-title">🔴 当前：进入即渲染第一个文件 diff（大文件时卡顿）</div>
+      <div class="panes">
+        <div class="pane commits">
+          <div class="row sel">● 9df2b3b docs…</div>
+          <div class="row">● 355ba15 feat…</div>
+          <div class="row">● 1227218 fix…</div>
+        </div>
+        <div class="pane files">
+          <div class="row sel">M big-file.tsx</div>
+          <div class="row">M a.css</div>
+          <div class="row">A b.ts</div>
+        </div>
+        <div class="pane diff">
+          <span class="lag-badge">重渲染 · 卡顿</span>
+          <div class="diffline ctx">@@ -1,400 +1,520 @@</div>
+          <div class="diffline del">- const x = 1</div>
+          <div class="diffline add">+ const x = 2</div>
+          <div class="diffline ctx">  …（数百行）</div>
+          <div class="diffline add">+ …</div>
+          <div class="diffline del">- …</div>
+        </div>
+      </div>
+    </div>
+    <div class="mock">
+      <div class="mock-title">🟢 提议（方案 A）：默认选中提交 + 文件列表，diff 区占位符</div>
+      <div class="panes">
+        <div class="pane commits">
+          <div class="row sel">● 9df2b3b docs…</div>
+          <div class="row">● 355ba15 feat…</div>
+          <div class="row">● 1227218 fix…</div>
+        </div>
+        <div class="pane files">
+          <div class="row">M big-file.tsx</div>
+          <div class="row">M a.css</div>
+          <div class="row">A b.ts</div>
+        </div>
+        <div class="pane diff">
+          <div class="empty-pane">
+            <svg class="logo-mini" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="width:34px;height:34px;">
+              <rect x="8" y="9" width="18" height="24" rx="3"/>
+              <rect x="20" y="15" width="18" height="24" rx="3" fill="var(--code-bg)"/>
+              <line x1="24" y1="24" x2="34" y2="24" stroke="var(--red)"/>
+              <line x1="24" y1="31" x2="34" y2="31" stroke="var(--green)"/>
+              <line x1="29" y1="27.5" x2="29" y2="34.5" stroke="var(--green)"/>
+            </svg>
+            <div class="et">点击文件查看修改</div>
+            <div class="es">选择左侧文件即可展开差异</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="sub">说明：中间"文件列表"只是轻量列表，本来就异步加载、不涉及 diff 渲染，因此保留它不影响性能；被砍掉的只有右侧那次"自动重渲染"。</p>
+
+  <h2 id="sec-scope">4. 默认态方案 A / B</h2>
+  <table>
+    <tr><th>方案</th><th>进入后默认态</th><th>对应竞品</th><th>取舍</th></tr>
+    <tr>
+      <td><strong>A</strong> <span class="pill rec">推荐</span></td>
+      <td>默认<strong>选中第一个提交</strong> + 显示其变更文件列表；右侧 diff 区显示占位符</td>
+      <td>JetBrains / GitKraken / Sublime Merge</td>
+      <td>保留"一眼看到最新提交改了哪些文件"的上下文；只去掉重渲染。改动最小、体验最连贯</td>
+    </tr>
+    <tr>
+      <td><strong>B</strong> <span class="pill alt">备选</span></td>
+      <td>连提交也<strong>不默认选中</strong>；提交/文件/ diff 三栏都空占位</td>
+      <td>更接近"完全零状态"</td>
+      <td>最干净，但进来一片空、要点两次（先选提交再选文件）才有内容，上下文丢失更多</td>
+    </tr>
+  </table>
+  <div class="callout amber">
+    <strong>我的倾向是 A。</strong>卡顿的根源是右侧 diff 的重渲染，而不是"选中提交"或"列文件"。方案 A 精准砍掉重渲染，同时保留有用的上下文——也和大多数专业 Git 工具一致。B 更激进，除非你希望进来完全空白。
+  </div>
+
+  <h2 id="sec-restore">5. 恢复上次选中的处理</h2>
+  <p>现有代码有一段"从 localStorage 恢复上次选中的提交 / 文件 / 滚动位置"逻辑（<code>1134-1178</code> 等）。这里有个隐患：<strong>如果上次恰好停在一个大文件，进入时会自动恢复并重新渲染它的 diff，卡顿又回来了</strong>——这本质上也是一次"进入即重渲染"。</p>
+  <table>
+    <tr><th>选项</th><th>恢复行为</th><th>取舍</th></tr>
+    <tr>
+      <td><strong>R1</strong> <span class="pill rec">推荐</span></td>
+      <td>只恢复<strong>提交选中 + 滚动位置</strong>，<strong>不</strong>自动重新打开上次的文件 diff（右侧仍是占位符）</td>
+      <td>性能表现始终一致，"进入不重渲染"这条规则没有例外，最符合你这次的诉求</td>
+    </tr>
+    <tr>
+      <td><strong>R2</strong> <span class="pill alt">备选</span></td>
+      <td>完全恢复（含重新打开上次的文件 diff）</td>
+      <td>"接着上次看"体验好，但大文件时会重现卡顿——与本次目标相冲突</td>
+    </tr>
+  </table>
+
+  <h2 id="sec-empty">6. 占位符设计</h2>
+  <p>按 Pajamas 规范，占位符 = <strong>图标 + 标题 + 描述</strong>（本场景无需行动按钮，"点击左侧文件"本身就是行动指引）。下面是提议占位符的<strong>真实渲染预览</strong>（此处用 Logo 候选 A 的图标示意，最终图标见第 7 节选择）：</p>
+  <div class="es-preview">
+    <svg class="es-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="8" y="9" width="18" height="24" rx="3"/>
+      <rect x="20" y="15" width="18" height="24" rx="3" fill="var(--code-bg)"/>
+      <line x1="24" y1="24" x2="34" y2="24" stroke="var(--red)"/>
+      <line x1="24" y1="31" x2="34" y2="31" stroke="var(--green)"/>
+      <line x1="29" y1="27.5" x2="29" y2="34.5" stroke="var(--green)"/>
+    </svg>
+    <div class="es-title">点击文件查看修改</div>
+    <div class="es-desc">从左侧文件列表中选择一个文件，即可在此展开它的差异内容。</div>
+  </div>
+  <p class="sub">复用现有 <code>.git-history-no-selection</code> 容器，扩展成"图标 + 标题 + 描述"三段式；颜色沿用主题变量（<code>--accent</code> / <code>--muted</code>），暗色适配无需额外处理。</p>
+
+  <h2 id="sec-logo">7. Logo 候选（4 个）</h2>
+  <p>结合 Lucide 与 VS Code Codicon 两套主流图标库的隐喻，给你 4 个方向（均为原创 SVG，行内绘制、无外部依赖）。每个都同时渲染了大图（空状态用）与小图（列表/工具条用）：</p>
+  <div class="logo-grid">
+
+    <div class="logo-card picked">
+      <div class="logo-stage">
+        <div class="logo-render">
+          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="8" y="9" width="18" height="24" rx="3"/>
+            <rect x="20" y="15" width="18" height="24" rx="3" fill="var(--panel2)"/>
+            <line x1="24" y1="24" x2="34" y2="24" stroke="var(--red)"/>
+            <line x1="24" y1="31" x2="34" y2="31" stroke="var(--green)"/>
+            <line x1="29" y1="27.5" x2="29" y2="34.5" stroke="var(--green)"/>
+          </svg>
+        </div>
+        <svg class="logo-mini" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="8" y="9" width="18" height="24" rx="3"/>
+          <rect x="20" y="15" width="18" height="24" rx="3" fill="var(--panel)"/>
+          <line x1="24" y1="24" x2="34" y2="24" stroke="var(--red)"/>
+          <line x1="24" y1="31" x2="34" y2="31" stroke="var(--green)"/>
+          <line x1="29" y1="27.5" x2="29" y2="34.5" stroke="var(--green)"/>
+        </svg>
+      </div>
+      <div class="logo-name">A · 双文档对比 (file-diff) <span class="pill rec">推荐</span></div>
+      <div class="logo-meta">两份文档叠放，前页带红"−"绿"+"。最直接表达"查看某文件的修改/差异"，与占位符文案"点击文件查看修改"语义最贴。</div>
+      <span class="logo-tag">语义：文件级 diff</span>
+    </div>
+
+    <div class="logo-card">
+      <div class="logo-stage">
+        <div class="logo-render">
+          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="13" cy="13" r="4.5"/>
+            <circle cx="35" cy="35" r="4.5"/>
+            <path d="M13 17.5 v8 a5 5 0 0 0 5 5 h5"/>
+            <path d="M35 30.5 v-8 a5 5 0 0 0 -5 -5 h-5"/>
+            <polyline points="20 27 23 30.5 20 34"/>
+            <polyline points="28 21 25 17.5 28 14"/>
+          </svg>
+        </div>
+        <svg class="logo-mini" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="13" cy="13" r="5"/>
+          <circle cx="35" cy="35" r="5"/>
+          <path d="M13 18 v7 a5 5 0 0 0 5 5 h5"/>
+          <path d="M35 30 v-7 a5 5 0 0 0 -5 -5 h-5"/>
+        </svg>
+      </div>
+      <div class="logo-name">B · 分支对比 (git-compare)</div>
+      <div class="logo-meta">两个提交节点 + 交叉箭头，Lucide <code>git-compare</code> 的隐喻。强调"两个版本之间的比较"，偏 Git 语义而非文件语义。</div>
+      <span class="logo-tag">语义：版本对比</span>
+    </div>
+
+    <div class="logo-card">
+      <div class="logo-stage">
+        <div class="logo-render">
+          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M24 9 a15 15 0 1 0 10.6 4.4"/>
+            <polyline points="24 3 24 12 33 12" transform="rotate(-45 24 9)"/>
+            <polyline points="24 16 24 24 30 28"/>
+          </svg>
+        </div>
+        <svg class="logo-mini" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M24 10 a14 14 0 1 0 10 4"/>
+          <polyline points="24 4 24 12 32 12" transform="rotate(-45 24 10)"/>
+          <polyline points="24 17 24 24 30 27"/>
+        </svg>
+      </div>
+      <div class="logo-name">C · 历史时间线 (history)</div>
+      <div class="logo-meta">时钟 + 逆时针回拨箭头，Codicon <code>history</code>。呼应"Git History"这个页面身份，但不直接表达"看差异/点击"。</div>
+      <span class="logo-tag">语义：历史/时间线</span>
+    </div>
+
+    <div class="logo-card">
+      <div class="logo-stage">
+        <div class="logo-render">
+          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="8" y1="18" x2="40" y2="18"/>
+            <circle cx="15" cy="18" r="3"/>
+            <circle cx="24" cy="18" r="4.5" fill="var(--accent)" stroke="none"/>
+            <circle cx="33" cy="18" r="3"/>
+            <path d="M24 28 l3.5 11 2.2-4.2 4.3 1.2 z" fill="currentColor" stroke="none"/>
+          </svg>
+        </div>
+        <svg class="logo-mini" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="8" y1="18" x2="40" y2="18"/>
+          <circle cx="15" cy="18" r="3.5"/>
+          <circle cx="24" cy="18" r="5" fill="var(--accent)" stroke="none"/>
+          <circle cx="33" cy="18" r="3.5"/>
+          <path d="M24 28 l3.5 11 2.2-4.2 4.3 1.2 z" fill="currentColor" stroke="none"/>
+        </svg>
+      </div>
+      <div class="logo-name">D · 提交 + 点击 (commit + cursor)</div>
+      <div class="logo-meta">一排提交节点、中间高亮，下方一个光标箭头。强调"请点选一个提交/文件"的动作邀请，偏引导而非内容。</div>
+      <span class="logo-tag">语义：点击选择</span>
+    </div>
+
+  </div>
+  <div class="callout">
+    <strong>我推荐 A（双文档对比）。</strong>占位符出现在<strong>右侧 diff 区</strong>，文案是"点击文件查看修改"——这里最该表达的是"文件级差异"，双文档 +/− 的隐喻最准。B 偏"版本对比"、C 偏"页面身份"、D 偏"动作邀请"，都可以，但和这个位置的语义没 A 贴。
+  </div>
+
+  <h2 id="sec-copy">8. 文案草案（中英）</h2>
+  <p>按项目多语言规则，en 与 zh-CN 同时提供，通过 i18n key 接入（新增 <code>gitHistory.diff.clickToView.*</code>）。现有 <code>gitHistory.diff.noFileSelected</code>（"未选择文件"）过于干涩，本次升级为"标题 + 描述"两段：</p>
+  <table>
+    <tr><th>i18n key</th><th>English</th><th>简体中文</th></tr>
+    <tr><td><code>gitHistory.diff.clickToView.title</code></td><td>Select a file to view changes</td><td>点击文件查看修改</td></tr>
+    <tr><td><code>gitHistory.diff.clickToView.desc</code></td><td>Choose a file from the list on the left to see its diff here.</td><td>从左侧文件列表中选择一个文件，即可在此展开它的差异内容。</td></tr>
+  </table>
+  <p class="sub">标题遵循 Pajamas："动词开头、≤5 词、结尾不加标点"（英文 "Select a file to view changes"）。中文按平白用词，不用网络梗。</p>
+
+  <h2 id="sec-impl">9. 改动点与测试计划</h2>
+  <h3>代码改动（方案 A + R1 为例）</h3>
+  <table>
+    <tr><th>文件</th><th>改动</th></tr>
+    <tr><td><code>GitHistoryViewer.tsx:1216-1231</code></td><td>去掉"自动落到 <code>files[0]</code>"：仅保留 <code>prev</code>（本会话已选）与 <code>storedFile</code>（localStorage）匹配分支；都不命中时返回 <code>null</code>（不再默认选第一个文件）</td></tr>
+    <tr><td><code>GitHistoryViewer.tsx:2065-2070</code></td><td>把 <code>!selectedFile</code> 分支的单行灰字，升级为"图标 + 标题 + 描述"空状态结构</td></tr>
+    <tr><td><code>GitHistoryViewer.css</code></td><td>扩展 <code>.git-history-no-selection</code>（或新增 <code>.git-history-empty-diff</code>）为纵向 flex + 图标尺寸样式</td></tr>
+    <tr><td><code>i18n/core.ts</code>（en ~859 / zh ~2282）</td><td>新增 <code>gitHistory.diff.clickToView.title / .desc</code> 两条，en + zh 同步</td></tr>
+    <tr><td>R1 时：恢复逻辑（<code>1134-1178</code> 一带）</td><td>恢复提交选中与滚动，但不把 <code>selectedFile</code> 恢复成上次的文件（保持占位符）</td></tr>
+  </table>
+  <h3>测试计划（单元 + autotest 成对交付）</h3>
+  <ul style="margin-left:20px;">
+    <li><strong>单元测试</strong>（<code>test/unittest/</code>）：把"默认选中文件"决策抽成纯函数（输入 files / prev / storedFile → 输出应选文件或 null），锁定"都不命中时返回 null"这张决策表。</li>
+    <li><strong>autotest</strong>（<code>src/autotest/test-git-history.ts</code> 现有 suite 内扩展）：进入 Git History 后断言右侧渲染的是占位符（<code>.git-history-no-selection</code> / 新类名）、<strong>没有</strong> diff 视图节点；再 <code>selectFileByIndex(0)</code> 后断言 diff 出现。属于既有 suite 扩展，无需新增 runner。</li>
+    <li><strong>性能</strong>：进入 Git History 不再触发首个文件 diff 加载，可在进入路径上确认 <code>getHistoryDiff</code> 首帧不被自动调用（诊断 trace 事件按需补一条 <code>renderer:git-history.diff-placeholder-shown</code>）。</li>
+  </ul>
+
+  <h2 id="sec-decision">10. 待决策项</h2>
+  <div class="callout red">
+    请你就下面三点拍板，我再动代码（在你确认前不写实现）：
+    <ol style="margin:8px 0 0 20px;">
+      <li><strong>默认态范围：</strong>方案 A（保留默认选中提交 + 文件列表，仅 diff 区占位）还是 B（连提交也不默认选中，全空）？—— 我推荐 <strong>A</strong>。</li>
+      <li><strong>恢复行为：</strong>R1（只恢复提交+滚动，不自动打开上次文件 diff）还是 R2（完全恢复，含重开文件 diff）？—— 我推荐 <strong>R1</strong>。</li>
+      <li><strong>Logo 方向：</strong>A 双文档对比 / B 分支对比 / C 历史时间线 / D 提交+光标？—— 我推荐 <strong>A</strong>。</li>
+    </ol>
+  </div>
+
+  <div class="meta">
+    <strong>文档元数据</strong>
+    <table>
+      <tr><th>生成分支</th><td><code>20260715-git-history-not-open-diff</code></td></tr>
+      <tr><th>反映版本 / 提交</th><td>基于 <code>9df2b3b</code>（v2.1.0-daily.20260713.1 一线）</td></tr>
+      <tr><th>文档版本</th><td>v1.0</td></tr>
+    </table>
+    <strong style="display:block;margin-top:14px;">更新历史（追加式）</strong>
+    <table>
+      <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+      <tr><td>v1.0</td><td>2026-07-15</td><td>20260715-git-history-not-open-diff</td><td>首版：竞品调研、当前 vs 提议交互、方案 A/B、恢复 R1/R2、占位符设计、4 个 Logo 候选、中英文案、改动点与测试计划</td></tr>
+    </table>
+  </div>
+</main>
+</body>
+</html>

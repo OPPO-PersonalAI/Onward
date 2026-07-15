@@ -89,6 +89,22 @@ export async function testGitHistory(ctx: AutotestContext): Promise<TestResult[]
     }
   }
 
+  // GH-03b: Entering a commit must NOT auto-expand a file diff.
+  // Selecting a commit shows the file list, but the diff pane stays on the
+  // placeholder until the user clicks a file — no heavy render on entry.
+  if (!cancelled()) {
+    const api = getApi()
+    if (api?.isOpen() && api.getFiles().length > 0) {
+      const autoSelected = api.getSelectedFile()
+      _assert('GH-03b-no-auto-expand-on-entry', autoSelected === null, {
+        autoSelected,
+        fileCount: api.getFiles().length
+      })
+    } else {
+      results.push({ name: 'GH-03b-no-auto-expand-on-entry', ok: false, detail: { reason: 'no files' } })
+    }
+  }
+
   // GH-04: Select file to view diff
   if (!cancelled()) {
     if (getApi()?.isOpen() && getApi()!.getFiles().length > 0) {
@@ -107,23 +123,33 @@ export async function testGitHistory(ctx: AutotestContext): Promise<TestResult[]
   // GH-05: Diff display mode default and switching
   if (!cancelled()) {
     if (getApi()?.isOpen()) {
-      const api = getApi()!
-      const defaultMode = api.getDiffDisplayMode?.() ?? (api.getDiffStyle() === 'unified' ? 'inline' : 'side-by-side')
+      // Pre-existing test bug (independent of the no-auto-expand change): the
+      // debug api object is rebuilt on every render (its host effect lists
+      // diffDisplayMode in its deps), so a captured `const api = getApi()`
+      // reference goes stale the moment setDiffDisplayMode triggers a re-render
+      // — a captured api.getDiffDisplayMode() then returns the value its closure
+      // captured at creation time. Always re-fetch getApi() for each read/write
+      // so we observe the live state, never a stale closure.
+      const readMode = (): 'inline' | 'side-by-side' => {
+        const a = getApi()
+        return a?.getDiffDisplayMode?.() ?? (a?.getDiffStyle() === 'unified' ? 'inline' : 'side-by-side')
+      }
+      const setMode = (mode: 'side-by-side' | 'inline') => {
+        const a = getApi()!
+        if (a.setDiffDisplayMode) {
+          a.setDiffDisplayMode(mode)
+        } else {
+          a.setDiffStyle(mode === 'side-by-side' ? 'split' : 'unified')
+        }
+      }
+      const defaultMode = readMode()
       _assert('GH-05a-diff-display-default-inline', defaultMode === 'inline', { defaultMode })
-      if (api.setDiffDisplayMode) {
-        api.setDiffDisplayMode('side-by-side')
-      } else {
-        api.setDiffStyle('split')
-      }
+      setMode('side-by-side')
       await sleep(500)
-      const mode = api.getDiffDisplayMode?.() ?? (api.getDiffStyle() === 'unified' ? 'inline' : 'side-by-side')
-      _assert('GH-05b-diff-display-side-by-side', mode === 'side-by-side', { mode, style: api.getDiffStyle() })
+      const mode = readMode()
+      _assert('GH-05b-diff-display-side-by-side', mode === 'side-by-side', { mode, style: getApi()?.getDiffStyle() })
       // recover
-      if (api.setDiffDisplayMode) {
-        api.setDiffDisplayMode('inline')
-      } else {
-        api.setDiffStyle('unified')
-      }
+      setMode('inline')
       await sleep(300)
     } else {
       results.push({ name: 'GH-05-diff-display-default-inline', ok: false, detail: { reason: 'not open' } })
