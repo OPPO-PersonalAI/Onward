@@ -100,6 +100,76 @@ export async function testOpenBrowser(ctx: AutotestContext): Promise<TestResult[
     return results // Nothing else is meaningful without a rendered view.
   }
 
+  // ── OB-01b: the browser participates in renderer DOM compositing ──────────
+  const browserWebview = document.querySelector<HTMLElement>('webview.browser-panel-webview')
+  const webviewRect = browserWebview?.getBoundingClientRect()
+  const overlayTrials: boolean[] = []
+  if (browserWebview && webviewRect && webviewRect.width > 0 && webviewRect.height > 0) {
+    for (let trial = 0; trial < 5; trial += 1) {
+      const overlay = document.createElement('div')
+      overlay.dataset.autotestBrowserOverlay = String(trial)
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        left: `${webviewRect.left + 16}px`,
+        top: `${webviewRect.top + 16}px`,
+        width: '120px',
+        height: '80px',
+        zIndex: '2147483647',
+        pointerEvents: 'auto'
+      })
+      document.body.appendChild(overlay)
+      const hit = document.elementFromPoint(webviewRect.left + 24, webviewRect.top + 24)
+      overlayTrials.push(hit === overlay)
+      overlay.remove()
+    }
+  }
+  record('OB-01b-webview-is-coverable-by-host-dom-five-times', Boolean(
+    browserWebview && overlayTrials.length === 5 && overlayTrials.every(Boolean)
+  ), {
+    hasWebview: Boolean(browserWebview),
+    webviewRect: webviewRect
+      ? { x: webviewRect.x, y: webviewRect.y, width: webviewRect.width, height: webviewRect.height }
+      : null,
+    overlayTrials
+  })
+  if (!browserWebview || !overlayTrials.every(Boolean)) return results
+
+  // ── OB-01c: browser toolbar follows the Project Editor HTML icon layout ───
+  await waitFor('ob-01c-toolbar-settled', () => !document.querySelector('.browser-panel-loading-bar'), 5000, 80)
+  const toolbar = document.querySelector<HTMLElement>('.browser-panel-nav')
+  const addressInput = toolbar?.querySelector<HTMLElement>('.browser-panel-url-input') ?? null
+  const actions = toolbar?.querySelector<HTMLElement>('.browser-panel-actions') ?? null
+  const manualRefresh = toolbar?.querySelector<HTMLElement>('.browser-panel-manual-refresh-btn') ??
+    toolbar?.querySelectorAll<HTMLElement>(':scope > .browser-panel-nav-btn')[2] ?? null
+  const autoRefresh = toolbar?.querySelector<HTMLElement>('.browser-panel-auto-refresh-btn') ?? null
+  const iconSignature = (element: Element | null) => Array.from(element?.querySelectorAll('svg path') ?? [])
+    .map((path) => path.getAttribute('d') ?? '')
+    .join('|')
+  const editorHtmlRefreshSignature = [
+    'M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36A.25.25 0 0 1 11.534 7zm-7.068 2H.534a.25.25 0 0 0-.192.41l1.966 2.36a.25.25 0 0 0 .384 0l1.966-2.36A.25.25 0 0 0 4.466 9z',
+    'M8 3a5 5 0 0 1 4.546 2.914.5.5 0 1 0 .908-.428A6 6 0 0 0 2.11 5.84L1.58 4.39A.5.5 0 0 0 .64 4.61l1.2 3.6a.5.5 0 0 0 .638.316l3.6-1.2a.5.5 0 1 0-.316-.948L3.9 7.077A5 5 0 0 1 8 3zm6.42 5.39a.5.5 0 0 0-.638-.316l-3.6 1.2a.5.5 0 1 0 .316.948l1.862-.62A5 5 0 0 1 8 13a5 5 0 0 1-4.546-2.914.5.5 0 0 0-.908.428A6 6 0 0 0 13.89 10.16l.53 1.45a.5.5 0 1 0 .94-.22l-1.2-3.6a.5.5 0 0 0-.26-.28z'
+  ].join('|')
+  const manualRefreshSignature = iconSignature(manualRefresh)
+  const autoRefreshSignature = iconSignature(autoRefresh)
+  const toolbarButtons = Array.from(toolbar?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+  const allIconsGrouped = Boolean(actions) && toolbarButtons.length > 0 && toolbarButtons.every((button) => actions?.contains(button))
+  const addressRect = addressInput?.getBoundingClientRect()
+  const actionsRect = actions?.getBoundingClientRect()
+  const actionsOnRight = Boolean(addressRect && actionsRect && actionsRect.left >= addressRect.right)
+  record('OB-01c-toolbar-icons-match-editor-and-group-right', Boolean(
+    manualRefreshSignature === editorHtmlRefreshSignature &&
+    autoRefreshSignature &&
+    autoRefreshSignature !== manualRefreshSignature &&
+    allIconsGrouped &&
+    actionsOnRight
+  ), {
+    manualMatchesEditor: manualRefreshSignature === editorHtmlRefreshSignature,
+    autoRefreshDistinct: Boolean(autoRefreshSignature && autoRefreshSignature !== manualRefreshSignature),
+    allIconsGrouped,
+    actionsOnRight,
+    buttonCount: toolbarButtons.length
+  })
+
   // ── OB-02: sibling file:// subresources (css / js / img) load (any-file) ───
   const scriptRan = await evaluate(`window.__obScriptRan === true`)
   const cssColor = await evaluate(`getComputedStyle(document.getElementById('ob-sentinel')).color`)

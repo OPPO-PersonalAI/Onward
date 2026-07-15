@@ -56,6 +56,7 @@ import { mainWorkScheduler } from './main-work-scheduler'
 import { openExternalUrlWithConfirm } from './external-link-guard'
 import { RipgrepSearchManager } from './ripgrep-search'
 import { browserViewManager } from './browser-view-manager'
+import { htmlPreviewProtocolManager } from './html-preview-protocol'
 import { FileWatchManager } from './file-watch-manager'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
@@ -1692,6 +1693,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   browserViewManager.init(mainWindow)
 
+  ipcMain.handle(IPC.HTML_PREVIEW_CREATE_SESSION, (_, rootPath: string, filePath: string, reloadKey: number) => {
+    return htmlPreviewProtocolManager.createSession(rootPath, filePath, reloadKey)
+  })
+
+  ipcMain.handle(IPC.HTML_PREVIEW_RELEASE_SESSION, (_, sessionId: string) => {
+    return htmlPreviewProtocolManager.releaseSession(sessionId)
+  })
+
+  ipcMain.handle(IPC.HTML_PREVIEW_VALIDATE_NAVIGATION, (_, sessionId: string, url: string) => {
+    return htmlPreviewProtocolManager.validateNavigation(sessionId, url)
+  })
+
   ipcMain.handle(IPC.BROWSER_CREATE, (_, id: string, url?: string, options?: Parameters<typeof browserViewManager.create>[2]) => {
     return browserViewManager.create(id, url, options)
   })
@@ -2710,6 +2723,10 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.CLIPBOARD_WRITE_TEXT)
   ipcMain.removeHandler(IPC.CLIPBOARD_READ_TEXT)
   browserViewManager.destroyAll()
+  htmlPreviewProtocolManager.destroyAll()
+  ipcMain.removeHandler(IPC.HTML_PREVIEW_CREATE_SESSION)
+  ipcMain.removeHandler(IPC.HTML_PREVIEW_RELEASE_SESSION)
+  ipcMain.removeHandler(IPC.HTML_PREVIEW_VALIDATE_NAVIGATION)
   ipcMain.removeHandler(IPC.BROWSER_CREATE)
   ipcMain.removeHandler(IPC.BROWSER_DESTROY)
   ipcMain.removeHandler(IPC.BROWSER_EVALUATE_FOR_TEST)

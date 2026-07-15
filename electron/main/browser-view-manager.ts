@@ -14,7 +14,7 @@ import {
   normalizeHtmlPreviewZoomFactor,
   stepHtmlPreviewZoomFactor
 } from '../../src/utils/html-file'
-import { resolveBrowserInputToUrl } from '../../src/utils/browser-url'
+import { isAllowedOpenBrowserGuestUrl, resolveBrowserInputToUrl } from '../../src/utils/browser-url'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
@@ -110,6 +110,7 @@ type WebContentsWithFrameNavigation = WebContents & {
 
 class BrowserViewManager {
   private readonly views = new Map<string, BrowserViewInfo>()
+  private readonly domWebviewContentsIds = new Set<number>()
   private mainWindow: BrowserWindow | null = null
   private sessionInitialized = false
   private rememberCookies = true
@@ -513,10 +514,19 @@ class BrowserViewManager {
     return { rememberCookies: this.rememberCookies }
   }
 
+  registerDomWebview(webContentsId: number): void {
+    this.domWebviewContentsIds.add(webContentsId)
+  }
+
+  unregisterDomWebview(webContentsId: number): void {
+    this.domWebviewContentsIds.delete(webContentsId)
+  }
+
   destroyAll(): void {
     for (const id of [...this.views.keys()]) {
       this.destroy(id)
     }
+    this.domWebviewContentsIds.clear()
   }
 
   private initSession(): void {
@@ -533,7 +543,12 @@ class BrowserViewManager {
       event.preventDefault()
     })
     browserSession.webRequest.onBeforeRequest((details, callback) => {
-      const info = this.findInfoByWebContentsId((details as { webContentsId?: number }).webContentsId)
+      const webContentsId = (details as { webContentsId?: number }).webContentsId
+      if (typeof webContentsId === 'number' && this.domWebviewContentsIds.has(webContentsId)) {
+        callback(isAllowedOpenBrowserGuestUrl(details.url) ? {} : { cancel: true })
+        return
+      }
+      const info = this.findInfoByWebContentsId(webContentsId)
       if (!this.isAllowedUrlForInfo(info, details.url)) {
         callback({ cancel: true })
         return

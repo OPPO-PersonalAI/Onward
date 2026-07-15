@@ -53,6 +53,12 @@ export const IPC = {
   BROWSER_TITLE_CHANGED: 'browser:title-changed',
   BROWSER_URL_CHANGED: 'browser:url-changed',
   BROWSER_ZOOM_FACTOR_CHANGED: 'browser:zoom-factor-changed',
+  BROWSER_WEBVIEW_INPUT: 'browser:webview-input',
+
+  // HTML Preview custom-protocol sessions
+  HTML_PREVIEW_CREATE_SESSION: 'html-preview:create-session',
+  HTML_PREVIEW_RELEASE_SESSION: 'html-preview:release-session',
+  HTML_PREVIEW_VALIDATE_NAVIGATION: 'html-preview:validate-navigation',
 
   // changelog / clipboard
   CHANGELOG_GET_CURRENT: 'changelog:get-current',
