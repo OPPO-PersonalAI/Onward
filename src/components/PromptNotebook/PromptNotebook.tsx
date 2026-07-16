@@ -4,14 +4,13 @@
  */
 
 import { useState, useCallback, useMemo, useRef, useEffect, memo, startTransition } from 'react'
-import { flushSync } from 'react-dom'
 import { Prompt, PromptSendRecord } from '../../types/electron'
 import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
 import type { EditorDraft, PromptCleanupConfig, PromptSchedule } from '../../types/tab.d.ts'
 import { usePromptActions } from '../../contexts/PromptActionsContext'
 import { buildAccelerator } from '../../utils/keyboard'
 import { performanceTrace } from '../../utils/performance-trace'
-import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
+import { perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { decideDraftPreservation } from './prompt-draft-preservation'
 import type { ScheduleNotification } from '../../hooks/useScheduleEngine'
@@ -24,45 +23,6 @@ import { ScheduleNotificationBar } from './ScheduleNotification'
 import { useI18n } from '../../i18n/useI18n'
 import { transformVirtualPaddingForSend, type ImportPrepareResult } from '../../utils/prompt-io'
 
-// ONWARD_DISABLE_VIRTUAL_CURSOR=1 falls back to plain line-by-line input.
-// Read once at module load — env vars are not watched at runtime.
-const VIRTUAL_CURSOR_DISABLED = Boolean(window.electronAPI?.debug?.virtualCursorDisabled)
-
-// Hard caps on virtual click target. A misclick at viewport-bottom of a very
-// tall editor must not allocate MB of `' '.repeat(N)` padding into the
-// textarea value. 1024 rows × 4096 cols is well past any human use case
-// and still cheap to materialise.
-const VIRTUAL_CURSOR_MAX_ROW = 1024
-const VIRTUAL_CURSOR_MAX_COL = 4096
-
-interface CellMetrics {
-  cw: number
-  lh: number
-  padL: number
-  padT: number
-}
-
-// Measure the textarea's effective monospace cell width / line height by
-// rendering a hidden <span> with the same `font` / `letter-spacing` /
-// `line-height` styles. Canvas `measureText` is rejected here: it ignores
-// `letter-spacing` and the ligature substitutions Menlo/Monaco apply, so
-// click coordinates would drift on long lines. The 80-cell sample averages
-// out sub-pixel rounding.
-function measureCellMetrics(ta: HTMLTextAreaElement): CellMetrics {
-  const cs = getComputedStyle(ta)
-  const probe = document.createElement('span')
-  probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font:${cs.font};letter-spacing:${cs.letterSpacing};line-height:${cs.lineHeight}`
-  probe.textContent = 'M'.repeat(80)
-  document.body.appendChild(probe)
-  const rect = probe.getBoundingClientRect()
-  document.body.removeChild(probe)
-  return {
-    cw: rect.width / 80,
-    lh: parseFloat(cs.lineHeight) || rect.height,
-    padL: parseFloat(cs.paddingLeft) || 0,
-    padT: parseFloat(cs.paddingTop) || 0
-  }
-}
 import { createTerminalBatchResult, hasDeliveredTerminals } from '../../utils/terminal-batch'
 import { buildPromptTaskHistorySummary } from './promptTaskHistory'
 import { PROMPT_COLORS, type PromptColor } from './prompt-colors'
@@ -1571,8 +1531,6 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   clearTrigger,
   promptEditorHeight,
   onPromptEditorHeightChange,
-  promptInputMode,
-  onPromptInputModeChange,
   editorDraft,
   onEditorDraftChange,
   addToHistoryShortcut,
@@ -1617,7 +1575,22 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
 }) {
   const { t } = useI18n()
   const [title, setTitle] = useState('')
-  const [content, setContent] = useState('')
+  // The editor surface is a contenteditable div (NOT a textarea): a native
+  // textarea's IME composition is O(text-before-caret) — ~60ms at the end of a
+  // 78KB draft, ~263ms mid-document — because the browser re-lays-out all
+  // preceding text to anchor the composition. A contenteditable div avoids that
+  // (~16ms), which is why every large chat composer uses one. See
+  // docs/html/prompt-input-latency-investigation.html.
+  //
+  // The content is UNCONTROLLED: the DOM is the sole source of truth (read via
+  // innerText, written via textContent). Keeping the large value out of React
+  // state means typing / IME costs zero React reconciliation. A tiny
+  // `hasContent` boolean drives button-disabled state.
+  const [hasContent, setHasContent] = useState(() => {
+    const c = editorDraft?.content ?? ''
+    return c.length > 0 && /\S/.test(c)
+  })
+  const hasContentRef = useRef(hasContent)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; snapshot: ContextMenuSnapshot; canUndo: boolean } | null>(null)
   // Undo stack scoped to right-click context-menu mutations only. Native
   // textarea Cmd+Z continues to handle keystroke-level history; this stack
@@ -1631,19 +1604,132 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   const heightRef = useRef(height)
   const isDraggingRef = useRef(false)
   const hasMountedRef = useRef(false)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-  // Tracks IME composition (Chinese / Japanese / Korean input) so the virtual
-  // cursor mousedown handler can short-circuit and avoid mutating value /
-  // selection mid-composition, which would otherwise abort the IME session.
+  // The editor surface (a contenteditable div). Kept named `editorRef` — it is
+  // NOT a textarea. `contentEditable="plaintext-only"` gives plain-text
+  // semantics natively (paste strips formatting, no rich markup).
+  const editorRef = useRef<HTMLDivElement>(null)
+  // Tracks IME composition so composition-sensitive handlers can short-circuit.
   const isComposingRef = useRef(false)
-  // Cached cell metrics for the virtual-cursor click → (row, col) calculation.
-  // Invalidated on resize / font change. null = recompute on next click.
-  const metricsRef = useRef<CellMetrics | null>(null)
-  // Mode-selector dropdown state — controls the popup that lets the user
-  // toggle between Canvas (virtual cursor) and Line (native textarea) input.
-  const [isModeMenuOpen, setIsModeMenuOpen] = useState(false)
-  const modeSelectorRef = useRef<HTMLDivElement>(null)
   const { registerFocusEditor, registerSubmitEditor } = usePromptActions()
+
+  // ---- Contenteditable value + caret plumbing ----
+  // Read the live plain text. innerText (NOT textContent) is layout-aware and
+  // renders line breaks as '\n' whether they are text-node newlines or block
+  // boundaries; textContent would drop Enter-created line breaks.
+  const readContent = useCallback((): string => editorRef.current?.innerText ?? '', [])
+
+  // Flat caret offset within the plain text (for context-menu operations). Uses
+  // a Range from the element start to the caret and measures its length. For
+  // our DOM (a single text node with embedded '\n', kept so by the Enter
+  // handler below) this equals the innerText offset.
+  const getSelectionOffsets = useCallback((): { start: number; end: number } => {
+    const el = editorRef.current
+    const sel = window.getSelection()
+    if (!el || !sel || sel.rangeCount === 0) return { start: 0, end: 0 }
+    const range = sel.getRangeAt(0)
+    const pre = document.createRange()
+    pre.selectNodeContents(el)
+    try {
+      pre.setEnd(range.startContainer, range.startOffset)
+      const start = pre.toString().length
+      pre.setEnd(range.endContainer, range.endOffset)
+      const end = pre.toString().length
+      return { start, end }
+    } catch {
+      return { start: 0, end: 0 }
+    }
+  }, [])
+
+  // Place the caret at a flat offset (clamped) within the editor.
+  const setCaretOffset = useCallback((offset: number): void => {
+    const el = editorRef.current
+    if (!el) return
+    const sel = window.getSelection()
+    if (!sel) return
+    let remaining = Math.max(0, offset)
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+    let node: Node | null = walker.nextNode()
+    let target: Text | null = null
+    let targetOffset = 0
+    while (node) {
+      const len = (node as Text).length
+      if (remaining <= len) { target = node as Text; targetOffset = remaining; break }
+      remaining -= len
+      target = node as Text
+      targetOffset = len
+      node = walker.nextNode()
+    }
+    const range = document.createRange()
+    if (target) {
+      range.setStart(target, targetOffset)
+    } else {
+      range.setStart(el, 0)
+    }
+    range.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(range)
+  }, [])
+
+  // Parent-notification debounce timer + stable-identity plumbing. The parent
+  // callbacks are routed through refs so writeContent / scheduleParentSync never
+  // change identity; otherwise effects that depend on writeContent (edit-load,
+  // append, clearTrigger) would re-fire on unrelated parent renders and could
+  // wipe the user's in-progress edits.
+  const parentNotifyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const titleRef = useRef(title)
+  titleRef.current = title
+  const onContentChangeRef = useRef(onContentChange)
+  const onTitleChangeRef = useRef(onTitleChange)
+  const onEditorDraftChangeRef = useRef(onEditorDraftChange)
+  onContentChangeRef.current = onContentChange
+  onTitleChangeRef.current = onTitleChange
+  onEditorDraftChangeRef.current = onEditorDraftChange
+
+  // Re-render (button-disabled only) when the empty<->non-empty flag flips.
+  // /\S/.test stops at the first non-whitespace char (O(1) for real content).
+  const syncHasContent = useCallback(() => {
+    const v = editorRef.current?.innerText ?? ''
+    const has = v.length > 0 && /\S/.test(v)
+    if (has !== hasContentRef.current) {
+      hasContentRef.current = has
+      setHasContent(has)
+    }
+  }, [])
+
+  // Debounced parent sync (content / title / draft), called imperatively from
+  // input, programmatic writes, and title/height changes. Stable identity.
+  const scheduleParentSync = useCallback(() => {
+    if (!hasMountedRef.current) return
+    if (parentNotifyTimerRef.current) clearTimeout(parentNotifyTimerRef.current)
+    parentNotifyTimerRef.current = setTimeout(() => {
+      startTransition(() => {
+        const content = editorRef.current?.innerText ?? ''
+        const currentTitle = titleRef.current
+        onContentChangeRef.current(content)
+        onTitleChangeRef.current(currentTitle)
+        if (!currentTitle.trim() && !content.trim()) {
+          onEditorDraftChangeRef.current(null)
+        } else {
+          onEditorDraftChangeRef.current({ title: currentTitle, content, height: heightRef.current, savedAt: Date.now() })
+        }
+      })
+    }, 300)
+  }, [])
+
+  // Imperatively set the editor content (programmatic mutations only). Writes
+  // textContent (a single text node with '\n' chars, rendered as line breaks by
+  // white-space:pre-wrap) so the DOM stays simple and caret offsets are exact.
+  // `caretAt` restores the caret; default is end-of-content.
+  const writeContent = useCallback((next: string, caretAt?: number) => {
+    const el = editorRef.current
+    if (el) {
+      el.textContent = next
+      const pos = caretAt === undefined ? next.length : Math.max(0, Math.min(caretAt, next.length))
+      setCaretOffset(pos)
+    }
+    syncHasContent()
+    scheduleParentSync()
+  }, [setCaretOffset, syncHasContent, scheduleParentSync])
   const platform = window.electronAPI?.platform ?? 'darwin'
   const isMac = platform === 'darwin'
   const saveShortcutLabel = isMac ? '⌘S' : 'Ctrl+S'
@@ -1666,17 +1752,19 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     heightRef.current = height
   }, [height])
 
-  // Silently restore drafts on first mount
+  // Silently restore drafts on first mount. Content is applied imperatively — a
+  // contenteditable div has no defaultValue.
   useEffect(() => {
     if (!hasMountedRef.current && editorDraft) {
       setTitle(editorDraft.title)
-      setContent(editorDraft.content)
+      if (editorRef.current) editorRef.current.textContent = editorDraft.content
       setHeight(Math.max(promptEditorHeight, editorDraft.height, MIN_EDITOR_HEIGHT))
       hasMountedRef.current = true
+      syncHasContent()
     } else if (!hasMountedRef.current) {
       hasMountedRef.current = true
     }
-  }, [editorDraft, promptEditorHeight])
+  }, [editorDraft, promptEditorHeight, syncHasContent])
 
   useEffect(() => {
     if (isDraggingRef.current) return
@@ -1689,9 +1777,9 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   useEffect(() => {
     if (editingPrompt) {
       setTitle(editingPrompt.title)
-      setContent(editingPrompt.content)
+      writeContent(editingPrompt.content)
     }
-  }, [editingPrompt])
+  }, [editingPrompt, writeContent])
 
   // Autotest-only: expose this editor's REAL local-content setter. The send path
   // reads PromptNotebook.editorContent, which this component owns and syncs up
@@ -1707,7 +1795,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     const control = {
       setContent: (value: string) => {
         hasMountedRef.current = true
-        setContent(value)
+        writeContent(value)
       }
     }
     ;(window as unknown as { __onwardPromptEditorContentControl?: typeof control }).__onwardPromptEditorContentControl = control
@@ -1717,52 +1805,26 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
         delete w.__onwardPromptEditorContentControl
       }
     }
-  }, [])
+  }, [writeContent])
 
-  // Debounce parent notifications (content, title, draft) to avoid
-  // re-rendering the entire PromptNotebook tree on every keystroke.
-  // Local state (content / title) stays instant for responsive typing.
-  const parentNotifyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
+  // Title / height changes drive the debounced parent sync; content changes
+  // drive it imperatively from handleInput / writeContent (content is no longer
+  // React state). The 300 ms debounce keeps the parent tree off the hot path.
   useEffect(() => {
-    if (!hasMountedRef.current) return
-
-    if (parentNotifyTimerRef.current) {
-      clearTimeout(parentNotifyTimerRef.current)
-    }
-
-    parentNotifyTimerRef.current = setTimeout(() => {
-      startTransition(() => {
-        onContentChange(content)
-        onTitleChange(title)
-
-        if (!title.trim() && !content.trim()) {
-          onEditorDraftChange(null)
-        } else {
-          onEditorDraftChange({
-            title,
-            content,
-            height,
-            savedAt: Date.now()
-          })
-        }
-      })
-    }, 300)
-
+    scheduleParentSync()
     return () => {
-      if (parentNotifyTimerRef.current) {
-        clearTimeout(parentNotifyTimerRef.current)
-      }
+      if (parentNotifyTimerRef.current) clearTimeout(parentNotifyTimerRef.current)
     }
-  }, [title, content, height, onContentChange, onTitleChange, onEditorDraftChange])
+  }, [title, height, scheduleParentSync])
 
-  // Handle additional content
+  // Handle additional content (append to whatever the editor currently holds).
   useEffect(() => {
     if (appendContent) {
-      setContent(prev => prev ? `${prev}\n\n${appendContent}` : appendContent)
+      const prev = readContent()
+      writeContent(prev ? `${prev}\n\n${appendContent}` : appendContent)
       onAppendContentUsed()
     }
-  }, [appendContent, onAppendContentUsed])
+  }, [appendContent, onAppendContentUsed, readContent, writeContent])
 
   // Handle drag to adjust height
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -1782,11 +1844,6 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     const handleMouseUp = () => {
       isDraggingRef.current = false
       onPromptEditorHeightChange(heightRef.current)
-      // Resizing changes the textarea's content area but in current CSS the
-      // monospace font / line-height / paddings remain identical. Cell width
-      // is unaffected, so metricsRef stays valid. Invalidate defensively in
-      // case future CSS makes the dimensions font-relative.
-      metricsRef.current = null
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
       document.body.classList.remove('resizing-editor-height')
@@ -1802,7 +1859,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   // ("ghost" padding) don't bleed into saved prompts. Leading-column padding
   // is preserved as intentional indentation.
   const handleSave = useCallback((saveAsNew: boolean) => {
-    const sendContent = transformVirtualPaddingForSend(content)
+    const sendContent = transformVirtualPaddingForSend(readContent())
     if (!sendContent || !editingPrompt) return
 
     if (saveAsNew) {
@@ -1822,27 +1879,27 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
 
     // Clear editing state and drafts
     setTitle('')
-    setContent('')
+    writeContent('')
     onCancelEdit()
     onEditorDraftChange(null)
     onSaveSuccess?.()
-  }, [title, content, editingPrompt, onSubmit, onUpdatePrompt, onCancelEdit, onEditorDraftChange, onSaveSuccess])
+  }, [title, readContent, writeContent, editingPrompt, onSubmit, onUpdatePrompt, onCancelEdit, onEditorDraftChange, onSaveSuccess])
 
   // Submit processing (add new Prompt, optionally with a color tag).
   const handleSubmit = useCallback((color?: PromptColor | null) => {
-    const sendContent = transformVirtualPaddingForSend(content)
+    const sendContent = transformVirtualPaddingForSend(readContent())
     if (!sendContent) return
 
     onSubmit(title.trim(), sendContent, color ?? null)
     setTitle('')
-    setContent('')
+    writeContent('')
     // Clear draft after submission
     onEditorDraftChange(null)
-  }, [title, content, onSubmit, onEditorDraftChange])
+  }, [title, readContent, writeContent, onSubmit, onEditorDraftChange])
 
   // Edit mode: apply a color and save the current edit in one action
   const handleSaveWithColor = useCallback((color: PromptColor) => {
-    const sendContent = transformVirtualPaddingForSend(content)
+    const sendContent = transformVirtualPaddingForSend(readContent())
     if (!sendContent || !editingPrompt) return
 
     onUpdatePrompt({
@@ -1854,22 +1911,22 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     }, true)
 
     setTitle('')
-    setContent('')
+    writeContent('')
     onCancelEdit()
     onEditorDraftChange(null)
     onSaveSuccess?.()
-  }, [title, content, editingPrompt, onUpdatePrompt, onCancelEdit, onEditorDraftChange, onSaveSuccess])
+  }, [title, readContent, writeContent, editingPrompt, onUpdatePrompt, onCancelEdit, onEditorDraftChange, onSaveSuccess])
 
   // Cancel edit
   const handleCancel = useCallback(() => {
     setTitle('')
-    setContent('')
+    writeContent('')
     onCancelEdit()
     // Clear draft after canceling
     onEditorDraftChange(null)
     // Cancel the blur input box after editing to ensure that ESC can close the Editor normally next time
-    textareaRef.current?.blur()
-  }, [onCancelEdit, onEditorDraftChange])
+    editorRef.current?.blur()
+  }, [writeContent, onCancelEdit, onEditorDraftChange])
 
   // Parent content/title notifications are handled by the debounced
   // effect above — no separate immediate effects needed here.
@@ -1885,24 +1942,29 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     }
   }, [editingPrompt])
 
-  const handleContentChange = useCallback((value: string) => {
-    setContent(value)
+  // Native input handler for the contenteditable. Does NOT push the value
+  // through React state — the DOM is the source of truth. It only flips the
+  // has-content flag (rare re-render) and schedules the debounced parent sync,
+  // which is what keeps typing / IME O(1) in React terms regardless of size.
+  const handleInput = useCallback(() => {
+    syncHasContent()
+    scheduleParentSync()
     if (performanceTrace.enabled) {
       performanceTrace.recordInstant('ui.prompt.edit', {
         field: 'content',
         mode: editingPrompt ? 'edit' : 'new',
-        ...performanceTrace.summarizeText('payload', value)
+        ...performanceTrace.summarizeText('payload', readContent())
       }, 'prompt')
     }
-  }, [editingPrompt])
+  }, [editingPrompt, syncHasContent, scheduleParentSync, readContent])
 
   // Respond to clear triggers
   useEffect(() => {
     if (clearTrigger > 0) {
       setTitle('')
-      setContent('')
+      writeContent('')
     }
-  }, [clearTrigger])
+  }, [clearTrigger, writeContent])
 
   // Programmatic content mutation used by the right-click context menu.
   // Sets the content (running through React state so debounced parent
@@ -1914,16 +1976,16 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   // would silently overwrite any keystroke the user typed into the title
   // input between the menu action and the undo click.
   const applyMutation = useCallback((next: string, cursorAt?: number) => {
-    const ta = textareaRef.current
+    const sel = getSelectionOffsets()
     historyRef.current.push({
-      value: ta?.value ?? '',
-      selectionStart: ta?.selectionStart ?? 0,
-      selectionEnd: ta?.selectionEnd ?? 0
+      value: readContent(),
+      selectionStart: sel.start,
+      selectionEnd: sel.end
     })
     if (historyRef.current.length > HISTORY_LIMIT) {
       historyRef.current.shift()
     }
-    setContent(next)
+    writeContent(next, cursorAt)
     if (performanceTrace.enabled) {
       performanceTrace.recordInstant('ui.prompt.edit', {
         field: 'content',
@@ -1931,19 +1993,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
         ...performanceTrace.summarizeText('payload', next)
       }, 'prompt')
     }
-    if (cursorAt !== undefined) {
-      requestAnimationFrame(() => {
-        const ta = textareaRef.current
-        if (!ta) return
-        try {
-          ta.setSelectionRange(cursorAt, cursorAt)
-        } catch (err) {
-          // setSelectionRange may throw on Firefox / detached nodes; safe to
-          // ignore — the caret will land at the default position.
-        }
-      })
-    }
-  }, [editingPrompt])
+  }, [editingPrompt, getSelectionOffsets, readContent, writeContent])
 
   // Undo the most recent applyMutation by popping the history stack. Returns
   // false when the stack is empty (UI surface this as a disabled menu item).
@@ -1952,151 +2002,32 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   const undoLastMutation = useCallback((): boolean => {
     const last = historyRef.current.pop()
     if (!last) return false
-    setContent(last.value)
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current
-      if (!ta) return
-      try {
-        ta.setSelectionRange(last.selectionStart, last.selectionEnd)
-        ta.focus()
-      } catch {
-        // Ignore — caret position is best-effort.
-      }
-    })
+    writeContent(last.value, last.selectionStart)
+    editorRef.current?.focus()
     return true
-  }, [])
+  }, [writeContent])
 
-  const handleTextareaContextMenu = useCallback((e: React.MouseEvent<HTMLTextAreaElement>) => {
+  const handleEditorContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
     // Capture value/selection atomically at the contextmenu event so menu
-    // actions operate on what the user is currently looking at — independent
-    // of any subsequent React reconciliation that might revert the textarea
-    // DOM value before the menu mounts.
-    const ta = e.currentTarget
+    // actions operate on what the user is currently looking at.
+    const sel = getSelectionOffsets()
     setCtxMenu({
       x: e.clientX,
       y: e.clientY,
       snapshot: {
-        value: ta.value,
-        start: ta.selectionStart ?? 0,
-        end: ta.selectionEnd ?? 0
+        value: readContent(),
+        start: sel.start,
+        end: sel.end
       },
       canUndo: historyRef.current.length > 0
     })
-  }, [])
+  }, [getSelectionOffsets, readContent])
 
   const closeCtxMenu = useCallback(() => {
     setCtxMenu(null)
   }, [])
-
-  // Virtual-cursor mousedown: lets the user click anywhere inside the textarea
-  // — including blank space past EOL or past EOF — and start typing there.
-  // The handler physically pads the textarea value with spaces (to fill the
-  // target line up to the click column) and `\n`s (to extend to the target
-  // row), then sets the caret to that position so the native textarea caret
-  // blinks at the virtual click point. Padding is undone via the same
-  // historyRef stack the right-click context menu uses.
-  //
-  // Hooked on `mousedown`, NOT `click`: shift+click selection ranges are
-  // resolved by the browser between mousedown and click, so padding has to
-  // happen first.
-  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLTextAreaElement>) => {
-    if (VIRTUAL_CURSOR_DISABLED) return
-    if (e.button !== 0) return
-    if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return
-    // Per-tab user preference: when the dropdown selects 'line', treat the
-    // textarea as a plain native input — no virtual-cursor padding.
-    if (promptInputMode === 'line') return
-    // IME composition mid-flight: mutating value / selection here would
-    // cancel the partial character. Short-circuit; the user's next click
-    // after compositionend will work.
-    if (isComposingRef.current) return
-    const ta = textareaRef.current
-    if (!ta) return
-    const startedAt = performance.now()
-    const measureStartedAt = startedAt
-    const wasMetricsCached = metricsRef.current !== null
-    const m = metricsRef.current ?? (metricsRef.current = measureCellMetrics(ta))
-    if (m.cw <= 0 || m.lh <= 0) return
-    const measureMs = performance.now() - measureStartedAt
-    const rect = ta.getBoundingClientRect()
-    const x = e.clientX - rect.left - m.padL + ta.scrollLeft
-    const y = e.clientY - rect.top - m.padT + ta.scrollTop
-    const targetRow = Math.max(0, Math.floor(y / m.lh))
-    // Math.round (not Math.floor) feels closer to native textarea click —
-    // half a cell past column N counts as N+1, not N.
-    const targetCol = Math.max(0, Math.round(x / m.cw))
-    if (targetRow > VIRTUAL_CURSOR_MAX_ROW || targetCol > VIRTUAL_CURSOR_MAX_COL) return
-
-    const lines = ta.value.split('\n')
-    // STEP 1: extend rows BEFORE column padding. Otherwise lines[targetRow]
-    // is undefined and `' '.repeat(NaN)` throws.
-    while (lines.length <= targetRow) lines.push('')
-    // STEP 2: pad columns of the target line.
-    const line = lines[targetRow]
-    if (line.length < targetCol) {
-      lines[targetRow] = line + ' '.repeat(targetCol - line.length)
-    }
-    const next = lines.join('\n')
-    if (next === ta.value) return  // Click landed inside existing text — let native click handle it.
-
-    e.preventDefault()
-    const flatPos = lines.slice(0, targetRow).reduce((n, l) => n + l.length + 1, 0) + lines[targetRow].length
-
-    // Push pre-mutation state to the same history stack the context menu
-    // uses, so right-click Undo can revert virtual-cursor padding too.
-    historyRef.current.push({
-      value: ta.value,
-      selectionStart: ta.selectionStart ?? 0,
-      selectionEnd: ta.selectionEnd ?? 0
-    })
-    if (historyRef.current.length > HISTORY_LIMIT) {
-      historyRef.current.shift()
-    }
-    const padded = next.length - ta.value.length
-    // e.preventDefault() above blocks the native mousedown focus path. Take
-    // it back ourselves — without this, the very first virtual click on an
-    // unfocused textarea sets the value but leaves the caret invisible and
-    // the user has to click again. Focusing here is cheap and idempotent.
-    ta.focus()
-    // flushSync forces React to commit the new value SYNCHRONOUSLY before we
-    // call setSelectionRange. The naïve approach — setContent(next) then
-    // requestAnimationFrame(setSelectionRange) — costs an extra ~8ms (one
-    // frame at 120 Hz / ~16ms at 60 Hz) waiting for the rAF to fire, and
-    // because the controlled-textarea value would race the caret position
-    // setSelectionRange has to wait for the value to land. Pulling the
-    // commit into the user-event handler removes both waits: the caret
-    // lands the same tick as the click, and the browser paints it on the
-    // very next frame.
-    const beforeFlushAt = performance.now()
-    flushSync(() => setContent(next))
-    const flushSyncMs = performance.now() - beforeFlushAt
-    try {
-      ta.setSelectionRange(flatPos, flatPos)
-    } catch {
-      // Best-effort.
-    }
-    const caretCommittedAt = performance.now()
-    // Single-frame paint measurement: from caret-set to next rAF (≈ paint
-    // commit on a healthy frame). No second rAF — the measurement cost
-    // itself shouldn't drive the production code's user-visible delay.
-    requestAnimationFrame(() => {
-      const paintedAt = performance.now()
-      // durationMs auto-elevates this to ph='X' span via resolvePhase.
-      perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_VIRTUAL_CARET, {
-        row: targetRow,
-        col: targetCol,
-        padded,
-        metricsCached: wasMetricsCached,
-        measureMs: +measureMs.toFixed(2),
-        flushSyncMs: +flushSyncMs.toFixed(2),
-        handlerMs: +(caretCommittedAt - startedAt).toFixed(2),
-        paintMs: +(paintedAt - caretCommittedAt).toFixed(2),
-        durationMs: +(paintedAt - startedAt).toFixed(2)
-      })
-    })
-  }, [promptInputMode])
 
   const handleCompositionStart = useCallback(() => {
     isComposingRef.current = true
@@ -2105,33 +2036,6 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   const handleCompositionEnd = useCallback(() => {
     isComposingRef.current = false
   }, [])
-
-  // Mode-selector dropdown: close on outside click + Escape, mirroring the
-  // pattern used by TerminalDropdown / PromptEditorContextMenu.
-  useEffect(() => {
-    if (!isModeMenuOpen) return
-    const handleClickOutside = (event: MouseEvent) => {
-      if (!modeSelectorRef.current?.contains(event.target as Node)) {
-        setIsModeMenuOpen(false)
-      }
-    }
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsModeMenuOpen(false)
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    document.addEventListener('keydown', handleKey)
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside)
-      document.removeEventListener('keydown', handleKey)
-    }
-  }, [isModeMenuOpen])
-
-  const handleSelectMode = useCallback((mode: 'canvas' | 'line') => {
-    setIsModeMenuOpen(false)
-    if (mode !== promptInputMode) {
-      onPromptInputModeChange(mode)
-    }
-  }, [promptInputMode, onPromptInputModeChange])
 
   // Shortcut support
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -2178,21 +2082,15 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   }, [handleSubmit, handleSave, handleCancel, editingPrompt, addToHistoryShortcut, matchesAccelerator, saveShortcut, saveAsShortcut, cancelShortcut])
 
   // Register callback to Context (only visible instance registration).
-  // Keyboard-shortcut focus lands the caret at (row 0, col 0) — the
-  // textarea would otherwise restore its last selection, which under the
-  // virtual-cursor model could be a stale virtual position from a prior
-  // click. (0, 0) is the predictable "start fresh" anchor.
+  // Keyboard-shortcut focus lands the caret at offset 0 — the predictable
+  // "start fresh" anchor.
   useEffect(() => {
     if (hidden) return
     registerFocusEditor(() => {
-      const ta = textareaRef.current
-      if (!ta) return
-      ta.focus()
-      try {
-        ta.setSelectionRange(0, 0)
-      } catch {
-        // Best-effort — non-fatal on detached nodes.
-      }
+      const el = editorRef.current
+      if (!el) return
+      el.focus()
+      setCaretOffset(0)
     })
     registerSubmitEditor(() => handleSubmit())
     return () => {
@@ -2223,67 +2121,19 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
             value={title}
             onChange={(e) => handleTitleChange(e.target.value)}
           />
-          {!VIRTUAL_CURSOR_DISABLED && (
-            <div className="prompt-mode-selector" ref={modeSelectorRef}>
-              <button
-                type="button"
-                className="prompt-mode-trigger"
-                onClick={() => setIsModeMenuOpen(open => !open)}
-                title={t('promptEditor.modeSelector.trigger')}
-                aria-label={t('promptEditor.modeSelector.aria')}
-                aria-haspopup="menu"
-                aria-expanded={isModeMenuOpen}
-                data-mode={promptInputMode}
-                data-testid="prompt-mode-trigger"
-              >
-                <span>{promptInputMode === 'canvas'
-                  ? t('promptEditor.modeSelector.canvas')
-                  : t('promptEditor.modeSelector.line')}</span>
-                <svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-                  <path d="M1 1l4 4 4-4" />
-                </svg>
-              </button>
-              {isModeMenuOpen && (
-                <div className="prompt-mode-menu" role="menu">
-                  <button
-                    type="button"
-                    className="prompt-mode-item"
-                    role="menuitem"
-                    data-testid="prompt-mode-canvas"
-                    aria-checked={promptInputMode === 'canvas'}
-                    onClick={() => handleSelectMode('canvas')}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                      {promptInputMode === 'canvas' && <path d="M13.3 4.3a1 1 0 0 1 0 1.4l-6 6a1 1 0 0 1-1.4 0l-3-3a1 1 0 1 1 1.4-1.4L6.6 9.6l5.3-5.3a1 1 0 0 1 1.4 0z" />}
-                    </svg>
-                    <span>{t('promptEditor.modeSelector.canvas')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="prompt-mode-item"
-                    role="menuitem"
-                    data-testid="prompt-mode-line"
-                    aria-checked={promptInputMode === 'line'}
-                    onClick={() => handleSelectMode('line')}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                      {promptInputMode === 'line' && <path d="M13.3 4.3a1 1 0 0 1 0 1.4l-6 6a1 1 0 0 1-1.4 0l-3-3a1 1 0 1 1 1.4-1.4L6.6 9.6l5.3-5.3a1 1 0 0 1 1.4 0z" />}
-                    </svg>
-                    <span>{t('promptEditor.modeSelector.line')}</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
         </div>
-        <textarea
-          ref={textareaRef}
+        <div
+          ref={editorRef}
           className="prompt-editor-content"
-          placeholder={t('promptNotebook.editorPlaceholder')}
-          value={content}
-          onChange={(e) => handleContentChange(e.target.value)}
-          onContextMenu={handleTextareaContextMenu}
-          onMouseDown={handleCanvasMouseDown}
+          contentEditable="plaintext-only"
+          suppressContentEditableWarning
+          role="textbox"
+          aria-multiline="true"
+          aria-label={t('promptNotebook.editorPlaceholder')}
+          data-placeholder={t('promptNotebook.editorPlaceholder')}
+          spellCheck={false}
+          onInput={handleInput}
+          onContextMenu={handleEditorContextMenu}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
         />
@@ -2295,7 +2145,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
           canUndo={ctxMenu.canUndo}
           isMac={isMac}
           onClose={closeCtxMenu}
-          textareaRef={textareaRef}
+          textareaRef={editorRef}
           applyMutation={applyMutation}
           onUndo={undoLastMutation}
           pinnedPrompts={ctxPinnedPrompts}
@@ -2325,7 +2175,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
                 type="button"
                 className={`prompt-editor-color-btn prompt-editor-color-btn-${key}`}
                 style={{ ['--color' as string]: hex } as React.CSSProperties}
-                disabled={!content.trim()}
+                disabled={!hasContent}
                 onClick={() => editingPrompt ? handleSaveWithColor(key) : handleSubmit(key)}
                 title={label}
                 aria-label={label}
@@ -2347,7 +2197,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
             <button
               className="prompt-editor-btn prompt-editor-btn-submit"
               onClick={() => handleSave(false)}
-              disabled={!content.trim()}
+              disabled={!hasContent}
               title={t('promptNotebook.shortcutTitle', { shortcut: saveShortcutLabel })}
             >
               {t('common.save')}
@@ -2355,7 +2205,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
             <button
               className="prompt-editor-btn prompt-editor-btn-submit"
               onClick={() => handleSave(true)}
-              disabled={!content.trim()}
+              disabled={!hasContent}
               title={t('promptNotebook.shortcutTitle', { shortcut: saveAsShortcutLabel })}
             >
               {t('promptNotebook.saveAsNew')}
@@ -2365,7 +2215,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
           <button
             className="prompt-editor-btn prompt-editor-btn-submit"
             onClick={() => handleSubmit()}
-            disabled={!content.trim()}
+            disabled={!hasContent}
           >
             {t('promptEditor.addToHistory')}
           </button>

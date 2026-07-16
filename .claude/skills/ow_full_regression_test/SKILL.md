@@ -1,6 +1,6 @@
 ---
 name: ow_full_regression_test
-description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts, failing-runner names, and a cheap per-failure triage smell (timing/crash/flake — a signal, not analysis). No edits to fix contract failures. Environment / toolchain blockers that stop test cases from executing (missing interpreter or pnpm, absent node_modules, ABI mismatch, stale build artefacts, leftover processes, full disk) are auto-healed and the run retried — bounded per symptom — so every test case actually runs; this self-heal never edits source, test, or fixture files to flip a red assertion. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain. `--background` is a modifier (combinable with Test mode, used automatically by Repair mode): the Agent runs the regression itself as a background command — wait for the completion notification, read the result once, never poll — instead of the default foreground `!` live run, so the repair fix→verify loop self-drives without the user typing. Repair never edits a test merely to make it pass; tests change only when proven a test-design bug, preserving the assertion's semantics.
+description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts, failing-runner names, and a cheap per-failure triage smell (timing/crash/flake — a signal, not analysis). No edits to fix contract failures. Environment / toolchain blockers that stop test cases from executing (missing interpreter or pnpm, absent node_modules, ABI mismatch, stale build artefacts, leftover processes, full disk) are auto-healed and the run retried — bounded per symptom — so every test case actually runs; this self-heal never edits source, test, or fixture files to flip a red assertion. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain. Runs are BACKGROUND by default: the Agent launches the regression as a background command, waits for the single completion notification, reads the result once, and never polls — the user types nothing and does not babysit a live stream (Repair mode uses this path automatically so its fix→verify loop self-drives). `--foreground` is a modifier that opts into the live view instead: the user runs the regression via the `!` prefix so the orchestrator streams per-runner output into the conversation — use only when the user explicitly wants to watch live. Repair never edits a test merely to make it pass; tests change only when proven a test-design bug, preserving the assertion's semantics.
 ---
 
 # ow_full_regression_test
@@ -28,14 +28,21 @@ clean first; it operates on the existing case file on disk.
 flag at once (e.g. `--build --clean`, `--repair --clean`), ask which
 they meant before doing anything. The user picks each transition.
 
-`--background` is a **modifier, not a fourth mode**. By default a user-invoked
-regression runs in the FOREGROUND via the `!` prefix so the user watches it live
-(see § *Running with live progress*). `--background` instead has the Agent run the
-regression itself as a background command — wait for the completion notification,
-read the result once, never poll — so the user does not have to type anything. It
-combines with Test mode, and Repair mode uses it automatically so the
-fix → verify loop self-drives. (`--background` only changes *who launches the run
-and whether it streams live*; it does not change what runs.)
+**Background is the DEFAULT.** A bare user-invoked regression (no flag) has the
+Agent run the regression itself as a background command — launch it, wait for the
+single completion notification, read the result once, never poll — so the user
+does not have to type anything or babysit a live stream. This is the same
+behaviour the explicit `--background` flag names; the flag is still accepted for
+clarity but is now redundant with the default. Repair mode also uses this
+background path automatically so the fix → verify loop self-drives.
+
+`--foreground` (a **modifier, not a fourth mode**) opts INTO the live view: the
+user runs the regression themselves via the `!` prefix so the orchestrator's
+per-runner output streams into the conversation and they can watch which case is
+running / spot a stall (see § *Running with live progress*). Reach for it only
+when the user explicitly says they want to watch live. (`--foreground` /
+`--background` only change *who launches the run and whether it streams live*;
+they do not change what runs.)
 
 ---
 
@@ -317,12 +324,14 @@ self-heal posture: the self-heal loop is for blockers BEFORE the compiler runs
 rejected the source — a contract failure to report, not an env chore to fix.
 
 A full pass typically takes 25–70 minutes (≈ 5–10 min build + 20–60
-min runners). **Run it in the FOREGROUND with live output** so the user
-can watch which case is running and spot a stall — have them run it via
-the `!` prefix (`! py test/autotest/run-full-regression.py --build`); the
-orchestrator streams every runner + key step + a silent-runner heartbeat
-live into the conversation. See *Running with live progress* below for why
-the `!` prefix (not a background Bash call) is the mechanism. If
+min runners). **By default, run it in the BACKGROUND** — the Agent launches
+`run-full-regression.py --build` as a background command (`run_in_background:
+true`), waits for the single completion notification, then reads `summary.json`
+once (never polls). The user types nothing and is free to do other work; see
+§ *Running with live progress* → *Background is the default* below. **Only when
+the user explicitly asks to watch live (`--foreground`)** do you instead hand
+them the `!` prefix line so the orchestrator streams every runner + key step +
+a silent-runner heartbeat into the conversation. If
 `pnpm dist:dev` itself fails — or a
 runner can't launch the app — the orchestrator stops before (or
 mid-way through) the runner list. That is an **environment / toolchain
@@ -887,58 +896,21 @@ and require an explicit "yes, clean" before invoking the script.
 
 ---
 
-## Running with live progress (foreground via `!`, NOT background)
+## Running the regression (background by default; `--foreground` to watch live)
 
-A full pass is long (≈ 5–10 min build + 20–60 min runners), so it is
-tempting to background it — **don't, when the user wants to watch.**
-Backgrounding sends the orchestrator's live output to a hidden task file,
-so the user can't see which case is running or why it stalled. That is the
-exact "卡住了都不知道原因" problem.
+A full pass is long (≈ 5–10 min build + 20–60 min runners). The default is to run
+it in the **background** so the user is not tied to the terminal — they asked for a
+regression, not for a live show to babysit. Only when the user explicitly wants to
+watch it run (`--foreground`) do you hand them the live `!` stream instead.
 
-The orchestrator **already streams live** (no extra flag): it prints
-`=== RUN [n/total] <suite> (timeout Ns) ===`, then each runner's output
-line-by-line (flushed per line — every `[AutoTest] PASS/FAIL` and key
-step), plus a `… <suite> still running Ns (no output for Ms)` **heartbeat**
-during any output gap so a hung / silently-stuck runner is visible in real
-time. The chain is fully live: runner →(stdio inherit) run-with-timeout
-→(pipe) orchestrator →(flush per line) console.
+### Background is the default (Agent-driven, unattended)
 
-The goal is to get that live stream into the **user's terminal**. The Bash
-tool cannot: its foreground mode has a **10-minute hard cap** (far under the
-run) and returns output only at the end, while its background mode hides
-output in a file. The mechanism that streams a long-running command live
-into the conversation is the **`!` prefix**.
-
-**So: run the regression in the foreground via `!`.** Suggest this verbatim
-and let the user run it — it executes in their session and the
-orchestrator's live output lands directly in the conversation:
-
-```
-! py test/autotest/run-full-regression.py --build        # Windows
-! python3 test/autotest/run-full-regression.py --build   # macOS/Linux
-```
-
-They will see, live: the per-runner `[n/total]` header, the streamed key
-steps, the heartbeat for silent runners, and the final `DURATION AUDIT` +
-over-budget list. (Add `--only run-<suite>` / `--skip run-<suite>` exactly
-as in Mode A.)
-
-**Do NOT** instead run it as a background Bash call when the user wants to
-observe, and do NOT `tail -f` / poll a backgrounded run's log (it races the
-writer and wastes context) — the live `!` stream IS the progress view. This
-foreground-`!` rule is the regression-specific refinement of CLAUDE.md's
-general background-and-notify test-execution loop: that loop optimises for
-the Agent driving one runner unattended; this optimises for the **user
-watching the whole suite live**, which is what they asked for.
-
-### `--background` — Agent-driven, unattended (the repair default)
-
-When the user does not need to watch live — they passed `--background`, or you are
-inside `--repair` — do NOT ask them to paste the foreground `!` line. Run the
-regression yourself as a **background command** (`run_in_background: true`):
+For a bare user-invoked regression (no flag), for an explicit `--background`, and
+for every run inside `--repair`: **you** run the regression as a **background
+command** (`run_in_background: true`) — do NOT ask the user to paste anything.
 
 ```bash
-py test/autotest/run-full-regression.py --build [--only run-<suite>] [--repeat N]
+python3 test/autotest/run-full-regression.py --build [--only run-<suite>] [--repeat N]
 ```
 
 Then follow CLAUDE.md's **background-and-notify** test-execution loop exactly:
@@ -949,11 +921,40 @@ Then follow CLAUDE.md's **background-and-notify** test-execution loop exactly:
    partially-written log, do **not** set up a streamer to "wait until done": the
    orchestrator commits its closing summary only at the very end, so a poller
    races the writer and biases toward a false/partial read.
-3. After the notification, read `summary.json` / the per-runner log **once**.
+3. After the notification, read `summary.json` / the per-runner log **once**, then
+   report per Mode A Step 3 (counts, failing names, triage smell, run dir).
 
-This is the regression-specific application of the general loop (the foreground
-`!` rule above is the *other* refinement, for when the user wants to watch). Use
-`--background` for every run inside a repair pass — the targeted isolation verify
-(`--build --only run-<suite>`) and the final full pass — so the fix → verify loop
-self-drives without the user typing anything. The default for a *bare*
-user-invoked regression stays the foreground `!` run.
+If the background task returns a `killed` / `stopped` status instead of a normal
+completion, the run did NOT finish — there is no final `summary.json`. Do not
+report partial counts as a verdict: say the run was interrupted (and at which
+`[n/total]` if the log shows it), clean up any leftover dev-app by exact name, and
+ask the user how to proceed. Never silently re-run.
+
+### `--foreground` — watch live via the `!` prefix
+
+Only when the user explicitly asked to watch (`--foreground`, "let me watch it
+run", "I want to see progress"): the goal is to get the orchestrator's live stream
+into the **user's terminal**. The Bash tool cannot — its foreground mode has a
+**10-minute hard cap** (far under the run) and returns output only at the end,
+while its background mode hides output in a file. The mechanism that streams a
+long-running command live into the conversation is the **`!` prefix**, run by the
+user in their own session.
+
+The orchestrator **already streams live** (no extra flag): it prints
+`=== RUN [n/total] <suite> (timeout Ns) ===`, then each runner's output
+line-by-line (every `[AutoTest] PASS/FAIL` and key step), plus a
+`… <suite> still running Ns (no output for Ms)` **heartbeat** during any output
+gap so a hung / silently-stuck runner is visible in real time.
+
+So suggest this verbatim and let the user run it — it executes in their session
+and the live output lands directly in the conversation:
+
+```
+! py test/autotest/run-full-regression.py --build        # Windows
+! python3 test/autotest/run-full-regression.py --build   # macOS/Linux
+```
+
+They will see, live: the per-runner `[n/total]` header, the streamed key steps,
+the heartbeat for silent runners, and the final `DURATION AUDIT` + over-budget
+list. (Add `--only run-<suite>` / `--skip run-<suite>` exactly as in Mode A.) When
+the run finishes, read `summary.json` and report per Mode A Step 3 as usual.
