@@ -411,6 +411,16 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # ~105s recovery sums past the 180s default but stays well under 300s — budget
     # override for the documented worker-lane-recovery cost, NOT a hidden hang.
     "test/autotest/run-image-diff-autotest.sh": 240,
+    # Subpage-navigation HTML round-trips, split by source (diff / history) out of
+    # the ~242s combined html group. Each half runs one COLD + one WARM 5-trial
+    # block; calm wall-clock ~131-141s, but the COLD block's per-trial 20s cold-git-
+    # diff-mount budget is EDR-sensitive, so under a full-regression load spike a
+    # single run can breach the 180s default (observed one flaky TIMEOUT that PASSED
+    # at 131s on isolation retry). 280 gives stable headroom above that variance
+    # while staying < 300 — budget override for the documented cold-load variance,
+    # NOT an over-budget backlog and NOT a hang.
+    "test/autotest/run-subpage-navigation-html-diff-autotest.sh": 280,
+    "test/autotest/run-subpage-navigation-html-history-autotest.sh": 280,
 }
 INTER_SCRIPT_SLEEP_SEC = 2
 
