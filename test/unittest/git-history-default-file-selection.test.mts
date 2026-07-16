@@ -5,7 +5,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveDefaultSelectedFile } from '../../src/components/GitHistoryViewer/defaultFileSelection.ts'
+import { resolveDefaultSelectedFile, resolveSelectionAfterReload } from '../../src/components/GitHistoryViewer/defaultFileSelection.ts'
 
 interface File {
   filename: string
@@ -48,5 +48,42 @@ describe('git history default file selection (no auto-expand on entry)', () => {
     const result = resolveDefaultSelectedFile(files, prev)
     assert.equal(result, prev)
     assert.equal(result?.filename, 'src/big.tsx')
+  })
+})
+
+describe('git history selection after async reload (explicit intent survives)', () => {
+  const files = [f('a.ts'), f('large.py'), f('c.ts')]
+
+  it('keeps the live selection when it still exists (no explicit intent needed)', () => {
+    const prev = f('a.ts')
+    assert.equal(resolveSelectionAfterReload(files, prev, null), prev)
+  })
+
+  it('honours the explicit selection when the live ref was transiently cleared', () => {
+    // The core GLF-09c regression: switchRepo's async reload cleared the live
+    // ref to null, but the user explicitly selected large.py. It must survive.
+    const result = resolveSelectionAfterReload(files, null, 'large.py')
+    assert.equal(result?.filename, 'large.py')
+  })
+
+  it('does NOT restore an explicit selection that is gone from the new list', () => {
+    // Explicit intent points at a file the new repo/commit does not contain.
+    assert.equal(resolveSelectionAfterReload(files, null, 'deleted.md'), null)
+  })
+
+  it('resolves to the placeholder on a fresh entry (no live, no explicit)', () => {
+    // Entry / close / repo-switch clear the explicit intent, so a fresh open
+    // still shows the placeholder — C's "no auto-expand on entry" is preserved.
+    assert.equal(resolveSelectionAfterReload(files, null, null), null)
+  })
+
+  it('prefers the live selection over a stale explicit filename', () => {
+    const prev = f('c.ts')
+    const result = resolveSelectionAfterReload(files, prev, 'large.py')
+    assert.equal(result, prev)
+  })
+
+  it('returns null for an empty list regardless of explicit intent', () => {
+    assert.equal(resolveSelectionAfterReload<File>([], null, 'large.py'), null)
   })
 })

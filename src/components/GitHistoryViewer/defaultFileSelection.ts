@@ -37,3 +37,39 @@ export function resolveDefaultSelectedFile<T extends DefaultFileSelectionCandida
   }
   return null
 }
+
+/**
+ * Resolve the selection to keep after a file list reloads, honouring an explicit
+ * user selection that must survive an ASYNCHRONOUS reload.
+ *
+ * Why this exists: when the repo (or commit range) reloads, the live selection
+ * ref is transiently cleared while the new list streams in. If the user just
+ * clicked a file, the plain {@link resolveDefaultSelectedFile} would read that
+ * transient null as `previous` and resolve to the placeholder — silently
+ * dropping the click, so the diff never loads (and, for a large file, the
+ * confirmation prompt never appears). `explicitFilename` is the user's stated
+ * intent, tracked independently of the churny live ref, so it can be honoured
+ * once the file reappears in the freshly loaded list.
+ *
+ * This does NOT re-introduce "auto-expand on entry": `explicitFilename` is set
+ * only by an explicit user selection and cleared on entry / close / repo switch,
+ * so a fresh entry has no intent to restore and still resolves to the placeholder.
+ *
+ * @param files           The freshly loaded file list.
+ * @param currentSelection The live in-session selection (may be transiently null).
+ * @param explicitFilename The filename the user explicitly selected, or null.
+ * @returns The file to keep selected, or null to show the placeholder.
+ */
+export function resolveSelectionAfterReload<T extends DefaultFileSelectionCandidate>(
+  files: readonly T[],
+  currentSelection: T | null,
+  explicitFilename: string | null
+): T | null {
+  const live = resolveDefaultSelectedFile(files, currentSelection)
+  if (live) return live
+  if (explicitFilename) {
+    const match = files.find(file => file.filename === explicitFilename)
+    if (match) return match
+  }
+  return null
+}

@@ -24,7 +24,7 @@ import { useAppState } from '../../hooks/useAppState'
 import { useGitStateMirror } from '../../hooks/useGitStateMirror'
 import { perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
-import { resolveDefaultSelectedFile } from './defaultFileSelection'
+import { resolveDefaultSelectedFile, resolveSelectionAfterReload } from './defaultFileSelection'
 import { DiffEmptyState } from '../common/DiffEmptyState'
 import type { ProjectEditorOpenEventDetail, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { SubpagePanelButton, SubpagePanelShell, SubpageSwitcher, type SubpagePanelShellState } from '../SubpageSwitcher'
@@ -391,6 +391,11 @@ export function GitHistoryViewer({
   const commitsRef = useRef<GitCommitInfo[]>([])
   const filesRef = useRef<GitHistoryFile[]>([])
   const selectedFileRef = useRef<GitHistoryFile | null>(null)
+  // The filename the user EXPLICITLY selected (click / selectFileByPath), tracked
+  // independently of selectedFileRef so it survives an async repo/commit reload
+  // that transiently clears the live ref. Cleared on entry / close / repo switch
+  // so it never re-introduces "auto-expand on entry". See resolveSelectionAfterReload.
+  const explicitSelectionRef = useRef<string | null>(null)
   const selectedFileContentRef = useRef<GitHistoryFileContentResult | null>(null)
   const selectedShasRef = useRef<string[]>([])
   const selectionAnchorRef = useRef<string | null>(null)
@@ -757,6 +762,7 @@ export function GitHistoryViewer({
     filesRef.current = []
     setSelectedFile(null)
     selectedFileRef.current = null
+    explicitSelectionRef.current = null
     setDiffPatch('')
     setSelectedFileContent(null)
     setDiffError(null)
@@ -1099,6 +1105,11 @@ export function GitHistoryViewer({
     setSelectedShas([])
     setSelectionAnchor(null)
     setSelectedFile(null)
+    selectedFileRef.current = null
+    // Switching repos is a full reset: drop the explicit-selection intent so the
+    // new repo opens on the placeholder (no auto-expand) and a subsequent click
+    // is honoured as a fresh selection rather than resolved away by the reload.
+    explicitSelectionRef.current = null
     setDiffPatch('')
     setDiffError(null)
     setSelectedFileContent(null)
@@ -1278,8 +1289,14 @@ export function GitHistoryViewer({
     // exists in the new list; otherwise resolve to null and let the diff pane
     // fall through to its placeholder. See defaultFileSelection.ts.
     const previous = selectedFileRef.current
-    const next = resolveDefaultSelectedFile(files, previous)
+    // Honour an explicit user selection that survived an async reload: switchRepo
+    // (and commit reloads) transiently clear selectedFileRef while the new list
+    // streams in, so a file the user just clicked would otherwise be resolved
+    // back to the placeholder — dropping the click and (for a large file) never
+    // showing the confirmation prompt. explicitSelectionRef carries that intent.
+    const next = resolveSelectionAfterReload(files, previous, explicitSelectionRef.current)
     selectedFileRef.current = next
+    if (!next) explicitSelectionRef.current = null
     setSelectedFile(next)
     if (!next) {
       // Diagnostic breadcrumb (off hot path, fires on commit-selection change):
@@ -1530,6 +1547,7 @@ export function GitHistoryViewer({
         if (index < 0 || index >= currentFiles.length) return false
         const file = currentFiles[index]
         selectedFileRef.current = file
+        explicitSelectionRef.current = file.filename
         selectionRef.current = {
           ...selectionRef.current,
           selectedFile: file.filename
@@ -1542,6 +1560,7 @@ export function GitHistoryViewer({
         const file = currentFiles.find((entry) => entry.filename === path || entry.originalFilename === path)
         if (!file) return false
         selectedFileRef.current = file
+        explicitSelectionRef.current = file.filename
         selectionRef.current = {
           ...selectionRef.current,
           selectedFile: file.filename
@@ -2017,7 +2036,7 @@ export function GitHistoryViewer({
             <div
               key={`${file.filename}-${file.status}`}
               className={`git-history-file-item ${isSelected ? 'selected' : ''}`}
-              onClick={() => setSelectedFile(file)}
+              onClick={() => { explicitSelectionRef.current = file.filename; setSelectedFile(file) }}
               onContextMenu={(e) => handleFileContextMenu(e, file)}
               title={renameText}
             >
