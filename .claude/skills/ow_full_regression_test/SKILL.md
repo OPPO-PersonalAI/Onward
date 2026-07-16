@@ -247,10 +247,30 @@ Common scopes the user might want (each keeps `--build`):
 |----------------------------------------------|---------------------------------------------------------------------------------------------|
 | Full pass                                    | `python3 test/autotest/run-full-regression.py --build`                                      |
 | Re-run a specific suite                      | `python3 test/autotest/run-full-regression.py --build --only run-<suite>`                   |
+| Run a SUBSET / the tail of a stopped run     | `python3 test/autotest/run-full-regression.py --build --only run-a --only run-b --only run-c …` |
 | Skip a known-broken runner this round        | `python3 test/autotest/run-full-regression.py --build --skip run-<suite>`                   |
 | List planned scripts only (no build, no run) | `python3 test/autotest/run-full-regression.py --list`                                       |
 | Include the update-channel E2E suites        | `python3 test/autotest/run-full-regression.py --build --include-update-e2e`                 |
 | Clean-slate build first (validate env, opt-in) | route the build through `ow_build --clear` — see *Clean-slate build* below                |
+
+**Running a subset the RIGHT way — always through the orchestrator, never a
+direct `bash run-*.sh` loop.** `--only` is a repeatable substring filter
+(`action="append"`), so to run several specific suites — or to finish the tail
+of a full pass that got interrupted — list each with its own `--only`:
+
+```bash
+python3 test/autotest/run-full-regression.py --build --only run-prompt-integrity --only run-prompt-list --only run-prompt-sender
+```
+
+This is the ONLY correct way to run a bounded group: every suite still runs
+inside the orchestrator's 180 s timeout + watchdog, so a hung suite is killed
+and reported `TIMEOUT` instead of running for hours. Reach for it whenever a
+single command must stay under a wall-clock budget (e.g. a harness single-command
+time cap) or when you only need part of the matrix — split the suites into
+sub-budget groups and run each group as its own `--only …` orchestrator command.
+Do NOT drop to `bash test/autotest/run-<suite>-autotest.sh` to "save time" or to
+"batch" — those scripts carry no timeout and a hang has nothing to kill it
+(see the hard rule in *What this skill will never do*).
 
 The update-channel E2E suites (`UPDATE_E2E_SCRIPTS` in the orchestrator —
 currently the Windows installer + relaunch test, with the macOS counterpart
@@ -832,6 +852,19 @@ and require an explicit "yes, clean" before invoking the script.
 - Wrap or substitute `run-full-regression.py`. The orchestrator
   owns the runner list, timeout, and kill contract; modifying its
   `SCRIPTS` list is a separate change reviewed on its own merits.
+- **Run an autotest runner DIRECTLY (`bash test/autotest/run-<suite>-autotest.sh`)
+  for a batch, a full pass, or any unattended run.** The 180 s per-script
+  timeout and the two-layer watchdog (`run-with-timeout.mjs` inner kill at
+  `timeout_sec`, plus an orchestrator-side PID watchdog at `timeout_sec + 30 s`)
+  live ONLY inside `run-full-regression.py`. The individual `run-*.sh` scripts
+  have **no internal timeout** — invoking one directly removes the safety net, so
+  a hung suite (e.g. a renderer that never quiesces) runs until *you* notice and
+  kill it. Launching such a loop as a **background** command makes it worse: the
+  Bash tool's own `timeout` is not hard-enforced on background commands, so
+  nothing kills the hang. (Real incident: a direct `bash run-*.sh` batch left
+  `run-prompt-integrity` hung for ~1 h 49 m instead of a clean 180 s `TIMEOUT`.)
+  A single, actively-watched suite you read the log for and kill yourself is the
+  only acceptable direct invocation — never a batch, never backgrounded-and-left.
 - Apply more than one fix cluster per Plan Mode pass. One plan, one
   approval, one fix.
 - Start `--repair` when no prior run exists on disk. Refuse, point
