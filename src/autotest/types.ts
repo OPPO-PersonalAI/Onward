@@ -147,6 +147,8 @@ export interface GitDiffDebugApi {
   getLastClickLatencyForFile?: (fileKey: string) => ClickLatencyMeasurementForAutotest | null
   getClickLatencyHistory?: () => ClickLatencyMeasurementForAutotest[]
   resetClickLatencyHistory?: () => void
+  /** Autotest: count of loadDiff passes that survived the coalescing gate (GRS-*). */
+  getLoadDiffStats?: () => { started: number }
   setSelectedDraftContent?: (content: string) => boolean
   getIsDraftDirty?: () => boolean
   getRestoreNotice: () => { type: 'missing' | 'changed'; message: string; fileName?: string } | null
@@ -255,7 +257,7 @@ export interface GitDiffDebugApi {
     actionPanelVisible?: boolean
     visibleLabels?: string[]
   } | null
-  triggerFileAction?: (action: 'keep' | 'deny') => Promise<boolean>
+  triggerFileAction?: (action: 'keep' | 'deny', expectedFilename?: string) => Promise<boolean>
   getPdfCompareState?: () => {
     visible: boolean
     status: 'added' | 'deleted' | 'modified' | null

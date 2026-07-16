@@ -206,3 +206,79 @@ test('does not fall back to legacy info when cwd identity differs and mirror is 
   assert.equal(resolved.status, null)
   assert.equal(resolved.legacyMatchesCwd, false)
 })
+
+// ── Symlink alias-gap block (2026-07-16 "symlinked repo shows no git status"
+// fix). Snapshots and deltas are keyed by the canonical REAL path; a Task
+// whose OSC cwd goes through a user symlink (macOS/Linux) or junction
+// (Windows) can only reach them via the alias map. The fix guarantees the
+// alias exists even when `subscribeMirror` resolved COLD (snapshot null) —
+// these tests pin both the failure mode and the repaired path. ──
+
+test('symlink cwd with NO alias cannot reach a realpath-keyed snapshot (the pre-fix failure mode)', () => {
+  const snapshots = mergeMirrorSnapshot({}, snapshot('/Users/dev/real-repo', 'clean'))
+  // Direct lookup misses (keys differ) and no alias exists — exactly the
+  // cold-subscribe gap: the badge resolves to null everywhere.
+  assert.equal(resolveMirrorSnapshotForCwd(snapshots, {}, '/Users/dev/link-to-repo'), null)
+  const resolved = resolveTerminalGitDisplayState({
+    cwd: '/Users/dev/link-to-repo',
+    terminalInfo: {
+      cwd: '/Users/dev/real-repo',
+      repoRoot: '/Users/dev/real-repo',
+      branch: 'feature/status',
+      repoName: 'repo',
+      status: 'clean'
+    },
+    mirrorSnapshots: snapshots,
+    mirrorAliases: {}
+  })
+  // Legacy fallback cannot save it either: symlink form ≠ realpath form
+  // under the pure-string normalizer.
+  assert.equal(resolved.branch, null)
+  assert.equal(resolved.status, null)
+  assert.equal(resolved.legacyMatchesCwd, false)
+})
+
+test('a cold-subscribe alias (raw symlink → canonicalCwd) bridges the badge before any snapshot exists', () => {
+  // Step 1: subscribeMirror resolves COLD — { canonicalCwd, snapshot: null }.
+  // The fix registers the alias from canonicalCwd alone.
+  let aliases = mergeMirrorAlias({}, '/Users/dev/link-to-repo', '/Users/dev/real-repo')
+  let snapshots = {}
+  // Nothing to show yet, but the resolve path must not throw / mis-resolve.
+  assert.equal(resolveMirrorSnapshotForCwd(snapshots, aliases, '/Users/dev/link-to-repo'), null)
+  // Step 2: the first mirror-update delta lands under the REAL path.
+  snapshots = mergeMirrorDeltaSnapshot(snapshots, '/Users/dev/real-repo', {
+    repoRoot: '/Users/dev/real-repo',
+    repoName: 'repo',
+    branch: 'main',
+    status: 'clean',
+    files: [],
+    capturedAt: 200,
+    changeFingerprint: 'fp-1',
+    generation: 1
+  })
+  // Step 3: the symlink cwd now resolves through the alias.
+  const viaLink = resolveMirrorSnapshotForCwd(snapshots, aliases, '/Users/dev/link-to-repo')
+  assert.equal(viaLink?.branch, 'main')
+  const resolved = resolveTerminalGitDisplayState({
+    cwd: '/Users/dev/link-to-repo',
+    terminalInfo: null,
+    mirrorSnapshots: snapshots,
+    mirrorAliases: aliases
+  })
+  assert.equal(resolved.branch, 'main')
+  assert.equal(resolved.status, 'clean')
+})
+
+test('mergeMirrorAlias is a no-op when raw and canonical normalize to the same key', () => {
+  const base = {}
+  // /private strip: macOS firmlink forms collapse without needing an alias.
+  assert.equal(mergeMirrorAlias(base, '/private/var/tmp/repo-A', '/var/tmp/repo-A'), base)
+  // Identical spelling.
+  assert.equal(mergeMirrorAlias(base, '/Users/dev/repo', '/Users/dev/repo'), base)
+  // Windows junction form: backslash raw vs forward-slash canonical of the
+  // SAME path is separator-only difference — no alias entry needed.
+  assert.equal(mergeMirrorAlias(base, 'C:\\Temp\\repo', 'C:/Temp/repo'), base)
+  // A genuinely different junction target DOES create one.
+  const withAlias = mergeMirrorAlias(base, 'C:\\links\\repo', 'D:/real/repo')
+  assert.equal(withAlias['c:/links/repo'], 'd:/real/repo')
+})

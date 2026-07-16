@@ -4,7 +4,7 @@
  */
 
 import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'electron'
-import { dirname, isAbsolute, join, resolve, sep } from 'path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { existsSync, lstatSync, readFileSync, writeFileSync, statSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
 import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
@@ -66,6 +66,7 @@ import {
   gitDiffPrecomputeScheduler,
   inspectContentCacheStats,
   invalidateContentCacheForProject,
+  evictContentCacheEntriesForFiles,
   installContentCacheInvalidatorOnce
 } from './git-diff-content-cache-wiring'
 import { gitStateMirrorRouter } from './git-state-mirror-router'
@@ -102,8 +103,23 @@ type DebugApiTerminalWriteResult = {
   error?: string
 }
 
-function invalidateGitDiffAfterKnownMutation(project: string | undefined | null): void {
+/**
+ * Invalidate after a mutation this process itself performed. When the caller
+ * can enumerate the affected repo-relative paths (single-file stage / unstage /
+ * discard / save), pass them via `files` — the content cache then evicts ONLY
+ * those entries and the renderer keeps every other file warm, instead of the
+ * historical whole-bucket wipe that made a one-file revert refresh the world
+ * (2026-07-16 revert-scope fix). Callers that cannot enumerate the mutation's
+ * scope omit `files` and keep the conservative whole-bucket semantics.
+ */
+function invalidateGitDiffAfterKnownMutation(project: string | undefined | null, files?: string[]): void {
   if (!project) return
+  const scopedFiles = files?.filter((f) => typeof f === 'string' && f.length > 0)
+  if (scopedFiles?.length) {
+    gitDiffCacheInvalidator.invalidate(project, 'manual', { files: scopedFiles })
+    evictContentCacheEntriesForFiles(project, scopedFiles, 'invalidated-mutation')
+    return
+  }
   gitDiffCacheInvalidator.invalidate(project, 'manual')
   invalidateContentCacheForProject(project, 'invalidated-mutation')
 }
@@ -119,7 +135,17 @@ async function invalidateGitDiffAfterProjectFileSave(root: string, fullPath: str
     }
   }
   for (const project of projects) {
-    invalidateGitDiffAfterKnownMutation(project)
+    // A single editor save touches exactly one file — scope the invalidation
+    // to it when the path sits under this project bucket (repo-relative,
+    // git-style forward slashes). Anything else keeps the whole-bucket wipe.
+    let files: string[] | undefined
+    if (fullPath) {
+      const rel = relative(project, fullPath)
+      if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
+        files = [rel.split(sep).join('/')]
+      }
+    }
+    invalidateGitDiffAfterKnownMutation(project, files)
   }
 }
 
@@ -619,7 +645,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // Order matters: invalidate the worker cache BEFORE the renderer learns
   // about the change, so any reactive refetch the renderer kicks off lands
   // on a worker whose cache is already empty.
-  gitDiffCacheInvalidator.addListener((cwd, reason) => {
+  gitDiffCacheInvalidator.addListener((cwd, reason, detail) => {
     gitIpcWorkerClient.invalidateDiffCache(cwd, reason)
     // G1 (Option A): a content-churn invalidation for a live-subscribed cwd
     // schedules a quiet-window re-warm so the next open reads warm caches
@@ -628,7 +654,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       repoPrewarmCoordinator.onCwdInvalidated(cwd, reason)
     }
     if (mainWindow.isDestroyed()) return
-    mainWindow.webContents.send(IPC.GIT_DIFF_CACHE_INVALIDATED, cwd, reason)
+    // `detail.files` rides along so the renderer can keep every unaffected
+    // file's warm state on a file-scoped known mutation (revert-scope fix).
+    mainWindow.webContents.send(IPC.GIT_DIFF_CACHE_INVALIDATED, cwd, reason, detail)
   })
 
   // Q1: a git-ipc worker respawn starts with empty in-memory caches while
@@ -2150,25 +2178,29 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // next click refetches fresh without waiting for the async mirror delta.
   ipcMain.handle(IPC.GIT_SAVE_FILE_CONTENT, async (_, cwd: string, filename: string, content: string) => {
     const result = await gitIpcWorkerClient.saveFileContent(cwd, filename, content)
-    if (result.success) invalidateGitDiffAfterKnownMutation(cwd)
+    if (result.success) invalidateGitDiffAfterKnownMutation(cwd, [filename])
     return result
   })
 
   ipcMain.handle(IPC.GIT_STAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
     const result = await gitIpcWorkerClient.stageFile(cwd, filename, repoRoot)
-    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd)
+    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd, [filename])
     return result
   })
 
   ipcMain.handle(IPC.GIT_UNSTAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
     const result = await gitIpcWorkerClient.unstageFile(cwd, filename, repoRoot)
-    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd)
+    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd, [filename])
     return result
   })
 
   ipcMain.handle(IPC.GIT_DISCARD_FILE, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>, repoRoot?: string) => {
     const result = await gitIpcWorkerClient.discardFile(cwd, file, repoRoot)
-    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd)
+    // Submodule discards mutate a nested tree we cannot enumerate — keep the
+    // conservative whole-bucket wipe for those.
+    if (result.success) {
+      invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd, file.isSubmoduleEntry ? undefined : [file.filename])
+    }
     return result
   })
 
@@ -2178,7 +2210,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.handle(IPC.GIT_UPDATE_INDEX_CONTENT, async (_, cwd: string, filename: string, content: string) => {
     const result = await gitIpcWorkerClient.updateIndexContent(cwd, filename, content)
-    if (result.success) invalidateGitDiffAfterKnownMutation(cwd)
+    if (result.success) invalidateGitDiffAfterKnownMutation(cwd, [filename])
     return result
   })
 

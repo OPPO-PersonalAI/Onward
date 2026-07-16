@@ -78,6 +78,7 @@ import {
   type SubmoduleLoadObservation
 } from './submoduleLoadObservation'
 import { resolveDiffInlineGate, resolveGitDiffSplitViewMode, type GitDiffSplitViewMode } from './diffSplitViewMode'
+import { applyFileActionToDiffResult, type GitFileLocalAction } from './gitDiffLocalPatch'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
@@ -166,6 +167,11 @@ const COLD_DIFF_RESTORE_BUDGET_MS = 20000
 // releases the lock. The ceiling is wide enough that a healthy slow load on EDR
 // (cold full diff ~8-10s) never trips it; only a truly wedged worker does.
 const DIFF_LOAD_IPC_TIMEOUT_MS = 30000
+// After a known single-file mutation the list is patched locally and the
+// authoritative reconcile normally arrives via the mirror-echo invalidation.
+// If no reload started within this window (watcher missed/late), fire ONE
+// silent non-force reload as the deterministic backstop.
+const MUTATION_RECONCILE_FALLBACK_MS = 3000
 // Upper bound for an in-flight-skip caller waiting on `waitForLoadIdle`. Even
 // with the IPC watchdog above, this is a belt-and-suspenders ceiling so a
 // queued caller (e.g. Keep/Deny's post-action reload) can never block forever
@@ -785,6 +791,8 @@ type GitDiffDebugApi = {
   getLastClickLatencyForFile: (fileKey: string) => ClickLatencyMeasurement | null
   getClickLatencyHistory: () => ClickLatencyMeasurement[]
   resetClickLatencyHistory: () => void
+  /** Autotest: count of loadDiff passes that survived the coalescing gate. */
+  getLoadDiffStats: () => { started: number }
   setSelectedDraftContent: (content: string) => boolean
   getIsDraftDirty: () => boolean
   getRestoreNotice: () => { type: 'changed'; message: string; fileName?: string } | null
@@ -884,7 +892,7 @@ type GitDiffDebugApi = {
     actionPanelVisible: boolean
     visibleLabels: string[]
   } | null
-  triggerFileAction: (action: 'keep' | 'deny') => Promise<boolean>
+  triggerFileAction: (action: 'keep' | 'deny', expectedFilename?: string) => Promise<boolean>
   getPdfCompareState: () => ReturnType<typeof inspectPdfCompareDom>
   getEpubCompareState: () => ReturnType<typeof inspectEpubCompareDom>
 }
@@ -1347,6 +1355,10 @@ export function GitDiffViewer({
     lastDurationMs: null
   })
   const loadTokenRef = useRef(0)
+  // Autotest observability: how many loadDiff passes actually started (i.e.
+  // survived the in-flight coalescing gate). GRS-* asserts a single-file
+  // discard triggers at most ONE list reconcile instead of the historical 2-3.
+  const loadDiffStatsRef = useRef({ started: 0 })
   const loadInFlightRef = useRef(false)
   const loadQueuedRef = useRef<{ reset?: boolean; silent?: boolean; force?: boolean } | null>(null)
   const [navigationLoadSettledEpoch, setNavigationLoadSettledEpoch] = useState(0)
@@ -1625,8 +1637,14 @@ export function GitDiffViewer({
   }, [activeCwd, terminalId])
 
   const selectedFileKey = selectedFile ? getFileKey(selectedFile) : null
-  const mirrorGeneration = mirrorSnapshot?.generation ?? 0
-  const diffEditorIdentityKey = `${activeCwd || 'no-cwd'}::${selectedFileKey || 'empty'}::g${mirrorGeneration}::n${diffEditorResetNonce}`
+  // The editor identity deliberately EXCLUDES the mirror generation: remounts
+  // happen only on explicit user actions (Refresh Changes / file switch bump
+  // `diffEditorResetNonce`; cwd / selection changes re-key naturally). Folding
+  // `mirrorSnapshot.generation` in here made EVERY background repo state
+  // change tear down the whole Monaco editor — the visible "global refresh"
+  // of the 2026-07-16 revert-scope bug. Mirror data changes now flow through
+  // normal React props/state updates without a remount.
+  const diffEditorIdentityKey = `${activeCwd || 'no-cwd'}::${selectedFileKey || 'empty'}::n${diffEditorResetNonce}`
   const currentDiffIdentityRef = useRef(diffEditorIdentityKey)
   useEffect(() => {
     currentDiffIdentityRef.current = diffEditorIdentityKey
@@ -3101,6 +3119,7 @@ export function GitDiffViewer({
     }
 
     const currentToken = ++loadTokenRef.current
+    loadDiffStatsRef.current.started += 1
     const start = performance.now()
     debugLog('diff:load:start', {
       cwd,
@@ -3432,7 +3451,7 @@ export function GitDiffViewer({
   // the in-component 800 ms diff-list cache cannot serve a pre-mutation
   // file list either.
   useEffect(() => {
-    const dispose = window.electronAPI.git.onDiffCacheInvalidated((invalidatedCwd, reason) => {
+    const dispose = window.electronAPI.git.onDiffCacheInvalidated((invalidatedCwd, reason, detail) => {
       const targetCwd = lastKnownCwdRef.current
       if (!targetCwd) return
       // Match by prefix so a submodule mutation under the current cwd
@@ -3448,6 +3467,51 @@ export function GitDiffViewer({
         normalizedSelf.startsWith(`${normalizedHit}/`) ||
         normalizedSelf.startsWith(`${normalizedHit}\\`)
       if (!matches) return
+      const scopedFiles = detail?.files
+      if (scopedFiles?.length) {
+        // File-scoped known mutation (single-file stage/unstage/discard/save):
+        // mark ONLY the affected files stale and keep everything else warm.
+        // The mutation initiator already patched the visible list locally;
+        // the authoritative reconcile arrives via the mirror echo (or the
+        // initiator's timer fallback) — firing another full reload from here
+        // was one of the historical 2-3 redundant reloads per discard
+        // (2026-07-16 revert-scope fix).
+        const fileSet = new Set(scopedFiles)
+        const keyMatchesScopedFile = (key: string) => {
+          const parts = key.split('::')
+          const keyFilename = parts.slice(4).join('::')
+          const keyOriginal = parts[3] ?? ''
+          return fileSet.has(keyFilename) || (keyOriginal !== '' && fileSet.has(keyOriginal))
+        }
+        let staleCount = 0
+        const stale = new Set(staleFileContentKeysRef.current)
+        for (const [key, state] of Object.entries(fileContentsRef.current)) {
+          if (!keyMatchesScopedFile(key)) continue
+          if (state.draftContent !== undefined && state.draftContent !== state.modifiedContent) {
+            stale.delete(key)
+            continue
+          }
+          stale.add(key)
+          staleCount += 1
+        }
+        staleFileContentKeysRef.current = stale
+        lastDiffRef.current = null
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_CACHE_INVALIDATION, {
+          cwd: targetCwd,
+          terminalId,
+          invalidatedCwd,
+          reason,
+          isOpen: isOpenRef.current,
+          scopedFiles: scopedFiles.length,
+          staleEntries: staleCount
+        })
+        if (!isOpenRef.current) return
+        const sel = selectedFileRef.current
+        if (sel && keyMatchesScopedFile(buildGitDiffFileKey(sel.repoRoot || targetCwd, sel))) {
+          void ensureFileContentRef.current?.(sel, true, 'auto-refresh')
+        }
+        return
+      }
       const currentContents = fileContentsRef.current
       let staleCount = 0
       if (isOpenRef.current) {
@@ -5208,6 +5272,53 @@ export function GitDiffViewer({
   ])
 
 
+  // Optimistic-then-reconcile for known single-file mutations (VS Code's
+  // model, 2026-07-16 revert-scope fix): patch the list locally for an
+  // instant update, then rely on the mirror-echo invalidation for the
+  // authoritative reconcile, with a timer fallback when no reload arrived.
+  // Cases the conservative patch table refuses fall back to ONE silent
+  // non-force reload (the worker request cache was already dropped by the
+  // mutation's own invalidation, so a non-force read recomputes fresh).
+  const mutationReconcileTimerRef = useRef<number | null>(null)
+  const scheduleMutationReconcileFallback = useCallback(() => {
+    if (mutationReconcileTimerRef.current !== null) {
+      window.clearTimeout(mutationReconcileTimerRef.current)
+    }
+    const baseline = loadDiffStatsRef.current.started
+    mutationReconcileTimerRef.current = window.setTimeout(() => {
+      mutationReconcileTimerRef.current = null
+      if (!isOpenRef.current) return
+      if (loadDiffStatsRef.current.started > baseline) return
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MUTATION_RECONCILE_FALLBACK, {
+        cwd: lastKnownCwdRef.current
+      })
+      void loadDiffRef.current?.({ silent: true })
+    }, MUTATION_RECONCILE_FALLBACK_MS)
+  }, [])
+  useEffect(() => () => {
+    if (mutationReconcileTimerRef.current !== null) {
+      window.clearTimeout(mutationReconcileTimerRef.current)
+      mutationReconcileTimerRef.current = null
+    }
+  }, [])
+
+  const applyLocalPatchOrReload = useCallback(async (file: GitFileStatus, action: GitFileLocalAction) => {
+    const cwd = activeCwd
+    const patched = cwd ? applyFileActionToDiffResult(diffResultRef.current, file, action) : null
+    perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_LOCAL_PATCH_APPLIED, {
+      action,
+      filename: file.filename,
+      changeType: file.changeType,
+      patched: Boolean(patched)
+    })
+    if (patched && cwd) {
+      applyLoadedDiffResult(patched, cwd, file)
+      scheduleMutationReconcileFallback()
+      return
+    }
+    await loadDiff({ silent: true })
+  }, [activeCwd, applyLoadedDiffResult, loadDiff, scheduleMutationReconcileFallback])
+
   const handleKeep = useCallback(async () => {
     if (!selectedFile || !activeCwd) return
     const fileKey = getFileKey(selectedFile)
@@ -5220,14 +5331,14 @@ export function GitDiffViewer({
       } else {
         const message = selectedFile.changeType === 'staged' ? t('gitDiff.action.keepStaged') : t('gitDiff.action.staged')
         setActionMessage({ type: 'success', text: message })
-        await loadDiff({ force: true })
+        await applyLocalPatchOrReload(selectedFile, 'stage')
       }
     } catch (error) {
       setActionMessage({ type: 'error', text: t('gitDiff.error.stageFailedWithReason', { error: String(error) }) })
     } finally {
       setActionState((prev) => (prev?.fileKey === fileKey ? null : prev))
     }
-  }, [selectedFile, activeCwd, getFileKey, loadDiff, t])
+  }, [selectedFile, activeCwd, getFileKey, applyLocalPatchOrReload, t])
 
   const handleDeny = useCallback(async () => {
     if (!selectedFile || !activeCwd) return
@@ -5250,14 +5361,14 @@ export function GitDiffViewer({
       } else {
         const message = selectedFile.changeType === 'staged' ? t('gitDiff.action.unstaged') : t('gitDiff.action.discarded')
         setActionMessage({ type: 'success', text: message })
-        await loadDiff({ force: true })
+        await applyLocalPatchOrReload(selectedFile, 'discard')
       }
     } catch (error) {
       setActionMessage({ type: 'error', text: t('gitDiff.error.discardFailedWithReason', { error: String(error) }) })
     } finally {
       setActionState((prev) => (prev?.fileKey === fileKey ? null : prev))
     }
-  }, [selectedFile, activeCwd, getFileKey, loadDiff, t])
+  }, [selectedFile, activeCwd, getFileKey, applyLocalPatchOrReload, t])
 
   useEffect(() => {
     if (editMessageTimerRef.current) {
@@ -5914,6 +6025,7 @@ export function GitDiffViewer({
         clickLatencyTrackerRef.current.getLastForFile(fileKey),
       getClickLatencyHistory: () => clickLatencyTrackerRef.current.getHistory(),
       resetClickLatencyHistory: () => clickLatencyTrackerRef.current.reset(),
+      getLoadDiffStats: () => ({ ...loadDiffStatsRef.current }),
       setSelectedDraftContent: (content: string) => {
         const file = selectedFileRef.current
         const key = file ? getFileKey(file) : null
@@ -6245,8 +6357,14 @@ export function GitDiffViewer({
             .filter(Boolean)
         }
       },
-      triggerFileAction: async (action: 'keep' | 'deny') => {
+      triggerFileAction: async (action: 'keep' | 'deny', expectedFilename?: string) => {
         if (!selectedFile) return false
+        // Autotest guard against selection races: a background reload's
+        // selection restore can land between the test's select and its
+        // action call; acting on the wrong file would mutate the repo.
+        // The closure's `selectedFile` is exactly what handleKeep/handleDeny
+        // will act on, so this check is authoritative.
+        if (expectedFilename !== undefined && selectedFile.filename !== expectedFilename) return false
         if (action === 'keep') {
           await handleKeep()
           return true

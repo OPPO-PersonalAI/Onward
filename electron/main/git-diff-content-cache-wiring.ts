@@ -37,6 +37,7 @@ import { join } from 'path'
 import {
   buildCacheKey,
   parseCacheKey,
+  cacheKeyMatchesFiles,
   createFetchFileContentWithCache,
   type ContentCacheFile,
   type FetchFileContentArgs,
@@ -338,7 +339,7 @@ let invalidatorInstalled = false
 export function installContentCacheInvalidatorOnce(): void {
   if (invalidatorInstalled) return
   invalidatorInstalled = true
-  gitDiffCacheInvalidator.addListener((cwd, reason) => {
+  gitDiffCacheInvalidator.addListener((cwd, reason, detail) => {
     if (reason === 'lru') {
       // Project was evicted from the watcher — drop the bucket too so we do
       // not keep a stale snapshot for a project we no longer track.
@@ -354,7 +355,15 @@ export function installContentCacheInvalidatorOnce(): void {
       void revalidateContentCacheForProject(cwd, mapInvalidationReason(reason))
       return
     }
-    // Force / mutation / other reasons keep the conservative whole-bucket wipe.
+    if (reason === 'manual' && detail?.files?.length) {
+      // File-scoped known mutation: the initiator already evicted exactly the
+      // affected entries (evictContentCacheEntriesForFiles). A whole-bucket
+      // wipe here would defeat that scoping and cold-miss every other file
+      // (2026-07-16 revert-scope fix).
+      return
+    }
+    // Force / un-scoped mutation / other reasons keep the conservative
+    // whole-bucket wipe.
     invalidateContentCacheForProject(cwd, mapInvalidationReason(reason))
   })
 }
@@ -406,6 +415,40 @@ export async function revalidateContentCacheForProject(
       project, reason, droppedEntries: evicted, keptEntries: kept, scoped: true
     })
     // Re-warm the evicted files in the background (kept files are still cached).
+    gitDiffPrecomputeScheduler.onProjectInvalidated(project)
+  }
+}
+
+/**
+ * File-scoped content-cache eviction for a known single-file mutation
+ * (stage / unstage / discard / editor save). Drops ONLY the entries whose
+ * parsed filename (or rename original) is in `files` — every other file's
+ * body stays warm, which is what keeps a one-file discard from cold-missing
+ * every later click (2026-07-16 revert-scope fix). The caller asserts the
+ * mutation touched exactly these repo-relative paths; anything it cannot
+ * enumerate must use `invalidateContentCacheForProject` instead.
+ */
+export function evictContentCacheEntriesForFiles(
+  project: string | undefined | null,
+  files: string[],
+  reason: GitDiffContentCacheMissReason
+): void {
+  if (!project || files.length === 0) return
+  rememberProjectMissReason(project, reason)
+  const targets: ReadonlySet<string> = new Set(files)
+  const { kept, evicted } = gitDiffContentCache.revalidateProject(project, (key) =>
+    cacheKeyMatchesFiles(key, targets)
+  )
+  performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT, {
+    project,
+    reason,
+    droppedEntries: evicted,
+    keptEntries: kept,
+    scoped: true,
+    fileCount: files.length
+  })
+  if (evicted > 0) {
+    // Re-warm the evicted files in the background (kept files stay cached).
     gitDiffPrecomputeScheduler.onProjectInvalidated(project)
   }
 }

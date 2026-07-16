@@ -157,6 +157,15 @@ SCRIPTS: List[str] = [
     # when no watcher event fired (a non-git cwd has no watcher, so the fresh
     # detection is uniquely attributable to the fix).
     "test/autotest/run-gsm-git-command-freshness-autotest.sh",
+    # GitStateMirror symlink alias (GSY-*): a repo entered through a symlink
+    # (POSIX) / junction (Windows) must render the Task git badge. OSC reports
+    # the LOGICAL cwd, snapshots are keyed by the REAL path; the renderer's
+    # raw→canonical alias must be created even on a COLD subscribe (2026-07-16).
+    "test/autotest/run-git-state-mirror-symlink-autotest.sh",
+    # Git Diff revert-scope (GRS-*): a single-file discard must stay scoped —
+    # no whole-editor Monaco remount, warm files stay cache-hits, at most one
+    # list reconcile (2026-07-16 global-refresh bug).
+    "test/autotest/run-git-diff-revert-scope-autotest.sh",
     # Git ahead/behind + background auto-fetch (AB-*): a local bare remote + clones
     # engineered to each ahead/behind state prove `# branch.ab` reaches the mirror
     # snapshot end-to-end, and the autotest-only force-fetch flips a stale behind.
