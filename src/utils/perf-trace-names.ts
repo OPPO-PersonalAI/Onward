@@ -881,7 +881,28 @@ export const PERF_TRACE_EVENT = {
   // contentLen, hadEditingSource }. Content itself is never included (PII
   // hygiene) — only its length. Breadcrumb for "my typed prompt vanished"
   // reports: shows whether the auto-preserve branch ran and why.
-  RENDERER_PROMPT_DRAFT_AUTO_PRESERVED: 'renderer:prompt.draft-auto-preserved'
+  RENDERER_PROMPT_DRAFT_AUTO_PRESERVED: 'renderer:prompt.draft-auto-preserved',
+
+  // ───────── 2026-07-14 GPU-process crash recovery (Space-switch white flash, phase 2) ─────────
+  // Main: Electron reported the GPU helper process gone (ph=i, always
+  // recorded). Payload: { reason, exitCode, simulated }. The 2026-07-13/14
+  // white-flash bundles proved the crash reports existed on disk while the
+  // trace was blind to them — this event puts the trigger INSIDE the trace.
+  MAIN_GPU_PROCESS_GONE: 'main:gpu.process-gone',
+  // Renderer: the GPU-gone broadcast arrived and the terminal session
+  // manager force-recreated every visible pane's WebGL context (ph=i).
+  // Payload: { sessionCount, recreatedCount, failedCount, reason,
+  // simulated }. Chromium does not deliver webglcontextlost on this crash
+  // path, so this is the ONLY recovery breadcrumb.
+  RENDERER_XTERM_RENDERER_GPU_CRASH_RECOVERY: 'renderer:xterm.renderer.gpu-crash-recovery',
+  // Renderer: a batch of hidden-tab WebGL disposals was queued for staggered
+  // (one-per-frame) execution instead of back-to-back teardown (ph=i).
+  // Payload: { queuedCount }. Back-to-back context destruction is the
+  // trigger window for the ANGLE-Metal GPU-process crash (IOSurface release
+  // path, AGX driver) — staggering removes the burst. Individual disposals
+  // still emit renderer:xterm.renderer.dispose-webgl, whose timestamps
+  // prove the spacing in a trace.
+  RENDERER_XTERM_RENDERER_DEACTIVATE_STAGGERED: 'renderer:xterm.renderer.deactivate-staggered'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

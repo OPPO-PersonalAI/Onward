@@ -23,6 +23,7 @@ import { useAppState } from '../../contexts/AppStateContext'
 import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../constants/terminal'
 import {
   terminalSessionManager,
+  ensureGpuCrashRecoverySubscription,
   TerminalSessionOptions,
   TerminalSessionStatus,
   type TerminalRendererSurfaceEvent
@@ -1352,6 +1353,12 @@ export const TerminalGrid = memo(function TerminalGrid({
       }
     }
   }, [applyTerminalInfoUpdate, gitDiffOpen])
+
+  // GPU-crash recovery wiring: idempotent global subscription (survives the
+  // subscriber grid unmounting; the manager is a singleton spanning tabs).
+  useEffect(() => {
+    ensureGpuCrashRecoverySubscription()
+  }, [])
 
   useEffect(() => {
     if (hidden) return

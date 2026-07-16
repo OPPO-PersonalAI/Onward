@@ -73,6 +73,7 @@ import { gitAutofetchManager } from './git-autofetch-manager'
 import { getUpdateService } from './update-service'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
+import { broadcastGpuProcessGone } from './gpu-crash-recovery'
 import { performanceTrace, TraceContext } from './performance-trace'
 import { traceStore } from './trace-store'
 
@@ -770,6 +771,20 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.handle(IPC.DEBUG_GET_APP_METRICS, () => {
     return app.getAppMetrics()
+  })
+  // Autotest-only: drive the exact GPU-crash broadcast path the real
+  // app.on('child-process-gone') listener uses, since a genuine GPU process
+  // crash cannot be triggered deterministically from a test.
+  ipcMain.handle(IPC.DEBUG_SIMULATE_GPU_PROCESS_GONE, () => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:simulate-gpu-process-gone requires ONWARD_AUTOTEST=1' }
+    }
+    const notified = broadcastGpuProcessGone({
+      reason: 'crashed',
+      exitCode: 5,
+      simulated: true
+    })
+    return { success: true, notified }
   })
   ipcMain.handle(IPC.DEBUG_FOCUS_WINDOW, () => {
     if (mainWindow.isDestroyed()) return false
@@ -2820,6 +2835,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.TELEMETRY_GET_CONSENT)
   ipcMain.removeHandler(IPC.TELEMETRY_SET_CONSENT)
   ipcMain.removeHandler(IPC.DEBUG_GET_APP_METRICS)
+  ipcMain.removeHandler(IPC.DEBUG_SIMULATE_GPU_PROCESS_GONE)
   ipcMain.removeHandler(IPC.DEBUG_FOCUS_WINDOW)
   ipcMain.removeHandler(IPC.DEBUG_GET_GIT_RUNTIME_METRICS)
   ipcMain.removeHandler(IPC.DEBUG_GET_MAIN_WORK_METRICS)

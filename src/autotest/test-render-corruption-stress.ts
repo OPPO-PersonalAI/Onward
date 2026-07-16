@@ -948,6 +948,7 @@ export async function testRenderCorruptionStress(ctx: AutotestContext): Promise<
         sameAddonInstances
       })
     }
+
   }
 
   if (cancelled()) return results
@@ -1270,6 +1271,77 @@ export async function testRenderCorruptionStress(ctx: AutotestContext): Promise<
         totalNoise,
         preserveDrawingBufferNote: 'this suite runs with preserveDrawingBuffer:true (pixel-probing suite); per source analysis it is INERT for on-screen atlas-draw corruption (full overpaint each frame, no gl.clear), so it does not mask the bug and makes readback/toDataURL reliable'
       })
+    }
+  }
+
+  // (moved after RCS-TRANSIENT for suite-order isolation: the hide/show
+  // recreate cycle must not precede the corruption probe — see STAG notes)
+  if (probedIds.length >= 2 && !cancelled()) {
+    // ── RCS-STAG-01: hidden-tab WebGL teardown is staggered one-per-frame ──
+    // 2026-07-14 GPU-crash mitigation: back-to-back disposal of N WebGL
+    // contexts (tab switch with 6 panes) is the trigger window for the
+    // Electron 39 ANGLE-Metal GPU-process crash (IOSurface release path).
+    // setVisibility(false) must therefore queue disposals and execute at
+    // most one per animation frame; turning a queued terminal visible again
+    // cancels its pending teardown. Assert: no synchronous bulk teardown,
+    // monotonic one-ish-per-frame drain to zero, and full recovery on show.
+    if (!cancelled()) {
+      const countActiveAddons = () =>
+        probedIds.filter((id) => getWebglAddon(sessionMgr, id) !== null).length
+      const before = countActiveAddons()
+      for (const id of probedIds) {
+        sessionMgr.setVisibility?.(id, false)
+      }
+      const syncAfterHide = countActiveAddons()
+      // Sample with setTimeout (NOT rAF): the autotest window may be occluded,
+      // where rAF never fires — matching the pump's own timer-based drain.
+      const frameCounts: number[] = []
+      const drainStart = performance.now()
+      while (performance.now() - drainStart < 3000) {
+        await sleep(16)
+        frameCounts.push(countActiveAddons())
+        if (frameCounts[frameCounts.length - 1] === 0) break
+      }
+      const drained = frameCounts[frameCounts.length - 1] === 0
+      const monotonic = frameCounts.every((v, i) => i === 0 || v <= frameCounts[i - 1])
+      const maxStepDown = Math.max(
+        syncAfterHide - (frameCounts[0] ?? syncAfterHide),
+        ...frameCounts.map((v, i) => (i === 0 ? 0 : frameCounts[i - 1] - v))
+      )
+      const spreadAcrossFrames = frameCounts.length >= 3
+      for (const id of probedIds) {
+        sessionMgr.setVisibility?.(id, true)
+      }
+      let recovered = false
+      const recoverStart = performance.now()
+      while (performance.now() - recoverStart < 5000) {
+        if (countActiveAddons() === before) {
+          recovered = true
+          break
+        }
+        await sleep(80)
+      }
+      log('RCS-STAG-01:staggered-teardown', {
+        before,
+        syncAfterHide,
+        frameCounts,
+        maxStepDown,
+        drained,
+        monotonic,
+        spreadAcrossFrames,
+        recovered
+      })
+      _assert(
+        'RCS-STAG-01-hidden-teardown-staggered-and-recovers',
+        before >= 2 &&
+          syncAfterHide === before &&
+          drained &&
+          monotonic &&
+          maxStepDown <= 2 &&
+          spreadAcrossFrames &&
+          recovered,
+        { before, syncAfterHide, frameCounts, maxStepDown, drained, monotonic, spreadAcrossFrames, recovered }
+      )
     }
   }
 

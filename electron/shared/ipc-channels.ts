@@ -224,6 +224,8 @@ export const IPC = {
 
   // settings / shell / shortcut
   SETTINGS_CHECK_SHORTCUT_AVAILABLE: 'settings:check-shortcut-available',
+  SYSTEM_GPU_PROCESS_GONE: 'system:gpu-process-gone',
+  DEBUG_SIMULATE_GPU_PROCESS_GONE: 'debug:simulate-gpu-process-gone',
   SETTINGS_CHECK_SHORTCUT_CONFLICT: 'settings:check-shortcut-conflict',
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_REGISTER_SHORTCUTS: 'settings:register-shortcuts',

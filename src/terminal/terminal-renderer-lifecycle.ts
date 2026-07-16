@@ -27,6 +27,7 @@ export type TerminalRendererLifecycleReason =
   | 'hidden'
   | 'document-hidden'
   | 'dispose'
+  | 'gpu-process-gone'
   | TerminalRendererSurfaceEvent
 
 export interface TerminalRendererPolicy {
@@ -224,6 +225,25 @@ export class TerminalRendererLifecycle {
         return { ...result, action }
       }
     }
+  }
+
+  /**
+   * GPU-process crash recovery: the old context is dead even though
+   * Chromium never delivered `webglcontextlost` on this crash path, so the
+   * normal loss fallback never ran. Drop the dead addon unconditionally,
+   * clear loss/cooldown bookkeeping (the crash was not a WebGL failure of
+   * ours), and attach a fresh addon against the respawned GPU process.
+   */
+  forceRecreateWebgl(reason: TerminalRendererLifecycleReason): TerminalRendererLifecycleResult {
+    this.markLifecycle(reason)
+    this.detachContextListeners()
+    this.disposeWebgl(reason)
+    this.contextLost = false
+    this.webglFailureCount = 0
+    this.webglDisabledUntil = null
+    const result = this.ensureWebgl(reason)
+    this.refreshTerminalIfActive()
+    return result
   }
 
   dispose(): void {

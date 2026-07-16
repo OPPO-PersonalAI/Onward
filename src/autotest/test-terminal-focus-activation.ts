@@ -436,6 +436,7 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
   //   TFA-18 restoring the old canvas context does not disturb DOM fallback
   //   TFA-19 document-hidden keeps WebGL alive (occlusion keep-alive contract, 5-trial aggregate)
   //   TFA-20 surface-restore latency budget: >=1 of 3 trials within SURFACE_RESTORE_BUDGET_MS
+  //   TFA-21 GPU-process-gone broadcast force-recreates WebGL (3-trial aggregate)
   // ───────────────────────────────────────────────────────────────────
   const repro = window.__blankTaskRepro
   if (!repro) {
@@ -856,6 +857,65 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
               'switch-back restore is refresh-only on a live addon (no context recreate, no shared-atlas clear), so at least one of three trials must repaint within the budget'
           }
         )
+
+        // ---- TFA-21: GPU-process-gone broadcast force-recreates WebGL ----
+        // 2026-07-14 phase-2 fix: the Electron 39 ANGLE-Metal GPU crash on
+        // Space switches never delivers webglcontextlost, so the main
+        // process broadcasts child-process-gone and the session manager
+        // must force-recreate every visible pane's WebGL. Drives the REAL
+        // IPC roundtrip via the autotest-gated simulate hook. Recovery is
+        // boolean correctness -> 3-trial aggregate, all must succeed.
+        {
+          const GPU_RECOVERY_TRIALS = 3
+          const gpuTrials: Array<{
+            simulateOk: boolean
+            notified: number
+            addonReplaced: boolean
+            webglActiveAfter: boolean
+            renderable: boolean
+          }> = []
+          const getAddonRef = () => {
+            const mgr = (window as unknown as {
+              __terminalSessionManager?: { getSession?: (id: string) => { renderer?: { } } | undefined }
+            }).__terminalSessionManager
+            const session = mgr?.getSession?.(terminalId) as { webglAddon?: object; renderer?: unknown } | undefined
+            return (session as { renderer?: { webglAddon?: object } } | undefined)?.renderer?.webglAddon ?? null
+          }
+          for (let trial = 0; trial < GPU_RECOVERY_TRIALS; trial++) {
+            const addonBefore = getAddonRef()
+            const simulateResult = await window.electronAPI.debug.simulateGpuProcessGone()
+            const recovered = await waitFor(
+              `tfa-21-recovered-trial-${trial}`,
+              () => {
+                const addonAfter = getAddonRef()
+                if (!addonAfter || addonAfter === addonBefore) return false
+                const state = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+                if (state?.webglActive !== true) return false
+                const surface = findWebglSurface(terminalId)
+                return Boolean(surface && hasRenderablePixels(readWebglPixels(surface.gl)))
+              },
+              RESTORE_TIMEOUT_MS,
+              RESTORE_POLL_MS
+            )
+            const stateAfter = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+            gpuTrials.push({
+              simulateOk: Boolean(simulateResult?.success),
+              notified: simulateResult?.notified ?? 0,
+              addonReplaced: recovered,
+              webglActiveAfter: stateAfter?.webglActive === true,
+              renderable: recovered
+            })
+            await sleep(150)
+          }
+          const gpuAllGreen =
+            gpuTrials.length === GPU_RECOVERY_TRIALS &&
+            gpuTrials.every((t) => t.simulateOk && t.notified >= 1 && t.addonReplaced && t.webglActiveAfter)
+          _assert('TFA-21-gpu-process-gone-force-recreates-webgl', gpuAllGreen, {
+            trials: gpuTrials,
+            bugHypothesisFix:
+              'child-process-gone(GPU) broadcast must reach the session manager and force-recreate WebGL, because webglcontextlost is never delivered on this crash path'
+          })
+        }
       }
     }
   }

@@ -1246,6 +1246,7 @@ export interface DebugAPI {
   virtualCursorDisabled: boolean
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
+  simulateGpuProcessGone: () => Promise<{ success: boolean; notified?: number; error?: string }>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
   getMainWorkMetrics: () => Promise<Record<string, unknown>>
@@ -1489,6 +1490,7 @@ export interface ElectronAPI {
   codingAgentConfig: CodingAgentConfigAPI
   codingAgent: CodingAgentAPI
   debug: DebugAPI
+  system: SystemAPI
   platform: 'darwin' | 'win32' | 'linux'
 }
 
@@ -2245,6 +2247,9 @@ const debugAPI: DebugAPI = {
   focusWindow: () => {
     return ipcRenderer.invoke(IPC.DEBUG_FOCUS_WINDOW)
   },
+  simulateGpuProcessGone: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_SIMULATE_GPU_PROCESS_GONE)
+  },
   getAppMetrics: () => {
     return ipcRenderer.invoke(IPC.DEBUG_GET_APP_METRICS)
   },
@@ -2570,6 +2575,30 @@ const telemetryAPI = {
   setConsent: (consent: boolean) => ipcRenderer.invoke(IPC.TELEMETRY_SET_CONSENT, consent) as Promise<{ instanceId: string | null }>
 }
 
+export interface SystemAPI {
+  /**
+   * GPU helper process crash notification (Electron 39 ANGLE-Metal Space-
+   * switch crash). Returns an unsubscribe function. webglcontextlost is NOT
+   * delivered on this crash path, so consumers must force-recreate WebGL.
+   */
+  onGpuProcessGone: (
+    callback: (info: { reason: string; exitCode: number; simulated: boolean }) => void
+  ) => () => void
+}
+
+const systemAPI: SystemAPI = {
+  onGpuProcessGone: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      info: { reason: string; exitCode: number; simulated: boolean }
+    ) => {
+      callback(info)
+    }
+    ipcRenderer.on(IPC.SYSTEM_GPU_PROCESS_GONE, listener)
+    return () => ipcRenderer.removeListener(IPC.SYSTEM_GPU_PROCESS_GONE, listener)
+  }
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   terminal: terminalAPI,
   prompt: promptAPI,
@@ -2592,5 +2621,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   codingAgent: codingAgentAPI,
   telemetry: telemetryAPI,
   debug: debugAPI,
+  system: systemAPI,
   platform: process.platform as 'darwin' | 'win32' | 'linux'
 })
