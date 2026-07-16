@@ -217,6 +217,13 @@ export const PERF_TRACE_EVENT = {
   // Import Pin submenus inside the viewport. Args contain only geometry
   // and clamp metadata; no prompt or pinned-prompt content is recorded.
   RENDERER_PROMPT_EDITOR_CTX_SUBMENU_LAYOUT: 'renderer:prompt.editor.ctx-submenu-layout',
+  // The open menu was dismissed because a container that can move its
+  // anchor scrolled. Instant marker (ph='i'); payload carries only the
+  // count of ignored unrelated-container scrolls (terminal viewport
+  // auto-follow during streamed output) aggregated while the menu was
+  // open — the ignore branch itself is on the output hot path and must
+  // not emit per event.
+  RENDERER_PROMPT_EDITOR_CTX_MENU_SCROLL_DISMISS: 'renderer:prompt.editor.ctx-menu-scroll-dismiss',
   // User changed the global Prompt input mode preference from the title-row
   // selector. Args carry the target mode and tab count only.
   RENDERER_PROMPT_INPUT_MODE_CHANGE: 'renderer:prompt.input-mode-change',
