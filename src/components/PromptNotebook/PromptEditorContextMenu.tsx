@@ -10,7 +10,7 @@ import type { TerminalInfo } from '../../types/prompt'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
-import { computeMenuPosition, computeSubmenuLayout } from '../../utils/popup-position'
+import { computeMenuPosition, computeSubmenuLayout, shouldDismissMenuOnScroll } from '../../utils/popup-position'
 import './PromptEditorContextMenu.css'
 
 const PINNED_PRIMARY_LIMIT = 10
@@ -94,6 +94,11 @@ export function PromptEditorContextMenu({
   const submenuTimerRef = useRef<number | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const submenuRef = useRef<HTMLDivElement | null>(null)
+  // Unrelated-container scrolls ignored while this menu is open (terminal
+  // viewport auto-follow during streamed output); reported in the
+  // scroll-dismiss trace payload so bug-report traces show how much
+  // background scrolling the menu survived.
+  const ignoredScrollsRef = useRef(0)
   // Effective screen position: starts at the right-click point, then nudged
   // by the layout effect below so the menu stays inside the viewport. The
   // useLayoutEffect runs synchronously between commit and paint, so the
@@ -239,9 +244,24 @@ export function PromptEditorContextMenu({
       }
     }
     const handleScroll = (e: Event) => {
-      if (menuRef.current && menuRef.current.contains(e.target as Node)) {
+      // Capture-phase listener sees every scroll in the document. Only a
+      // scroll that can move the anchor (ancestor chain) dismisses; menu-
+      // internal scrolling and unrelated containers — a terminal viewport
+      // auto-following streamed Task output — must not kill the menu the
+      // user is operating. Ignored scrolls arrive per rendered frame while
+      // output streams, so they are aggregated into the dismiss payload
+      // instead of traced per event.
+      if (!shouldDismissMenuOnScroll({
+        target: e.target,
+        menu: menuRef.current,
+        anchor: textareaRef.current
+      })) {
+        ignoredScrollsRef.current += 1
         return
       }
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_CTX_MENU_SCROLL_DISMISS, {
+        ignoredScrolls: ignoredScrollsRef.current
+      })
       onClose()
     }
     const handleResize = () => {

@@ -42,6 +42,7 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   const terminalApi = () => (window as unknown as {
     __onwardTerminalDebug?: {
       getTailText: (terminalId?: string, lastLines?: number) => string | null
+      injectPtyData: (data: string, terminalId?: string) => boolean
     }
   }).__onwardTerminalDebug
 
@@ -816,6 +817,83 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     afterSendHistoryCount: afterFirstPinTpcm?.sendHistoryCount ?? 0
   })
   await closeTerminalContextMenu()
+
+  // ─────────── PECM-39/40: menu survives terminal output auto-scroll ───────────
+  // Regression: streaming Task output makes the xterm viewport auto-follow
+  // (scrollTop writes → native capture-phase `scroll` events). The menu's
+  // dismiss logic must ignore scrolls from containers that cannot move the
+  // menu's anchor, so the menu the user is operating stays open while a
+  // background Task refreshes. Timing-sensitive (PTY write → xterm render →
+  // viewport scroll), so each assertion aggregates N=5 trials and every
+  // trial requires an OBSERVED outside-the-menu scroll event before it
+  // judges survival — a run where no scroll fires cannot pass vacuously.
+  // PECM-40 pins the root-cause distinction: terminal output must not
+  // remount the prompt editor subtree (menu loss is menu-local dismiss
+  // logic, not a global re-render tearing down the UI under the user).
+  const scrollTerminalId39 = cards[0]?.id ?? null
+  const injectBurst39 = (tag: string, lines: number) => {
+    const burst = Array.from({ length: lines }, (_, i) => `pecm39-${tag}-${i}`).join('\r\n') + '\r\n'
+    return terminalApi()?.injectPtyData(burst, scrollTerminalId39 ?? undefined) === true
+  }
+  // Overflow the viewport once so every later burst forces auto-follow
+  // scrolling instead of just filling empty rows.
+  const prefill39 = injectBurst39('prefill', 200)
+  await sleep(250)
+
+  type ScrollTrial = {
+    menuOpened: boolean
+    sawOutsideScroll: boolean
+    menuSurvived: boolean
+    editorIdentityPreserved: boolean
+  }
+  const trials39: ScrollTrial[] = []
+  for (let trial = 0; trial < 5; trial++) {
+    if (cancelled()) break
+    const editorBefore = findTextarea()
+    const trialMenu = await openMenuWith(`pecm39 trial ${trial}`, 0, 0)
+    let outsideScrolls = 0
+    const countOutsideScroll = (e: Event) => {
+      const target = e.target as Node | null
+      if (trialMenu && target && trialMenu.contains(target)) return
+      outsideScrolls += 1
+    }
+    window.addEventListener('scroll', countOutsideScroll, true)
+    let sawOutsideScroll = false
+    if (trialMenu) {
+      // Keep injecting bursts until the auto-follow scroll is observed —
+      // one large write can coalesce into a single render pass, so the
+      // poll re-arms the stimulus instead of sleeping blind.
+      sawOutsideScroll = await waitFor(`pecm39-scroll-seen-${trial}`, () => {
+        if (outsideScrolls > 0) return true
+        injectBurst39(`t${trial}`, 40)
+        return false
+      }, 5000, 80)
+      // Let any pending dismiss handler run before judging survival.
+      await sleep(150)
+    }
+    window.removeEventListener('scroll', countOutsideScroll, true)
+    trials39.push({
+      menuOpened: trialMenu !== null,
+      sawOutsideScroll,
+      menuSurvived: trialMenu !== null && findMenu() === trialMenu,
+      editorIdentityPreserved: editorBefore !== null && findTextarea() === editorBefore
+    })
+    await closeMenu()
+  }
+  const menuSurvivedAll39 = trials39.length === 5 && trials39.every(t => t.menuOpened && t.sawOutsideScroll && t.menuSurvived)
+  record('PECM-39-menu-survives-terminal-output-scroll', prefill39 && menuSurvivedAll39, {
+    prefill: prefill39,
+    terminalId: scrollTerminalId39,
+    trials: trials39
+  })
+  const editorStableAll40 = trials39.length === 5 && trials39.every(t => t.editorIdentityPreserved)
+  record('PECM-40-terminal-output-does-not-remount-prompt-editor', prefill39 && editorStableAll40, {
+    prefill: prefill39,
+    trials: trials39.map(t => t.editorIdentityPreserved)
+  })
+  // Clear the injected fill from the terminal display + scrollback so later
+  // tail-text readers in this app session do not see pecm39 markers.
+  terminalApi()?.injectPtyData('\x1b[2J\x1b[3J\x1b[H', scrollTerminalId39 ?? undefined)
 
   // Restore an empty editor so subsequent suites start clean.
   await setText('')

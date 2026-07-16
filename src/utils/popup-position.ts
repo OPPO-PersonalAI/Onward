@@ -186,3 +186,56 @@ function clampNumber(value: number, min: number, max: number): number {
   if (max < min) return min
   return Math.min(Math.max(value, min), max)
 }
+
+/**
+ * Structural stand-in for a DOM Node: ancestry (`contains`, which includes
+ * self per DOM semantics) is the only capability the scroll-dismiss decision
+ * needs, so the Node unit layer can pin the table without a DOM.
+ */
+export interface MenuScrollNode {
+  contains(other: unknown): boolean
+}
+
+export interface MenuScrollDismissInput {
+  /** `event.target` of the capture-phase scroll event. */
+  target: unknown
+  /** Menu root element (submenus are nested inside it). */
+  menu: MenuScrollNode | null | undefined
+  /** Element the menu is anchored to (the right-clicked surface). */
+  anchor: MenuScrollNode | null | undefined
+}
+
+/**
+ * Decide whether a scroll event observed at the window (capture phase, so
+ * every scroll in the document is seen) should dismiss a cursor-anchored
+ * menu.
+ *
+ * A `position: fixed` menu only goes stale when its ANCHOR moves — i.e.
+ * when the scrolled container is an ancestor of the anchor (the anchor
+ * itself, its scroll parents, or the document). Scrolls inside the menu
+ * (oversized submenu lists) and scrolls of unrelated containers — a
+ * terminal viewport auto-following streamed Task output — cannot move the
+ * anchor and must never dismiss the menu the user is operating. Scoping
+ * dismissal to the anchor's ancestor chain matches Floating UI's
+ * `useDismiss({ ancestorScroll })` semantics; VS Code's contextview goes
+ * further and never closes on scroll at all.
+ *
+ * When the scroll cannot be attributed (non-node target) or no anchor is
+ * known, fall back to dismissing: a spurious close is cheaper than a menu
+ * floating detached from a moved anchor.
+ */
+export function shouldDismissMenuOnScroll(input: MenuScrollDismissInput): boolean {
+  const { target, menu, anchor } = input
+  const targetNode = isMenuScrollNode(target) ? target : null
+  if (targetNode && menu && menu.contains(targetNode)) {
+    return false
+  }
+  if (!targetNode || !anchor) {
+    return true
+  }
+  return targetNode.contains(anchor)
+}
+
+function isMenuScrollNode(value: unknown): value is MenuScrollNode {
+  return Boolean(value) && typeof (value as { contains?: unknown }).contains === 'function'
+}

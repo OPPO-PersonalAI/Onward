@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import {
   computeMenuPosition,
   computeSubmenuLayout,
+  shouldDismissMenuOnScroll,
   POPUP_VIEWPORT_MARGIN
 } from '../../src/utils/popup-position.ts'
 
@@ -167,4 +168,69 @@ test('PP-U-14 local offsets are viewport coords minus the anchor corner', () => 
   })
   assert.equal(r.left, r.viewportLeft - ANCHOR_ITEM.left)
   assert.equal(r.top, r.viewportTop - ANCHOR_ITEM.top)
+})
+
+// ─────────────── PP-U-15..22 scroll-dismiss decision table ───────────────
+// A capture-phase scroll listener sees every scroll in the document; the
+// menu must only be dismissed when the scrolled container can move the
+// menu's ANCHOR (ancestor chain, DOM `contains` includes self). Menu-internal
+// scrolls and unrelated containers (a terminal viewport auto-following
+// streamed output) must never dismiss. Fake nodes implement the structural
+// `contains` contract so the table runs without a DOM.
+
+type FakeNode = { contains: (other: unknown) => boolean }
+const nodeContaining = (...members: unknown[]): FakeNode => {
+  const self: FakeNode = { contains: (o) => o === self || members.includes(o) }
+  return self
+}
+const leafNode = (): FakeNode => nodeContaining()
+
+test('PP-U-15 scroll inside the menu (oversized submenu list) → keep open', () => {
+  const anchor = leafNode()
+  const submenuList = leafNode()
+  const menu = nodeContaining(submenuList)
+  assert.equal(shouldDismissMenuOnScroll({ target: submenuList, menu, anchor }), false)
+})
+
+test('PP-U-16 unrelated container scroll (terminal viewport auto-follow) → keep open', () => {
+  const anchor = leafNode()
+  const menu = leafNode()
+  const terminalViewport = leafNode()
+  assert.equal(shouldDismissMenuOnScroll({ target: terminalViewport, menu, anchor }), false)
+})
+
+test('PP-U-17 scroll of an anchor ancestor (anchor may have moved) → dismiss', () => {
+  const anchor = leafNode()
+  const menu = leafNode()
+  const anchorScrollParent = nodeContaining(anchor)
+  assert.equal(shouldDismissMenuOnScroll({ target: anchorScrollParent, menu, anchor }), true)
+})
+
+test('PP-U-18 anchor itself scrolls (internal overflow) → dismiss', () => {
+  const anchor = leafNode()
+  const menu = leafNode()
+  assert.equal(shouldDismissMenuOnScroll({ target: anchor, menu, anchor }), true)
+})
+
+test('PP-U-19 document-level scroll containing both anchor and menu → dismiss', () => {
+  const anchor = leafNode()
+  const menu = leafNode()
+  const documentNode = nodeContaining(anchor, menu)
+  assert.equal(shouldDismissMenuOnScroll({ target: documentNode, menu, anchor }), true)
+})
+
+test('PP-U-20 no anchor known → conservative dismiss (legacy behavior)', () => {
+  const menu = leafNode()
+  assert.equal(shouldDismissMenuOnScroll({ target: leafNode(), menu, anchor: null }), true)
+})
+
+test('PP-U-21 non-node scroll target (cannot attribute the scroll) → dismiss', () => {
+  const anchor = leafNode()
+  const menu = leafNode()
+  assert.equal(shouldDismissMenuOnScroll({ target: null, menu, anchor }), true)
+})
+
+test('PP-U-22 no menu root registered → unrelated scroll still keeps open', () => {
+  const anchor = leafNode()
+  assert.equal(shouldDismissMenuOnScroll({ target: leafNode(), menu: null, anchor }), false)
 })
