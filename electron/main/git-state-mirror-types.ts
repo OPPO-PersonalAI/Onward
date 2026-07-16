@@ -97,15 +97,16 @@ export interface MirrorState {
   changeFingerprint: string
   /**
    * Monotonic generation counter, incremented by the Worker on every
-   * recompute that produces a state change. Renderer uses this as a
-   * lifecycle key (DiffEditor `key` prop, fileContentsRef cache bucket)
-   * so a Refresh Changes click — or any other "force-refresh" path —
-   * cascades through to a clean re-mount of every layer below.
+   * recompute that produces a state change. Consumers use it as a cheap
+   * "did anything change since I last looked" ordinal (effect dependencies,
+   * freshness gates, History cache keying).
    *
-   * Phase 2 of the GitState refactor: identity-keyed propagation. Same
-   * cwd + same content + same generation → renderer treats it as the
-   * same view; bumping generation forces remount even when underlying
-   * data is byte-identical.
+   * 2026-07-16 revert-scope fix: the renderer NO LONGER folds this into the
+   * DiffEditor React key. Doing so re-mounted the whole Monaco editor on
+   * every background repo state change (the visible "global refresh" after a
+   * single-file revert). Explicit remounts are driven by the renderer-local
+   * `diffEditorResetNonce` (Refresh Changes / file switch); mirror data
+   * changes flow through normal React updates without a remount.
    */
   generation: number
 }

@@ -41,6 +41,8 @@ import { testGitLargeFileConfirmation } from './test-git-large-file-confirmation
 import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitStateMirrorSubscriptionLeak } from './test-git-state-mirror-subscription-leak'
 import { testGitStateMirrorGitCommandFreshness } from './test-git-state-mirror-git-command-freshness'
+import { testGitStateMirrorSymlink } from './test-git-state-mirror-symlink'
+import { testGitDiffRevertScope } from './test-git-diff-revert-scope'
 import { testGitAutofetchAheadBehind } from './test-git-autofetch-ahead-behind'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
@@ -714,6 +716,28 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase5.497:begin')
       const results = await testGitStateMirrorGitCommandFreshness(ctx)
       collectSuiteResults('GitStateMirrorGitCommandFreshness', results)
+      await sleep(300)
+    }
+
+    // Phase 5.4972: GitStateMirror symlink alias (GSY-*). Isolated like the
+    // freshness suite: its runner sets ONWARD_AUTOTEST_SUITE + a neutral cwd
+    // fixture, so an 'all' run never restarts earlier suites. The fixture repo
+    // must stay COLD until the suite pushes the symlink cwd — never fold this
+    // into a session that touches the fixture first.
+    if (!ctx.cancelled() && shouldRun('git-state-mirror-symlink')) {
+      log('phase5.4972:begin')
+      const results = await testGitStateMirrorSymlink(ctx)
+      collectSuiteResults('GitStateMirrorSymlink', results)
+      await sleep(300)
+    }
+
+    // Phase 5.4973: Git Diff revert-scope (GRS-*). Isolated: its runner sets
+    // ONWARD_AUTOTEST_SUITE with the fixture repo as the app cwd, so the diff
+    // list opens on exactly three modified rows.
+    if (!ctx.cancelled() && shouldRun('git-diff-revert-scope')) {
+      log('phase5.4973:begin')
+      const results = await testGitDiffRevertScope(ctx)
+      collectSuiteResults('GitDiffRevertScope', results)
       await sleep(300)
     }
 

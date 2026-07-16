@@ -451,6 +451,17 @@ export interface GitStateMirrorSnapshot {
 }
 
 /**
+ * Result of `subscribeMirror`. `canonicalCwd` is the router's realpath key —
+ * present even when `snapshot` is still cold (null) so the renderer can alias
+ * a symlink/junction raw cwd onto the realpath-keyed snapshot map before the
+ * first delta arrives (2026-07-16 symlink-status fix).
+ */
+export interface GitStateMirrorSubscribeResult {
+  canonicalCwd: string
+  snapshot: GitStateMirrorSnapshot | null
+}
+
+/**
  * Partial-update payload broadcast on `git-state-mirror:update`. Renderer
  * merges these into its local copy of `GitStateMirrorSnapshot`. Always
  * carries `capturedAt` for ordering.
@@ -749,12 +760,15 @@ export interface GitAPI {
   revalidateMirror: (cwd: string) => Promise<{ success: boolean }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror', detail?: { files?: string[] }) => void) => () => void
 
   // GitStateMirror surface — single-source-of-truth subscriptions wired
   // through the worker-thread mirror. See `src/hooks/useGitStateMirror.ts`
   // for the React hook every consumer should prefer over these raw bridges.
-  subscribeMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
+  // The subscribe result carries the canonical (realpath) key even when the
+  // snapshot is cold — the renderer needs it to alias a symlink/junction cwd
+  // onto the realpath-keyed snapshot map (2026-07-16 symlink-status fix).
+  subscribeMirror: (cwd: string) => Promise<GitStateMirrorSubscribeResult | null>
   unsubscribeMirror: (cwd: string) => void
   getMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
   onMirrorUpdate: (callback: (cwd: string, delta: GitStateMirrorDelta) => void) => () => void

@@ -114,6 +114,18 @@ export function parseCacheKey(key: string): {
 }
 
 /**
+ * True when a cache key belongs to one of the given repo-relative paths —
+ * matches the entry's filename or, for renames, its original filename, across
+ * every changeType/status variant of the path. Drives the file-scoped
+ * eviction after a known single-file mutation (2026-07-16 revert-scope fix):
+ * evict exactly these, keep everything else warm.
+ */
+export function cacheKeyMatchesFiles(key: string, files: ReadonlySet<string>): boolean {
+  const { filename, originalFilename } = parseCacheKey(key)
+  return files.has(filename) || (originalFilename !== '' && files.has(originalFilename))
+}
+
+/**
  * Read-path freshness decision for a content-cache HIT (VS Code / GitLens model:
  * validate the working-tree side on read instead of trusting a path-only key +
  * a watcher that can miss an edit). `storedToken` is the working-tree stat token

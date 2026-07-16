@@ -237,7 +237,8 @@ export async function subscribeMirror(cwd: string): Promise<{
   if (!api?.subscribeMirror || !api?.unsubscribeMirror || !api?.onMirrorUpdate) {
     throw new PendingCommitError(3, 'GitAPI.subscribeMirror / onMirrorUpdate missing — preload bridge not yet exposed.')
   }
-  const initial = await api.subscribeMirror(cwd)
+  const result = await api.subscribeMirror(cwd)
+  const initial = (result as { snapshot?: unknown } | null)?.snapshot ?? null
   const onUpdate = (cb: (cwd: string, delta: unknown) => void) => api.onMirrorUpdate(cb)
   return {
     initial,

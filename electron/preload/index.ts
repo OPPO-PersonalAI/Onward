@@ -1795,9 +1795,9 @@ const gitAPI: GitAPI = {
     }
   },
 
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => {
-    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => {
-      callback(cwd, reason)
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror', detail?: { files?: string[] }) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror', detail?: { files?: string[] }) => {
+      callback(cwd, reason, detail)
     }
     ipcRenderer.on(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
     return () => {

@@ -545,6 +545,13 @@ class GitStateMirrorRouter {
       // Use realpath canonicalisation (not path.resolve) so symlinked
       // forms like `/var/...` and `/private/var/...` collapse to the
       // same key. See `canonicalise()` for the full rationale.
+      //
+      // Return shape carries the canonical key EVEN WHEN THE SNAPSHOT IS
+      // COLD (null): the renderer needs `rawCwd → canonicalCwd` to bridge a
+      // symlink/junction cwd to the realpath-keyed snapshot map, and a cold
+      // first visit is exactly when that alias must be created (2026-07-16
+      // "symlinked repo shows no git status" bug — the alias used to be
+      // derived from the warm snapshot's cwd only).
       const cwd = canonicalise(rawCwd)
       const wcId = event.sender.id
       let perRenderer = this.subs.get(wcId)
@@ -564,7 +571,7 @@ class GitStateMirrorRouter {
         this.refCounts.set(cwd, next)
         if (next === 1) this.postToWorker({ kind: 'attach-watch', cwd })
       }
-      return this.latest.get(cwd) ?? null
+      return { canonicalCwd: cwd, snapshot: this.latest.get(cwd) ?? null }
     })
 
     ipcMain.on(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE, (event, rawCwd: string) => {

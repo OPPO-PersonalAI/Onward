@@ -580,6 +580,11 @@ export const PERF_TRACE_EVENT = {
   // 'skipped-value-mismatch' so the trace distinguishes "rollback happened"
   // from "rollback was a no-op because speculative was already replaced".
   RENDERER_TERMINAL_OSC_CWD_ROLLED_BACK: 'renderer:terminal.osc-cwd-rolled-back',
+  // Raw→canonical alias registered from a subscribeMirror result. `cold:true`
+  // is the load-bearing case: a symlink/junction cwd whose repo was never warm
+  // used to skip alias creation entirely, leaving the Task badge empty
+  // (2026-07-16 symlink-status fix). ph='i', subscribe-frequency (rare).
+  RENDERER_GIT_STATE_MIRROR_SUBSCRIBE_ALIAS_REGISTERED: 'renderer:git-state-mirror.subscribe-alias-registered',
   WORKER_GIT_STATE_MIRROR_WATCHER_FIRE: 'worker:git-state-mirror.watcher-fire',
   WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
   WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED: 'worker:git-state-mirror.watcher-skipped',
@@ -663,6 +668,16 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_MODEL_SYNC: 'renderer:git-diff.model-sync',
   RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
   RENDERER_GIT_DIFF_CACHE_INVALIDATION: 'renderer:git-diff.cache-invalidation',
+  // Optimistic local list patch after a known single-file mutation
+  // (stage/unstage/discard). `patched:false` = the conservative table refused
+  // the case and the caller fell back to a real reload — the load-bearing
+  // breadcrumb when "the row didn't update after discard" bugs come in.
+  // ph='i', user-action frequency (2026-07-16 revert-scope fix).
+  RENDERER_GIT_DIFF_LOCAL_PATCH_APPLIED: 'renderer:git-diff.local-patch-applied',
+  // The 3 s reconcile fallback fired because NO invalidation-driven reload
+  // arrived after a known mutation (mirror echo missed/late). Rare; its
+  // presence in a trace says the watcher path went quiet. ph='i'.
+  RENDERER_GIT_DIFF_MUTATION_RECONCILE_FALLBACK: 'renderer:git-diff.mutation-reconcile-fallback',
   RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE: 'renderer:git-diff.file-list-mode-change',
   RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
   RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',

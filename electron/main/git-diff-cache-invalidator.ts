@@ -26,6 +26,19 @@ export type GitDiffInvalidationReason =
   | 'manual'
   | 'mirror'
 
+/**
+ * Optional scope refinement carried with an invalidation. When `files` is a
+ * non-empty list of repo-relative paths, the caller asserts the mutation
+ * touched ONLY those files (single-file stage/discard/save), so downstream
+ * layers may evict per-file instead of wiping the whole project bucket and
+ * the renderer may keep every other file's warm state. Callers that cannot
+ * enumerate the affected files simply omit it — the conservative whole-bucket
+ * semantics remain the default (2026-07-16 revert-scope fix).
+ */
+export interface GitDiffInvalidationDetail {
+  files?: string[]
+}
+
 export interface GitDiffWatcherHealthStats {
   backend: 'mirror'
   active: number
@@ -51,8 +64,11 @@ interface InvalidationListener {
    *
    * `watcher` remains in the public union for backward-compatible renderer
    * diagnostics from older bundles, but this module no longer emits it.
+   *
+   * `detail` is present only for file-scoped invalidations (see
+   * `GitDiffInvalidationDetail`).
    */
-  (cwd: string, reason: GitDiffInvalidationReason): void
+  (cwd: string, reason: GitDiffInvalidationReason, detail?: GitDiffInvalidationDetail): void
 }
 
 interface RegisteredProject {
@@ -96,8 +112,8 @@ class GitDiffCacheInvalidator {
     if (queueIndex >= 0) this.recentProjectQueue.splice(queueIndex, 1)
   }
 
-  invalidate(cwd: string, reason: 'force' | 'manual' | 'mirror' = 'manual'): void {
-    this.fireListeners(resolve(cwd), reason)
+  invalidate(cwd: string, reason: 'force' | 'manual' | 'mirror' = 'manual', detail?: GitDiffInvalidationDetail): void {
+    this.fireListeners(resolve(cwd), reason, detail)
   }
 
   notifyWatcherError(cwd: string): void {
@@ -137,7 +153,7 @@ class GitDiffCacheInvalidator {
     }
   }
 
-  private fireListeners(cwd: string, reason: GitDiffInvalidationReason): void {
+  private fireListeners(cwd: string, reason: GitDiffInvalidationReason, detail?: GitDiffInvalidationDetail): void {
     const normalized = resolve(cwd)
     const entry = this.projects.get(normalized)
     if (entry) {
@@ -148,7 +164,7 @@ class GitDiffCacheInvalidator {
     }
     for (const listener of this.listeners) {
       try {
-        listener(normalized, reason)
+        listener(normalized, reason, detail)
       } catch (error) {
         console.warn('[git-diff-cache-invalidator] listener failed:', error)
       }

@@ -25,7 +25,7 @@
  */
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import type { GitStateMirrorSnapshot, GitStateMirrorDelta } from '../types/electron'
+import type { GitStateMirrorSnapshot, GitStateMirrorDelta, GitStateMirrorSubscribeResult } from '../types/electron'
 import { perfTrace } from '../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
 type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]
@@ -78,9 +78,15 @@ function mergeDelta(prev: GitStateMirrorSnapshot | null, cwd: string, delta: Git
 export function useGitStateMirror(cwd: string | null): UseGitStateMirrorResult {
   const [snapshot, setSnapshot] = useState<GitStateMirrorSnapshot | null>(null)
   const cwdRef = useRef<string | null>(null)
+  // Canonical (realpath) key the router resolved for `cwd`. Deltas are
+  // broadcast under this key; when the consumer's cwd goes through a
+  // symlink/junction the string-normalized forms never match, so updates
+  // must ALSO be matched against the canonical key (2026-07-16 fix).
+  const canonicalCwdRef = useRef<string | null>(null)
 
   useEffect(() => {
     cwdRef.current = cwd
+    canonicalCwdRef.current = null
     if (!cwd) {
       setSnapshot(null)
       return
@@ -92,7 +98,7 @@ export function useGitStateMirror(cwd: string | null): UseGitStateMirrorResult {
     const api = (window as unknown as { electronAPI: { git: Record<string, unknown> } }).electronAPI?.git as
       | undefined
       | {
-          subscribeMirror?: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
+          subscribeMirror?: (cwd: string) => Promise<GitStateMirrorSubscribeResult | null>
           unsubscribeMirror?: (cwd: string) => void
           onMirrorUpdate?: (cb: (cwd: string, delta: GitStateMirrorDelta) => void) => () => void
         }
@@ -106,13 +112,19 @@ export function useGitStateMirror(cwd: string | null): UseGitStateMirrorResult {
     const listenerDispose = api.onMirrorUpdate((updateCwd, delta) => {
       if (cancelled) return
       const currentCwd = cwdRef.current
-      if (!currentCwd || normalizeMirrorCwd(updateCwd) !== normalizeMirrorCwd(currentCwd)) return
+      if (!currentCwd) return
+      const normalizedUpdate = normalizeMirrorCwd(updateCwd)
+      const matchesRaw = normalizedUpdate === normalizeMirrorCwd(currentCwd)
+      const canonical = canonicalCwdRef.current
+      const matchesCanonical = Boolean(canonical && normalizedUpdate === normalizeMirrorCwd(canonical))
+      if (!matchesRaw && !matchesCanonical) return
       setSnapshot((prev) => mergeDelta(prev, updateCwd, delta))
     })
 
     void api.subscribeMirror(cwd).then((initial) => {
-      if (cancelled) return
-      if (initial) setSnapshot(initial)
+      if (cancelled || !initial) return
+      canonicalCwdRef.current = initial.canonicalCwd || null
+      if (initial.snapshot) setSnapshot(initial.snapshot)
     }).catch(() => { /* tolerate transient subscribe failure; deltas will catch up */ })
 
     dispose = () => {

@@ -743,9 +743,29 @@ export const TerminalGrid = memo(function TerminalGrid({
       subscribed.set(key, rawCwd)
       void window.electronAPI?.git?.subscribeMirror?.(rawCwd).then((initial) => {
         if (!initial) return
-        const snapshot = initial as GitStateMirrorSnapshot
-        setMirrorSnapshots((prev) => mergeMirrorSnapshot(prev, snapshot))
-        setMirrorSnapshotAliases((prev) => mergeMirrorAlias(prev, rawCwd, snapshot.cwd))
+        // Register the raw→canonical alias UNCONDITIONALLY — including on a
+        // COLD subscribe (snapshot null). Snapshots and deltas are keyed by
+        // the canonical realpath, so a symlink/junction raw cwd can only
+        // reach them through this alias; deriving it from the warm
+        // snapshot's cwd alone left a cold first visit with no alias and no
+        // badge (2026-07-16 symlink-status bug).
+        const { canonicalCwd, snapshot } = initial
+        if (canonicalCwd) {
+          setMirrorSnapshotAliases((prev) => {
+            const next = mergeMirrorAlias(prev, rawCwd, canonicalCwd)
+            if (next !== prev) {
+              perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_STATE_MIRROR_SUBSCRIBE_ALIAS_REGISTERED, {
+                rawCwd,
+                canonicalCwd,
+                cold: !snapshot
+              })
+            }
+            return next
+          })
+        }
+        if (snapshot) {
+          setMirrorSnapshots((prev) => mergeMirrorSnapshot(prev, snapshot))
+        }
       }).catch(() => { /* tolerate */ })
     }
     // No-longer-desired keys: schedule a delayed unsubscribe rather than

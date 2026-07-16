@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Git Diff 单文件 Revert 全局刷新 &amp; 软链接 Git 状态缺失 — 现状分析与策略决策</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  :root {
+    --bg: #0f1115; --bg-soft: #161a21; --panel: #1c212b; --panel-2: #232a37;
+    --text: #d7dce4; --text-dim: #8b93a3; --accent: #5aa2f0; --accent-2: #7bd88f;
+    --warn: #e5c07b; --danger: #e06c75; --purple: #c678dd;
+    --border: #2c3442; --code-bg: #12161d;
+  }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; font-size: 15px; }
+  /* ---- fixed left TOC ---- */
+  #toc { position: fixed; top: 0; left: 0; width: 280px; height: 100vh; overflow-y: auto; background: var(--bg-soft); border-right: 1px solid var(--border); padding: 24px 16px; }
+  #toc h2 { font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  #toc a { display: block; color: var(--text-dim); text-decoration: none; padding: 5px 10px; border-radius: 6px; font-size: 13px; margin-bottom: 2px; border-left: 2px solid transparent; }
+  #toc a:hover { background: var(--panel); color: var(--text); }
+  #toc a.active { color: var(--accent); border-left-color: var(--accent); background: var(--panel); }
+  #toc a.lvl2 { padding-left: 24px; font-size: 12.5px; }
+  main { margin-left: 280px; max-width: 980px; padding: 40px 48px 80px; }
+  @media (max-width: 900px) { #toc { display: none; } main { margin-left: 0; } }
+  h1 { font-size: 26px; margin-bottom: 8px; color: #fff; }
+  h2 { font-size: 21px; margin: 44px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: #fff; }
+  h3 { font-size: 17px; margin: 28px 0 12px; color: var(--accent); }
+  p { margin: 10px 0; }
+  .subtitle { color: var(--text-dim); margin-bottom: 24px; }
+  .badge { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; margin-right: 6px; vertical-align: middle; }
+  .badge.red { background: rgba(224,108,117,.15); color: var(--danger); border: 1px solid rgba(224,108,117,.4); }
+  .badge.green { background: rgba(123,216,143,.12); color: var(--accent-2); border: 1px solid rgba(123,216,143,.4); }
+  .badge.yellow { background: rgba(229,192,123,.12); color: var(--warn); border: 1px solid rgba(229,192,123,.4); }
+  .badge.blue { background: rgba(90,162,240,.12); color: var(--accent); border: 1px solid rgba(90,162,240,.4); }
+  .badge.purple { background: rgba(198,120,221,.12); color: var(--purple); border: 1px solid rgba(198,120,221,.4); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 14px 0; }
+  .card.warn { border-left: 3px solid var(--warn); }
+  .card.danger { border-left: 3px solid var(--danger); }
+  .card.ok { border-left: 3px solid var(--accent-2); }
+  .card.info { border-left: 3px solid var(--accent); }
+  .card h4 { margin-bottom: 6px; font-size: 14.5px; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: #fff; white-space: nowrap; }
+  td code, p code, li code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; color: #a8d3ff; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 12px 0; font-size: 12.5px; line-height: 1.6; }
+  pre code { background: none; border: none; padding: 0; color: #c8d3e0; }
+  .kw { color: var(--purple); } .str { color: var(--accent-2); } .cmt { color: #5f6b7d; } .fn { color: var(--accent); }
+  ul, ol { margin: 10px 0 10px 24px; }
+  li { margin: 5px 0; }
+  .flow { margin: 18px 0; }
+  .flow svg { width: 100%; height: auto; display: block; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; }
+  @media (max-width: 1100px) { .two-col { grid-template-columns: 1fr; } }
+  .pill-row { margin: 8px 0; }
+  .meta { color: var(--text-dim); font-size: 12.5px; }
+  .decision { background: linear-gradient(135deg, rgba(90,162,240,.08), rgba(198,120,221,.06)); border: 1px solid rgba(90,162,240,.35); border-radius: 12px; padding: 18px 22px; margin: 18px 0; }
+  .decision h4 { color: var(--accent); font-size: 16px; margin-bottom: 8px; }
+  footer { margin-left: 280px; max-width: 980px; padding: 24px 48px 60px; color: var(--text-dim); font-size: 12.5px; border-top: 1px solid var(--border); }
+  @media (max-width: 900px) { footer { margin-left: 0; } }
+</style>
+</head>
+<body>
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#overview">0. 概览：两个问题</a>
+  <a href="#p1-current">1. 问题1 现状机制</a>
+  <a href="#p1-evidence" class="lvl2">1.1 证据表（file:line）</a>
+  <a href="#p1-flow" class="lvl2">1.2 现状刷新链路图</a>
+  <a href="#p1-precedent" class="lvl2">1.3 代码内已有的正确先例</a>
+  <a href="#p1-options">2. 问题1 策略决策点</a>
+  <a href="#p1-d1" class="lvl2">决策点① 列表更新方式</a>
+  <a href="#p1-d2" class="lvl2">决策点② 失效粒度</a>
+  <a href="#p1-d3" class="lvl2">决策点③ 编辑器重挂载</a>
+  <a href="#p1-combo" class="lvl2">组合方案对比</a>
+  <a href="#p2-current">3. 问题2 现状机制</a>
+  <a href="#p2-fix" class="lvl2">3.1 修复方案（接线级）</a>
+  <a href="#peer">4. 同行产品调研</a>
+  <a href="#repro">5. 复现用例设计</a>
+  <a href="#results" class="lvl2">5.5 实施结果</a>
+  <a href="#meta">6. 文档元数据</a>
+</nav>
+<main>
+  <h1>Git Diff 单文件 Revert 全局刷新 &amp; 软链接 Git 状态缺失</h1>
+  <p class="subtitle">现状机制分析、策略选项对比与复现用例设计 · 分支 <code>20260716-git-state-mirror-and-diff-invalidation</code></p>
+
+  <h2 id="overview">0. 概览：两个问题</h2>
+  <div class="two-col">
+    <div class="card danger">
+      <h4><span class="badge red">问题 1</span>Git Diff 中 revert 单个文件 → 全局刷新</h4>
+      <p>一次单文件 discard 触发 <b>2~3 次全仓库 diff 重算</b> + <b>整仓内容缓存清空</b> + <b>Monaco DiffEditor 整体卸载重建</b>。已在代码层面确认为结构性问题：失效事件不携带文件名，渲染端想只更新一个文件也做不到。</p>
+    </div>
+    <div class="card danger">
+      <h4><span class="badge red">问题 2</span>macOS 软链接进仓库 → Task 不显示 Git 状态</h4>
+      <p>主进程解析全部正确，git 状态数据<b>已经算出来并躺在渲染端 map 里</b>，但「软链接路径 → 真实路径」的别名只在订阅命中热缓存时才建立，冷启动跳过创建 → 从软链接 cwd 出发查不到快照 → 徽章不渲染。Windows junction 同样命中该缺口。</p>
+    </div>
+  </div>
+
+  <h2 id="p1-current">1. 问题1 现状机制</h2>
+  <h3 id="p1-evidence">1.1 证据表（file:line，已逐条核实）</h3>
+  <table>
+    <tr><th>#</th><th>环节</th><th>位置</th><th>行为</th></tr>
+    <tr><td>E1</td><td>渲染端 discard 成功回调</td><td><code>GitDiffViewer.tsx:5253</code>（handleDeny）<br><code>GitDiffViewer.tsx:5223</code>（handleKeep 同型）</td><td><code>await loadDiff({ force: true })</code> —— 强制全仓库重算 diff 列表（<b>全量刷新 #1</b>）</td></tr>
+    <tr><td>E2</td><td>主进程 discard IPC 处理器</td><td><code>ipc-handlers.ts:2169-2172</code></td><td>成功后调 <code>invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd)</code> —— 只传仓库路径，<b>不传文件名</b></td></tr>
+    <tr><td>E3</td><td>失效入口</td><td><code>ipc-handlers.ts:105-109</code></td><td><code>invalidate(project,'manual')</code> + <code>invalidateContentCacheForProject(project,'invalidated-mutation')</code> —— <b>整桶清空</b>所有文件的内容缓存</td></tr>
+    <tr><td>E4</td><td>失效原因分支</td><td><code>git-diff-content-cache-wiring.ts:348-359</code></td><td><code>'mirror'</code> 原因走逐文件 re-stat 的 <code>revalidateContentCacheForProject</code>（只清真变过的文件）；<code>'manual'</code> 原因走保守整桶 wipe —— <b>discard 恰好落在粗粒度分支</b></td></tr>
+    <tr><td>E5</td><td>渲染端失效监听器</td><td><code>GitDiffViewer.tsx:3435-3499</code></td><td>收到广播后把<b>所有</b> fileContents 标脏 + 再发一次 <code>loadDiff({silent:true, force:true})</code>（<b>全量刷新 #2</b>）</td></tr>
+    <tr><td>E6</td><td>watcher/mirror 链</td><td><code>git-state-mirror-router.ts:464-466</code></td><td><code>git restore</code> 写工作区 + <code>.git/index</code> → watcher → mirror 重算 → <code>invalidate(cwd,'mirror')</code> → 渲染端再来一次 silent 全量 reload（<b>全量刷新 #3</b>，与 #2 部分被 in-flight 合并）</td></tr>
+    <tr><td>E7</td><td>编辑器整体重挂载</td><td><code>GitDiffViewer.tsx:1628-1629</code>，设计注释 <code>git-state-mirror-types.ts:98-110</code></td><td>mirror 重算产生真实状态变化 → <code>generation</code> 递增 → 拼进 DiffEditor 的 React <code>key</code> → <b>整个 Monaco 编辑器卸载重建</b>（用户看到的「全局刷新」主体）</td></tr>
+    <tr><td>E8</td><td>nonce 已可独立驱动重挂载</td><td><code>GitDiffViewer.tsx:3284</code>（refreshChanges）、<code>4406</code>（切换文件）</td><td>「Refresh Changes」按钮与文件切换<b>已经显式递增 <code>diffEditorResetNonce</code></b> —— generation 参与 key 对这两条路径是冗余的</td></tr>
+  </table>
+
+  <h3 id="p1-flow">1.2 现状刷新链路图（一次单文件 discard）</h3>
+  <div class="flow">
+  <svg viewBox="0 0 940 470" xmlns="http://www.w3.org/2000/svg" font-family="system-ui" font-size="13">
+    <defs>
+      <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8b93a3"/></marker>
+      <marker id="arrR" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#e06c75"/></marker>
+    </defs>
+    <rect x="10" y="16" width="200" height="52" rx="8" fill="#1c212b" stroke="#5aa2f0"/>
+    <text x="110" y="38" fill="#d7dce4" text-anchor="middle">用户点击 Deny（discard）</text>
+    <text x="110" y="56" fill="#8b93a3" text-anchor="middle" font-size="11">选中的单个文件</text>
+
+    <rect x="300" y="16" width="240" height="52" rx="8" fill="#1c212b" stroke="#2c3442"/>
+    <text x="420" y="38" fill="#d7dce4" text-anchor="middle">主进程 git restore/checkout</text>
+    <text x="420" y="56" fill="#8b93a3" text-anchor="middle" font-size="11">GIT_DISCARD_FILE 处理器</text>
+    <line x1="210" y1="42" x2="298" y2="42" stroke="#8b93a3" marker-end="url(#arr)"/>
+
+    <rect x="10" y="130" width="270" height="64" rx="8" fill="#2a1c1e" stroke="#e06c75"/>
+    <text x="145" y="152" fill="#e06c75" text-anchor="middle" font-weight="600">全量刷新 #1（显式）</text>
+    <text x="145" y="170" fill="#d7dce4" text-anchor="middle" font-size="11.5">handleDeny → loadDiff({force:true})</text>
+    <text x="145" y="186" fill="#8b93a3" text-anchor="middle" font-size="11">整仓 getDiff + setDiffResult 全列表替换</text>
+    <line x1="110" y1="68" x2="120" y2="128" stroke="#e06c75" marker-end="url(#arrR)"/>
+
+    <rect x="330" y="130" width="280" height="64" rx="8" fill="#2a1c1e" stroke="#e06c75"/>
+    <text x="470" y="152" fill="#e06c75" text-anchor="middle" font-weight="600">全量刷新 #2（manual 失效）</text>
+    <text x="470" y="170" fill="#d7dce4" text-anchor="middle" font-size="11.5">invalidate(cwd,'manual') → 整桶内容缓存清空</text>
+    <text x="470" y="186" fill="#8b93a3" text-anchor="middle" font-size="11">渲染端全部标脏 + silent loadDiff({force:true})</text>
+    <line x1="430" y1="68" x2="450" y2="128" stroke="#e06c75" marker-end="url(#arrR)"/>
+
+    <rect x="650" y="130" width="280" height="64" rx="8" fill="#2a1c1e" stroke="#e06c75"/>
+    <text x="790" y="152" fill="#e06c75" text-anchor="middle" font-weight="600">全量刷新 #3（mirror 失效）</text>
+    <text x="790" y="170" fill="#d7dce4" text-anchor="middle" font-size="11.5">FS watcher → mirror 重算 → invalidate('mirror')</text>
+    <text x="790" y="186" fill="#8b93a3" text-anchor="middle" font-size="11">再来一次 silent loadDiff（部分被合并）</text>
+    <line x1="520" y1="68" x2="760" y2="128" stroke="#e06c75" marker-end="url(#arrR)"/>
+
+    <rect x="650" y="260" width="280" height="64" rx="8" fill="#2d1e33" stroke="#c678dd"/>
+    <text x="790" y="282" fill="#c678dd" text-anchor="middle" font-weight="600">Monaco DiffEditor 整体重挂载</text>
+    <text x="790" y="300" fill="#d7dce4" text-anchor="middle" font-size="11.5">generation++ → React key 变化</text>
+    <text x="790" y="316" fill="#8b93a3" text-anchor="middle" font-size="11">编辑器卸载重建 = 可见闪烁的主体</text>
+    <line x1="790" y1="194" x2="790" y2="258" stroke="#c678dd" marker-end="url(#arr)"/>
+
+    <rect x="10" y="260" width="600" height="64" rx="8" fill="#332a1a" stroke="#e5c07b"/>
+    <text x="310" y="282" fill="#e5c07b" text-anchor="middle" font-weight="600">用户实际感知</text>
+    <text x="310" y="302" fill="#d7dce4" text-anchor="middle" font-size="11.5">文件列表整体重渲染 · 所有已加载的文件内容被清空（下次点击全部冷读） · 编辑器闪烁</text>
+    <line x1="145" y1="194" x2="200" y2="258" stroke="#8b93a3" marker-end="url(#arr)"/>
+    <line x1="470" y1="194" x2="400" y2="258" stroke="#8b93a3" marker-end="url(#arr)"/>
+
+    <rect x="10" y="380" width="920" height="60" rx="8" fill="#16211a" stroke="#7bd88f"/>
+    <text x="470" y="403" fill="#7bd88f" text-anchor="middle" font-weight="600">理想终态：一次 discard = 移除一行 + 只清这个文件的缓存 + 编辑器不拆</text>
+    <text x="470" y="424" fill="#8b93a3" text-anchor="middle" font-size="11.5">其余文件的缓存保温 · 一次静默非 force 对账兜住列表正确性</text>
+  </svg>
+  </div>
+
+  <h3 id="p1-precedent">1.3 代码内已有的正确先例</h3>
+  <div class="card ok">
+    <h4>先例 1：保存草稿走本地 patch，不走全量 reload</h4>
+    <p><code>handleSaveDraft</code>（<code>GitDiffViewer.tsx:5169-5191</code>）在保存后直接原位更新 <code>setDiffResult</code>，注释明确写着避免 <code>loadDiff({force:true})</code> 往返导致「整个 UI 闪烁」。<b>discard 缺的就是这条快速通道</b>——被 revert 的文件从列表消失，本地移除一行即可。</p>
+  </div>
+  <div class="card ok">
+    <h4>先例 2：'mirror' 原因的失效已经是文件级</h4>
+    <p><code>revalidateContentCacheForProject</code>（<code>git-diff-content-cache-wiring.ts:369+</code>）对 watcher 触发的失效逐文件 re-stat、只清真变过的文件——这是 kar-qemu 缓存抖动修复的成果。<b>但 discard 自己的 'manual' 失效反而走整桶清空</b>，比外部随机文件变化还粗暴。</p>
+  </div>
+
+  <h2 id="p1-options">2. 问题1 策略决策点（需用户拍板）</h2>
+  <p>修复涉及三个相互独立的策略点。按项目规则（缓存失效粒度属策略敏感项），每个点都给出现状与候选方案的权衡：</p>
+
+  <h3 id="p1-d1">决策点① discard/stage 成功后的列表更新方式</h3>
+  <table>
+    <tr><th></th><th>现状：全量 force reload</th><th>方案：本地 patch + 静默对账</th></tr>
+    <tr><td><b>做法</b></td><td>成功回调里 <code>loadDiff({force:true})</code></td><td>本地 <code>setDiffResult</code> 移除/挪动该行（沿用 handleSaveDraft 先例），再发一次<b>非 force</b> 的静默 reload 对账</td></tr>
+    <tr><td><b>优点</b></td><td>逻辑简单；列表绝对以 git 为准</td><td>UI 即时（无 loading 闪烁）；大仓库不付全量 diff 代价；对账仍保证最终一致</td></tr>
+    <tr><td><b>缺点</b></td><td>大仓库慢（EDR 环境数秒~数十秒）；触发全局闪烁</td><td>需要正确处理 changeType 迁移（unstage 后 staged→modified 等边界）；本地 patch 逻辑要单元测试锁死</td></tr>
+    <tr><td><b>风险控制</b></td><td>—</td><td>对账 reload 兜底：本地 patch 错了最多闪一下回到正确态，不会永久错</td></tr>
+  </table>
+
+  <h3 id="p1-d2">决策点② 已知变更（manual）的失效粒度</h3>
+  <table>
+    <tr><th></th><th>现状：仓库级整桶清空</th><th>方案：失效事件携带文件名，文件级清除</th></tr>
+    <tr><td><b>做法</b></td><td><code>invalidate(cwd,'manual')</code> + 整桶 wipe</td><td><code>invalidate(cwd,'manual',{files:[...]})</code>；wiring 层只清列出的文件；渲染端只把这些 key 标脏。<b>不带 files 的调用保持现状整桶清空</b>（向后兼容，保守缺省）</td></tr>
+    <tr><td><b>优点</b></td><td>绝对安全，不会漏清</td><td>其余文件缓存保温：discard 后点击其他文件仍秒开；EDR 大仓库收益最大；渲染端第一次拿到「能只动一个文件」的能力</td></tr>
+    <tr><td><b>缺点</b></td><td>一次单文件操作清掉全仓缓存，是本 bug 的核心根因之一</td><td>失效通道签名变更（invalidator / ipc-handlers / preload / 渲染端 4 处联动）；漏传文件名的新调用点会退回整桶（安全方向的退化）</td></tr>
+    <tr><td><b>一致性保障</b></td><td>—</td><td>watcher 的 'mirror' 失效链完整保留，作为独立的最终一致兜底</td></tr>
+  </table>
+
+  <h3 id="p1-d3">决策点③ DiffEditor 重挂载策略（generation 是否留在 React key 里）</h3>
+  <table>
+    <tr><th></th><th>现状：generation 参与 key</th><th>方案：从 key 移除 generation，仅保留显式 nonce + 文件标识</th></tr>
+    <tr><td><b>语义</b></td><td>任何 mirror 状态变化（含后台外部写入、discard 自己引发的重算）都强制整编辑器重挂载。<code>git-state-mirror-types.ts:98-110</code> 注释说明这是「Refresh Changes 级联干净重挂载」的既有设计</td><td>重挂载只发生在：用户点 Refresh Changes（nonce++，<code>GitDiffViewer.tsx:3284</code> 已存在）、切换文件（nonce++，<code>4406</code> 已存在）、切换 cwd。mirror 数据变化通过正常 React 数据流更新内容，不拆编辑器</td></tr>
+    <tr><td><b>优点</b></td><td>任何状态漂移都能靠重挂载「重置到干净世界」，是隐式兜底</td><td>消除可见闪烁的主体；滚动位置/选区/折叠状态天然保留；这是 VS Code 的模型（编辑器实例稳定，模型内容原位更新）</td></tr>
+    <tr><td><b>缺点</b></td><td>用户每次 revert/外部写入都看到编辑器闪烁——正是本次要修的现象</td><td>失去隐式兜底：若某个下游层有「靠重挂载才能自愈」的隐藏依赖，会暴露出来（需要回归测试覆盖：staleness 系列 GDS-06..10、chaos-convergence、image-diff 全绿才算安全）</td></tr>
+    <tr><td><b>折中变体</b></td><td colspan="2">③-折中：generation 保留在 key 中，但仅当<b>选中文件自身</b>出现在 mirror 变更指纹里时才让它递增进 key（实现复杂度高、语义绕，不推荐但列出供比较）</td></tr>
+  </table>
+
+  <h3 id="p1-combo">组合方案对比</h3>
+  <div class="two-col">
+    <div class="card warn">
+      <h4><span class="badge yellow">方案 A · 最小修复</span>①本地 patch，②③维持现状</h4>
+      <ul>
+        <li>只改 handleDeny/handleKeep：本地 patch + 静默对账</li>
+        <li>去掉全量刷新 #1 与显式 loading</li>
+        <li><b>但</b> #2/#3 的整桶清空与 silent 全量 reload 仍在，generation 重挂载仍在 —— <b>可见闪烁只减轻、不消失</b></li>
+        <li>改动面：1 个文件；风险最低；治标</li>
+      </ul>
+    </div>
+    <div class="card ok">
+      <h4><span class="badge green">方案 B · 完整修复（推荐）</span>①+②+③ 全做</h4>
+      <ul>
+        <li>本地 patch + 文件级失效 + 移除 generation 重挂载</li>
+        <li>一次 discard = 移除一行 + 只清该文件缓存 + 编辑器不拆；其余文件保温</li>
+        <li>watcher 'mirror' 链完整保留作最终一致兜底；非 force 静默对账兜列表正确性</li>
+        <li>改动面：4~5 个文件（invalidator / ipc-handlers / wiring / GitDiffViewer / preload 类型）；需配套 unit + autotest 锁死</li>
+      </ul>
+    </div>
+  </div>
+  <div class="decision">
+    <h4>待用户决策</h4>
+    <p>① 列表更新：<b>本地 patch + 静默对账</b> vs 维持全量 reload？<br>
+       ② 失效粒度：<b>文件级（带 files 的 manual 失效）</b> vs 维持整桶？<br>
+       ③ 编辑器 key：<b>移除 generation（显式 nonce 驱动重挂载）</b> vs 维持 generation 重挂载 vs ③-折中？</p>
+    <p class="meta">推荐组合：①②③ 全选新方案（= 方案 B）。方案 B 的每一步都有既有先例或既有机制兜底（handleSaveDraft 先例、revalidate 文件级机制、nonce 已存在且已接线）。</p>
+  </div>
+
+  <h2 id="p2-current">3. 问题2 现状机制（软链接 → 无 Git 状态）</h2>
+  <table>
+    <tr><th>#</th><th>环节</th><th>位置</th><th>行为</th></tr>
+    <tr><td>S1</td><td>shell 集成上报</td><td><code>resources/shell-integration/*</code></td><td>OSC 7/633 携带 <code>$PWD</code> = <b>逻辑路径（保留软链接）</b></td></tr>
+    <tr><td>S2</td><td>渲染端记录显示 cwd</td><td><code>TerminalGrid.tsx:582-602</code></td><td><code>oscDetectedCwds[id] = 软链接路径</code>；显示解析时 <code>oscCwd</code> 优先于 <code>terminalInfo.cwd</code></td></tr>
+    <tr><td>S3</td><td>主进程规范化</td><td><code>git-state-mirror-router.ts:960</code>（realpathSync）</td><td>镜像快照/广播全部以 <b>realpath</b> 为 key —— 主进程行为正确</td></tr>
+    <tr><td>S4</td><td><b>断点：别名只在热订阅时建立</b></td><td><code>TerminalGrid.tsx:745-749</code></td><td><code>subscribeMirror(raw)</code> 冷仓库返回 null → <code>if (!initial) return</code> → <code>mergeMirrorAlias(raw, snapshot.cwd)</code> 被跳过；后续 <code>mirror-update</code> 增量也不补建别名</td></tr>
+    <tr><td>S5</td><td>查找失败</td><td><code>gitStatusIdentity.ts:145-178</code></td><td>直查（软链接 key）miss + 别名 miss → mirror=null；legacy 比较（软链接 vs realpath 纯字符串）=false → branch/repoName/status 全 null → <b>徽章不渲染</b></td></tr>
+  </table>
+  <div class="card info">
+    <h4>为什么「偶尔又好了」</h4>
+    <p>若订阅时 router 缓存恰好是热的（另一个终端已打开过同一仓库、或 30s 退订宽限期内重进），<code>subscribeMirror</code> 返回非 null，别名建立，状态立即恢复显示——与「时好时坏」的现象观察完全吻合。shell 集成关闭时（无 OSC）显示回退到 realpath 的 <code>terminalInfo.cwd</code>，反而正常。</p>
+  </div>
+  <div class="card warn">
+    <h4>Windows 结论</h4>
+    <p>机制上同样存在：<code>realpathSync</code> 会解析 junction / symlink，产生同样的「上报路径 ≠ 快照 key」失配，且 <code>normalizeTerminalGitPath</code> 连 <code>/private</code> 那样的局部缓解都没有。修复与测试按双平台设计（win32 fixture 用 junction，无需管理员权限；macOS/Linux 用 <code>ln -s</code>）。</p>
+  </div>
+
+  <h3 id="p2-fix">3.1 修复方案（接线级 bug 修复，按项目规则可自行实施，此处备案）</h3>
+  <div class="card ok">
+    <h4>让订阅无论冷热都返回规范 key，渲染端始终建别名</h4>
+    <ul>
+      <li><code>GIT_STATE_MIRROR_SUBSCRIBE</code> 返回形状从 <code>snapshot | null</code> 改为 <code>{ canonicalCwd, snapshot: snapshot | null }</code>（主进程已有 <code>canonicalise()</code>，零额外成本）；</li>
+      <li>渲染端 <code>subscribeMirror</code> 回调中<b>无条件</b> <code>mergeMirrorAlias(rawCwd, canonicalCwd)</code>，快照非 null 时照旧合并快照；</li>
+      <li>preload 与类型同步更新；退订路径 <code>removeMirrorAlias</code> 已按 rawCwd 删除，无需变动；</li>
+      <li>覆盖所有平台（macOS 用户软链接、/var firmlink、Windows junction、Linux symlink）——不依赖任何平台特判。</li>
+    </ul>
+    <p class="meta">备选（未选）：渲染端做 realpath —— 渲染进程无 fs 权限，需加 IPC，且每次显示解析都要跑，劣于订阅时一次性建别名；mirror-update 时补建 —— 渲染端不知道 raw→canonical 映射，仍需主进程给答案，绕一圈等价于本方案。</p>
+  </div>
+
+  <h2 id="peer">4. 同行产品调研</h2>
+  <h3>4.1 问题A同类：单文件 discard 后的刷新范围</h3>
+  <div class="card info">
+    <h4><span class="badge blue">VS Code</span>乐观更新 + 后台对账（optimistic-then-reconcile）—— 源码级确认</h4>
+    <p>discard 走 <code>Repository.clean(resources)</code>，两阶段：<b>① 乐观本地更新</b>——<code>getOptimisticResourceGroups()</code> 直接把被 discard 的路径从内存 <code>resourceStates</code> 里过滤掉（零 git 调用）并立即应用，这就是 discard 秒响应的来源；<b>② 权威对账</b>——随后 <code>updateModelState</code> 仍跑一次<b>全仓</b> <code>git status</code> 换入真实结果，延迟被乐观更新遮住。并发上，新刷新会 cancel 掉 in-flight 的旧刷新（最新者胜），刷新方法带 <code>@throttle</code>。<b>无闪烁的关键</b>：乐观分组复用同一批 Resource 对象（保持对象标识），SCM 树做增量 diff 而非重建；discard 只关掉<b>被 discard 那个文件</b>的 diff 标签页（<code>closeDiffEditors</code>），其他打开的 diff 编辑器一概不动。由 <code>git.optimisticUpdate</code> 设置门控（默认开）。</p>
+    <p class="meta">来源：<a href="https://github.com/microsoft/vscode/blob/main/extensions/git/src/repository.ts" style="color:var(--accent)">vscode git repository.ts</a> · <a href="https://code.visualstudio.com/api/extension-guides/scm-provider" style="color:var(--accent)">SCM provider 指南</a></p>
+  </div>
+  <div class="card info">
+    <h4><span class="badge purple">JetBrains</span>真正的文件级脏范围（targeted dirty-scope）</h4>
+    <p>revert 单文件只把<b>该路径</b>标脏（<code>VcsDirtyScopeManager.fileDirty(FilePath)</code>），<code>ChangeListManager</code> 异步只复查这个脏范围，不扫全仓；<code>markEverythingDirty()</code> 是显式的「全部重扫」兜底。这是「精确增量刷新」阵营的代表。</p>
+    <p class="meta">来源：<a href="https://dploeger.github.io/intellij-api-doc/com/intellij/openapi/vcs/changes/VcsDirtyScopeManager.html" style="color:var(--accent)">VcsDirtyScopeManager API</a> · <a href="https://github.com/JetBrains/intellij-community/blob/master/platform/vcs-impl/src/com/intellij/openapi/vcs/changes/ChangeListManagerImpl.java" style="color:var(--accent)">ChangeListManagerImpl 源码</a></p>
+  </div>
+  <p class="meta">GitKraken / Sublime Merge / Fork / Tower 均闭源，公开资料只到「按文件 discard + Undo 栈 + watcher 驱动刷新」层面，粒度未公开。共识：<b>两个阵营（乐观对账 vs 精确脏范围），但没有任何一家会重挂载文件树或无关的 diff 编辑器</b>。本文档方案 B 的 ①=VS Code 模式、②=JetBrains 模式、③=两家共同的编辑器稳定性原则。</p>
+
+  <h3>4.2 问题B同类：软链接路径下的 git 状态</h3>
+  <div class="card info">
+    <h4><span class="badge blue">VS Code</span>双路径别名 + 经软链接重构仓库根 —— 源码级确认</h4>
+    <p>该问题类在同行中普遍存在（VS Code #5970 从 2016 开到 2023 才关闭；GitLens 至今继承同类问题）。根因与我们完全一致：<code>git rev-parse --show-toplevel</code> 返回 realpath 而工作区/cwd 是软链接路径，<b>status 本身工作正常、坏在路径匹配</b>（调研代理已实测复核）。VS Code 的修法两条互补：<b>① 经软链接重构根路径</b>——当 toplevel 与输入路径分叉时，改用 <code>rev-parse --path-format=relative --show-toplevel</code>（git ≥2.31）再 <code>path.resolve(输入路径, 相对根)</code>，得到「以用户打开的软链接形式表达」的根；<b>② root↔realpath 别名</b>——存一份 <code>rootRealPath</code>，把任意绝对路径映射成仓库相对路径时<b>两种形式都试</b>。不用 device+inode 比较。Windows junction 是同一问题类（git 同样解析它），VS Code 为此单独留了 Windows 分支。</p>
+    <p class="meta">来源：<a href="https://github.com/microsoft/vscode/blob/main/extensions/git/src/git.ts" style="color:var(--accent)">git.ts getRepositoryRoot</a> · <a href="https://github.com/microsoft/vscode/blob/main/extensions/git/src/model.ts" style="color:var(--accent)">model.ts getRepositoryRootRealPath</a> · issues <a href="https://github.com/microsoft/vscode/issues/5970" style="color:var(--accent)">#5970</a> / <a href="https://github.com/microsoft/vscode/issues/181676" style="color:var(--accent)">#181676</a> / <a href="https://github.com/microsoft/vscode/issues/109865" style="color:var(--accent)">#109865</a> · <a href="https://github.com/gitkraken/vscode-gitlens/issues/1776" style="color:var(--accent)">GitLens #1776</a></p>
+  </div>
+  <p class="meta">本文档 §3.1 的修复（订阅时无条件建立 raw↔canonical 别名）与 VS Code 的「双路径别名、两边都试」是同一模式——我们的 <code>mirrorSnapshotAliases</code> 机制本来就是为此设计的，缺的只是冷启动时的建立时机。</p>
+
+  <h2 id="repro">5. 复现用例设计（unit + autotest 成对）</h2>
+  <h3>问题1：refresh-scope 复现</h3>
+  <table>
+    <tr><th>层</th><th>放置</th><th>断言要点</th></tr>
+    <tr><td><b>autotest（新建 runner）</b></td><td><code>run-git-diff-revert-scope-autotest.sh</code>（新建理由：新断言类别「刷新范围」+ 独立多文件文本 fixture + 独立超时域；现有 <code>run-image-diff</code> 只覆盖 Keep/Deny 功能，GDS 系列已按预算切成 8 片均无余量）</td><td>修复前红、修复后绿：一次 discard 后 (a) 全仓 getDiff 重算次数 ≤1 且为非 force 对账；(b) 其余文件的内容缓存仍是热的（trace 断言 cache-hit）；(c) DiffEditor DOM 容器节点在 discard 前后为同一对象（不重挂载）；(d) 被 revert 的文件从列表消失、工作区内容确实还原（ground truth：<code>project.readFile</code>，吸取 GDS-29 教训不轮询冻结缓存）</td></tr>
+    <tr><td><b>unit</b></td><td><code>test/unittest/git-diff-invalidation-scope.test.mts</code>（新建）</td><td>失效通道纯逻辑决策表：reason × files 有无 → 整桶 / 文件级 / revalidate 的选择；本地 patch 的 changeType 迁移表（modified/untracked/staged discard 与 unstage 后的行变化）</td></tr>
+  </table>
+  <h3>问题2：symlink 徽章复现</h3>
+  <table>
+    <tr><th>层</th><th>放置</th><th>断言要点</th></tr>
+    <tr><td><b>unit（amend）</b></td><td><code>test/unittest/terminal-grid-git-status-identity.test.mts</code>（该文件直接测 <code>resolveMirrorSnapshotForCwd</code> + 别名表，正是断点所在层）</td><td>快照以 realpath 为 key、查询用软链接路径：无别名 → null（复现现状）；建别名 → 命中（锁修复）；冷订阅回调收到 <code>{canonicalCwd, snapshot:null}</code> 时也建别名的合并逻辑</td></tr>
+    <tr><td><b>autotest（新建 runner）</b></td><td><code>run-git-state-mirror-symlink-autotest.sh</code>（新建理由：需要专用 symlink/junction fixture + 平台分支；GSM latency 系列预算紧张且 EDR 上本就易红，不宜再加场景）</td><td>fixture 仓库 + 软链接（win32: junction），OSC 注入软链接 cwd，断言 Task 徽章在预算内渲染出 branch/状态色（修复前红、修复后绿）；再验证 dirty 流转（写文件 → 徽章变色）证明 watcher 在 realpath 上工作正常</td></tr>
+  </table>
+  <div class="card info">
+    <h4>交付顺序</h4>
+    <p>先落测试（对现状应红）→ 实施修复 → 同测试转绿 → <code>--only</code> 隔离验证 + 触及套件回归（staleness / image-diff / GSM static）→ 汇报。符合「先复现、后修复」的要求与 5-step SOP。</p>
+  </div>
+
+  <h2 id="results">5.5 实施结果（v0.3 附录）</h2>
+  <div class="card ok">
+    <h4><span class="badge green">已实施并验证</span>四个决策点全部按推荐方案落地</h4>
+    <ul>
+      <li><b>红色复现确认</b>：修复前构建上，GSY-01/02 红（软链接徽章不渲染，与用户现象完全一致）、GRS-04 红（一次 discard 触发 <b>3 次</b>全量列表加载）、GRS-03 红（整桶清空导致重点击冷读）。</li>
+      <li><b>修复后全绿</b>：GSY 4/4、GRS 10/10（含 GRS-02b 探针灵敏度自检——refreshChanges 的真实重挂载会剥落 DOM 标记，证明 GRS-02 的绿不是假阳性）。一次 discard 的列表重算次数从 2~3 次降到 ≤1 次（mirror 回声对账），其余文件内容缓存保温（重点击零拉取），Monaco 编辑器不再因后台状态变化整体重建。</li>
+      <li><b>测试期间发现的额外问题</b>：后台静默重载的选中恢复可能在「选中 → 点击 Deny」间隙把选中换成别的文件，导致 discard 误伤（诊断运行的磁盘证据：checkout 实际还原了 alpha 而非目标 beta）。已给 <code>triggerFileAction</code> 增加期望文件名保护；本地 patch + 单次对账本身也大幅缩小了该竞态窗口。</li>
+      <li><b>单元层</b>：GLP-01..11（本地 patch 决策表，与主进程 <code>buildGitResourceFields</code> 锁步校验）、IVS-01..04（文件级失效谓词与明细透传）、软链接别名 3 例（identity 测试）。全套 117/117 绿。</li>
+    </ul>
+  </div>
+
+  <h2 id="meta">6. 文档元数据</h2>
+  <table>
+    <tr><th>项</th><th>值</th></tr>
+    <tr><td>生成分支</td><td><code>20260716-git-state-mirror-and-diff-invalidation</code></td></tr>
+    <tr><td>应用版本 / commit</td><td>2.0.1 / <code>5669c66</code></td></tr>
+    <tr><td>文档版本</td><td>v0.2</td></tr>
+  </table>
+  <h3>更新历史（append-only）</h3>
+  <table>
+    <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+    <tr><td>v0.1</td><td>2026-07-16</td><td>20260716-git-state-mirror-and-diff-invalidation</td><td>初版：两问题现状机制、策略决策点、复现用例设计；同行调研待填充</td></tr>
+    <tr><td>v0.2</td><td>2026-07-16</td><td>20260716-git-state-mirror-and-diff-invalidation</td><td>§4 填充同行调研（VS Code 源码级 / JetBrains / 闭源同行；两问题各自的共识模式与引用 URL）</td></tr>
+    <tr><td>v0.3</td><td>2026-07-16</td><td>20260716-git-state-mirror-and-diff-invalidation</td><td>新增 §5.5 实施结果：红色复现数据、修复后全绿、测试期间发现的选中竞态及其防护、单元层清单</td></tr>
+  </table>
+</main>
+<footer>
+  SPDX-FileCopyrightText: 2026 OPPO · SPDX-License-Identifier: Apache-2.0
+</footer>
+<script>
+(function () {
+  var links = document.querySelectorAll('#toc a');
+  var sections = [];
+  links.forEach(function (a) {
+    var id = a.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    if (el) sections.push({ a: a, el: el });
+  });
+  function onScroll() {
+    var y = window.scrollY + 90;
+    var current = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].el.offsetTop <= y) current = sections[i];
+    }
+    links.forEach(function (a) { a.classList.remove('active'); });
+    if (current) current.a.classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+})();
+</script>
+</body>
+</html>
