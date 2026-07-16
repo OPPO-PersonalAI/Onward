@@ -58,9 +58,12 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-# Final sentinel assertion id — if we never see it, the suite did not run end-to-end.
-if ! grep -q "PECM-37-mode-preference-global-and-persisted" "$LOG_FILE"; then
-  echo "Missing PECM-37 result; the test may not have executed correctly" >&2
+# Final sentinel assertion id — if we never see it, the suite did not run
+# end-to-end. TPCM-03 is the last record() call in the suite (the terminal
+# pinned-prompt menu group runs after all PECM cases); the former PECM-37
+# mode-dropdown sentinel was removed with the contenteditable migration.
+if ! grep -q "TPCM-03-terminal-pin-menu-does-not-touch-prompt-history" "$LOG_FILE"; then
+  echo "Missing TPCM-03 result; the test may not have executed correctly" >&2
   tail -n 80 "$LOG_FILE" >&2
   exit 1
 fi

@@ -879,6 +879,10 @@ body.resizing-editor-height * {
   color: var(--accent);
 }
 
+/* The editor is a contenteditable div (not a textarea) — a textarea's native
+   IME composition is O(text-before-caret) on large content. white-space:
+   pre-wrap is REQUIRED: it renders '\n' as line breaks and preserves runs of
+   spaces, so textContent(write) <-> innerText(read) round-trip faithfully. */
 .prompt-editor-content {
   flex: 1;
   width: 100%;
@@ -888,14 +892,22 @@ body.resizing-editor-height * {
   color: var(--text-2);
   font-size: var(--font-md);
   font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-  resize: none;
   outline: none;
   line-height: 1.5;
   min-height: 0;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  overflow-y: auto;
+  cursor: text;
+  -webkit-user-modify: read-write-plaintext-only;
 }
 
-.prompt-editor-content::placeholder {
+/* Placeholder for the contenteditable div: shown only while it is empty. */
+.prompt-editor-content:empty::before {
+  content: attr(data-placeholder);
   color: var(--text-3);
+  pointer-events: none;
 }
 
 .prompt-editor-content:focus {

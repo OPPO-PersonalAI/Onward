@@ -197,6 +197,8 @@ SCRIPTS: List[str] = [
     "test/autotest/run-prompt-integrity-autotest.sh",
     "test/autotest/run-prompt-list-autotest.sh",
     "test/autotest/run-prompt-sender-autotest.sh",
+    "test/autotest/run-prompt-ime-latency-autotest.sh",
+    "test/autotest/run-prompt-contenteditable-editing-autotest.sh",
     "test/autotest/run-schedule-autotest.sh",
     "test/autotest/run-settings-update-autotest.sh",
     "test/autotest/run-shell-integration-cwd-autotest.sh",

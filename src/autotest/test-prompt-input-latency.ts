@@ -342,7 +342,22 @@ async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShe
   }
 }
 
-async function ensurePromptPanelVisible(ctx: AutotestContext): Promise<HTMLTextAreaElement | null> {
+// The prompt editor is a contenteditable div (not a textarea): its value is
+// read via innerText and set via textContent. These helpers keep the latency
+// suites element-agnostic (they also create bare <textarea>s for comparison).
+function getEditorValue(el: HTMLElement): string {
+  return el instanceof HTMLTextAreaElement ? el.value : el.innerText
+}
+function setEditorValue(el: HTMLElement, value: string): void {
+  if (el instanceof HTMLTextAreaElement) {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set
+    setter?.call(el, value)
+  } else {
+    el.textContent = value
+  }
+}
+
+async function ensurePromptPanelVisible(ctx: AutotestContext): Promise<HTMLElement | null> {
   const { sleep, waitFor, log } = ctx
 
   await window.electronAPI.debug.focusWindow().catch(() => false)
@@ -357,7 +372,7 @@ async function ensurePromptPanelVisible(ctx: AutotestContext): Promise<HTMLTextA
   await sleep(350)
 
   const findTextarea = () =>
-    document.querySelector<HTMLTextAreaElement>(
+    document.querySelector<HTMLElement>(
       '.prompt-notebook:not(.prompt-notebook-hidden) .prompt-editor-content'
     )
 
@@ -641,19 +656,14 @@ function nextPaint(): Promise<void> {
   })
 }
 
-function setTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
-  const prototype = Object.getPrototypeOf(textarea) as HTMLTextAreaElement
-  const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
-  valueSetter?.call(textarea, value)
-}
-
-function insertPromptCharacter(textarea: HTMLTextAreaElement, value: string): void {
-  textarea.focus({ preventScroll: true })
-  const before = textarea.value
+function insertPromptCharacter(el: HTMLElement, value: string): void {
+  el.focus({ preventScroll: true })
+  const before = getEditorValue(el)
+  // execCommand('insertText') works on both textarea and contenteditable.
   const inserted = document.execCommand('insertText', false, value)
-  if (!inserted || textarea.value === before) {
-    setTextareaValue(textarea, `${before}${value}`)
-    textarea.dispatchEvent(new InputEvent('input', {
+  if (!inserted || getEditorValue(el) === before) {
+    setEditorValue(el, `${before}${value}`)
+    el.dispatchEvent(new InputEvent('input', {
       bubbles: true,
       inputType: 'insertText',
       data: value
@@ -726,7 +736,7 @@ function buildPromptInputStallWindows(samples: PromptInputSample[], thresholdMs:
 }
 
 async function measurePromptInputLatency(
-  textarea: HTMLTextAreaElement,
+  textarea: HTMLElement,
   samples: number,
   intervalMs: number,
   details?: {
@@ -742,7 +752,7 @@ async function measurePromptInputLatency(
   const sampleTimeline: PromptInputSample[] = []
   let mismatches = 0
 
-  setTextareaValue(textarea, '')
+  setEditorValue(textarea, '')
   textarea.dispatchEvent(new Event('input', { bubbles: true }))
   await nextPaint()
 
@@ -754,7 +764,7 @@ async function measurePromptInputLatency(
 
     const callbackAt = performance.now()
     const value = String.fromCharCode(97 + (i % 26))
-    const expected = `${textarea.value}${value}`
+    const expected = `${getEditorValue(textarea)}${value}`
 
     insertPromptCharacter(textarea, value)
     await nextPaint()
@@ -776,7 +786,7 @@ async function measurePromptInputLatency(
       })
     }
 
-    if (textarea.value !== expected) {
+    if (getEditorValue(textarea) !== expected) {
       mismatches += 1
     }
     dueAt += intervalMs
@@ -787,7 +797,7 @@ async function measurePromptInputLatency(
     eventLoopDelay: summarizeValues(eventLoopDelays),
     paintDelay: summarizeValues(paintDelays),
     mismatches,
-    finalLength: textarea.value.length
+    finalLength: getEditorValue(textarea).length
   }
 
   if (details?.collectTimeline) {
@@ -811,7 +821,7 @@ async function runScenario(
   options: {
     id: string
     description: string
-    textarea: HTMLTextAreaElement
+    textarea: HTMLElement
     outputTerminalIds: string[]
     loadScriptPath: string
     sampleCount: number
@@ -910,7 +920,7 @@ async function runScenario(
 }
 
 export async function testPromptInputLatency(ctx: AutotestContext): Promise<TestResult[]> {
-  const { assert, log, rootPath, sleep } = ctx
+  const { assert, rootPath, sleep } = ctx
   const results: TestResult[] = []
   const record = (name: string, ok: boolean, detail?: Record<string, unknown>) => {
     assert(name, ok, detail)

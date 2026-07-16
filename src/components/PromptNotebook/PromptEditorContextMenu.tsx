@@ -40,7 +40,7 @@ export interface PromptEditorContextMenuProps {
   position: { x: number; y: number }
   isMac: boolean
   onClose: () => void
-  textareaRef: React.RefObject<HTMLTextAreaElement>
+  textareaRef: React.RefObject<HTMLElement>
   /**
    * Editor value/selection captured atomically at the contextmenu event time.
    * Required because React reconciliation can revert the textarea DOM value

@@ -75,7 +75,10 @@ if ($logContent -match "\[AutoTest\] FAIL") {
   exit 1
 }
 
-if ($logContent -notmatch "PECM-37-mode-preference-global-and-persisted") {
+# Final sentinel assertion id — TPCM-03 is the last record() call in the suite
+# (the terminal pinned-prompt menu group runs after all PECM cases); the former
+# PECM-37 mode-dropdown sentinel was removed with the contenteditable migration.
+if ($logContent -notmatch "TPCM-03-terminal-pin-menu-does-not-touch-prompt-history") {
   Write-Error "Prompt editor context-menu autotest did not complete. Log: $LogFile"
   Get-Content $LogFile -Tail 200
   exit 1

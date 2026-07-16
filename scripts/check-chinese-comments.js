@@ -16,6 +16,10 @@ const ALLOWLIST = new Set([
   // Test files may contain Chinese strings as test data (not comments)
   'test/autotest/test-full-e2e.ts',
   'test/autotest/test-prompt-integrity.ts',
+  // CDP prompt-editor drivers type real Chinese IME input / assert on Chinese
+  // round-trips, so the Han characters are required test data, not comments.
+  'test/autotest/prompt-ime-latency-driver.mjs',
+  'test/autotest/prompt-contenteditable-editing-driver.mjs',
   // Project instruction files may quote Chinese phrases from user usage.
   'CLAUDE.md',
   'AGENTS.md'

@@ -1019,6 +1019,11 @@ declare global {
     __onwardPromptSenderDebug?: PromptSenderDebugApi
     __onwardGitHistoryDebug?: GitHistoryDebugApi
     __onwardPromptNotebookDebug?: PromptNotebookDebugApi
+    // Autotest-only imperative setter for the prompt editor's local content
+    // state (installed by the PromptNotebook editor under the autotest gate).
+    // Used by the CDP drivers (prompt-ime-latency, prompt-contenteditable-editing)
+    // to pre-load a large document before driving real IME / keyboard input.
+    __onwardPromptEditorContentControl?: { setContent: (value: string) => void }
     __onwardProjectEditorDebug?: ProjectEditorDebugApi
     __onwardAppDebug?: AppDebugApi
     __onwardSettingsDebug?: SettingsDebugApi
