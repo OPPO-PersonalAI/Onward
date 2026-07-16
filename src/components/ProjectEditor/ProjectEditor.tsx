@@ -3844,15 +3844,22 @@ export function ProjectEditor({
     // `ready` re-runs this once the frame's onLoad lands (parallel to how scroll
     // restore retries via handleFrameLoad), so the zoom survives the round trip.
     if (!browserId || !htmlReaderState?.ready) return
-    // Diagnostic breadcrumb (off hot path, fires once per ready session): if a
+    // Diagnostic breadcrumb (off hot path, fires once per document load): if a
     // future report claims "HTML preview zoom reverts to 1 after a subpage round
-    // trip", this pins whether the ready-gated reapply fired and with what zoom.
+    // trip / reload / link navigation", this pins whether the reapply fired and
+    // with what zoom.
     perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_ZOOM_RESTORED, {
       ph: 'i',
-      zoomFactor: htmlPreviewZoomFactorRef.current
+      zoomFactor: htmlPreviewZoomFactorRef.current,
+      loadCount: htmlReaderState.loadCount
     })
     void getHtmlPreviewController(browserId)?.setZoomFactor(htmlPreviewZoomFactorRef.current)
-  }, [htmlReaderState?.browserId, htmlReaderState?.ready])
+    // `loadCount` is a dependency on purpose: an IN-PLACE reload (toolbar /
+    // Cmd+R → location.reload()) and a link navigation keep browserId, ready
+    // and reloadKey unchanged while replacing the document — whose zoom style
+    // starts back at 1. Every onLoad bumps loadCount, so each fresh document
+    // gets the remembered zoom re-applied (idempotent for same document).
+  }, [htmlReaderState?.browserId, htmlReaderState?.ready, htmlReaderState?.loadCount])
 
   useEffect(() => {
     if (!htmlPreviewSearchOpen) return

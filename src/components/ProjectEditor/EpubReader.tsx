@@ -7,6 +7,9 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import ePub from 'epubjs'
 import type { Book, NavItem, Rendition } from 'epubjs'
 import { useI18n } from '../../i18n/useI18n'
+import { perfTraceDiagnostic } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { redispatchReaderHostKey, shouldForwardReaderHostKey } from '../../utils/readerHostKey'
 import type { OutlineItem } from './Outline/types'
 import { OutlineSymbolKind } from './Outline/types'
 import {
@@ -280,6 +283,7 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
     let scrollListenerContainer: HTMLElement | null = null
     let handleScroll: (() => void) | null = null
     let handleRelocated: ((loc: { start?: { cfi?: string; href?: string } }) => void) | null = null
+    let handleContentKeydown: ((event: KeyboardEvent) => void) | null = null
     let activeNavigationRequester: EpubNavigationRequester | null = null
     let pendingRelocation: { start?: { cfi?: string; href?: string } } | null = null
     let recoveryTimer: number | null = null
@@ -497,6 +501,35 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       }
       rendition.on('relocated', handleRelocated)
 
+      // epub.js renders chapters into nested same-origin iframes; keydown
+      // there never bubbles to the host document, so the host's ESC handling
+      // (useSubpageEscape → back to terminal) and Cmd/Ctrl+P (Quick Open)
+      // would be dead while the reader content has focus. epub.js relays
+      // content-document DOM events through the rendition, so forward the
+      // shared host-key allowlist to the host document — the EPUB analogue of
+      // the pdf.js viewer's `onward:pdf:hostKey` forwarding.
+      handleContentKeydown = (event: KeyboardEvent) => {
+        if (!isCurrentSession()) return
+        if (!event || typeof event.key !== 'string') return
+        if (!shouldForwardReaderHostKey(event)) return
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_EPUB_HOST_KEY_FORWARDED, {
+          ph: 'i',
+          surface: 'project-editor',
+          key: event.key,
+          metaKey: Boolean(event.metaKey),
+          ctrlKey: Boolean(event.ctrlKey)
+        })
+        redispatchReaderHostKey({
+          key: event.key,
+          code: event.code,
+          metaKey: event.metaKey,
+          ctrlKey: event.ctrlKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey
+        })
+      }
+      rendition.on('keydown', handleContentKeydown)
+
       handleScroll = () => {
         if (!isCurrentSession()) return
         if (!shouldPersistEpubScroll(performance.now(), programmaticScrollUntilRef.current)) return
@@ -579,6 +612,9 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       }
       if (rendition && handleRelocated) {
         try { rendition.off('relocated', handleRelocated) } catch { /* ignore */ }
+      }
+      if (rendition && handleContentKeydown) {
+        try { rendition.off('keydown', handleContentKeydown) } catch { /* ignore */ }
       }
       try { rendition?.destroy() } catch { /* ignore */ }
       if (renditionRef.current === rendition) renditionRef.current = null

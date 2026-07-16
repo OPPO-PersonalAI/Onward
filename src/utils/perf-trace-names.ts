@@ -902,7 +902,15 @@ export const PERF_TRACE_EVENT = {
   // path, AGX driver) — staggering removes the burst. Individual disposals
   // still emit renderer:xterm.renderer.dispose-webgl, whose timestamps
   // prove the spacing in a trace.
-  RENDERER_XTERM_RENDERER_DEACTIVATE_STAGGERED: 'renderer:xterm.renderer.deactivate-staggered'
+  RENDERER_XTERM_RENDERER_DEACTIVATE_STAGGERED: 'renderer:xterm.renderer.deactivate-staggered',
+
+  // ───────── 2026-07-16 reader ESC/hostKey forwarding + HTML zoom close-reopen memory ─────────
+  // Renderer: a keydown inside the epub.js content iframe matched the reader
+  // host-key allowlist (Escape / Cmd+P) and was re-dispatched on the host
+  // document (ph=i). Payload: { surface: 'project-editor' | 'git-epub-compare',
+  // key, metaKey, ctrlKey }. Breadcrumb for "ESC doesn't leave the EPUB
+  // reader" reports: shows whether the forwarding fired at all.
+  RENDERER_EPUB_HOST_KEY_FORWARDED: 'renderer:epub.host-key-forwarded'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]
