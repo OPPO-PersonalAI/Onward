@@ -900,6 +900,81 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
     })
   }
 
+  // ESC pressed while focus is INSIDE the epub.js content iframe must close
+  // the editor exactly like a host-side ESC (design rule: every terminal-entry
+  // subpage returns to the terminal on ESC). Keydown events inside the nested
+  // same-origin iframe do NOT bubble to the host document, so EpubReader must
+  // forward them to the host — mirroring the pdf.js viewer hostKey forwarding
+  // locked by `pdf-reader-escape-forwarded`.
+  // Per CLAUDE.md timing-sensitive autotest rule: N=3 close/reopen trials,
+  // all-must-pass (a single miss means the forwarding path has a real hole).
+  {
+    const TRIALS = 3
+    type EpubEscObservation = {
+      trial: number
+      iframeReady: boolean
+      dispatched: boolean
+      closed: boolean
+      reopened: boolean
+    }
+    const escObservations: EpubEscObservation[] = []
+    const canShortcut = Boolean(window.__onwardAppDebug?.triggerShortcutAction)
+    for (let i = 1; i <= TRIALS; i += 1) {
+      if (cancelled()) break
+      if (!getApi()?.isOpen?.()) {
+        window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
+        await waitFor(`epub-content-esc-trial-${i}-editor`, () => Boolean(getApi()?.isOpen?.()), 8000)
+      }
+      if (!getApi()?.isEpubReaderVisible?.()) {
+        await getApi()?.openFileByPathAsUser?.(epubPath)
+        await waitFor(`epub-content-esc-trial-${i}-epub`, () => getApi()?.isEpubReaderVisible?.() === true, 10000)
+      }
+      const iframeReady = await waitFor(
+        `epub-content-esc-trial-${i}-iframe`,
+        () => {
+          const frame = document.querySelector<HTMLIFrameElement>('.project-editor-epub-content iframe')
+          return Boolean(frame?.contentDocument?.body)
+        },
+        10000,
+        100
+      )
+      const contentDoc = document.querySelector<HTMLIFrameElement>('.project-editor-epub-content iframe')?.contentDocument ?? null
+      let dispatched = false
+      if (iframeReady && contentDoc) {
+        contentDoc.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Escape',
+          code: 'Escape',
+          bubbles: true,
+          cancelable: true
+        }))
+        dispatched = true
+      }
+      const closed = dispatched
+        ? await waitFor(
+            `epub-content-esc-trial-${i}-closed`,
+            () => !getApi()?.isOpen?.(),
+            4000,
+            80
+          )
+        : false
+      // Reopen for the next trial (and to leave the suite in the open state
+      // the following PDF-outline assertions expect).
+      const reopened = canShortcut && window.__onwardAppDebug?.triggerShortcutAction?.({ type: 'terminalProjectEditor' }) === true
+        ? await waitFor(`epub-content-esc-trial-${i}-reopened`, () => Boolean(getApi()?.isOpen?.()), 8000, 80)
+        : Boolean(getApi()?.isOpen?.())
+      escObservations.push({ trial: i, iframeReady, dispatched, closed, reopened })
+      if (!closed || !reopened) break
+    }
+    const allForwarded =
+      escObservations.length === TRIALS &&
+      escObservations.every((obs) => obs.iframeReady && obs.dispatched && obs.closed && obs.reopened)
+    record('epub-escape-forwarded-from-content', allForwarded, {
+      expectedTrials: TRIALS,
+      observed: escObservations.length,
+      perTrial: escObservations
+    })
+  }
+
   // ---------- Outlined PDF fixture: unified OutlinePanel integration ----------
   // Copy the outlined PDF fixture next to the other fixtures.
   await termExec(

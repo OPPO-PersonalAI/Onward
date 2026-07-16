@@ -1075,6 +1075,170 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
       fixturePath,
       persistedHtmlScrollY
     })
+    if (cancelled()) return results
+
+    // ── HTML zoom persistence across ESC close → reopen (PHTML-32) ──
+    // User-reported flow: zoom the HTML preview, ESC back to the terminal,
+    // reopen the editor — the previously applied zoom must still be in
+    // effect on the live document, not just remembered in the toolbar label.
+    // `ui` locks the remembered factor, `browser` locks the round-trip through
+    // the iframe controller, and the evaluate call locks the actual
+    // `document.documentElement.style.zoom` the user sees.
+    const ZOOM_PERSIST_TARGET = 1.5
+    const zoomSeeded = await (getApi()?.setHtmlPreviewZoomFactor?.(ZOOM_PERSIST_TARGET) ?? Promise.resolve(false))
+    const zoomSeededState = await waitForZoomState(
+      'phtml-zoom-persist-seed',
+      (state) => state.ui === ZOOM_PERSIST_TARGET && state.browser === ZOOM_PERSIST_TARGET
+    )
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true
+    }))
+    const zoomClosed = await waitFor(
+      'phtml-zoom-persist-close',
+      () => !(getApi()?.isOpen?.() ?? false),
+      10000,
+      100
+    )
+    const zoomReopened = await ctx.reopenProjectEditor('phtml-zoom-persist-reopen')
+    const zoomFixtureBack = await waitFor(
+      'phtml-zoom-persist-reopen-file',
+      () => getApi()?.getActiveFilePath?.() === fixturePath,
+      10000,
+      100
+    )
+    await waitFor(
+      'phtml-zoom-persist-reader-settled',
+      () => {
+        const reader = getApi()?.getHtmlReaderState?.()
+        return Boolean(reader && !reader.isLoading && reader.loadCount >= 1)
+      },
+      15000,
+      100
+    )
+    const zoomRestored = await waitForZoomState(
+      'phtml-zoom-persist-restored',
+      (state) => state.ui === ZOOM_PERSIST_TARGET && state.browser === ZOOM_PERSIST_TARGET,
+      8000
+    )
+    const appliedDocZoom = await (getApi()?.evaluateHtmlPreviewForTest?.(
+      'document.documentElement.style.zoom || \'\''
+    ) ?? Promise.resolve(null))
+    const appliedDocZoomValue = appliedDocZoom?.success ? Number(appliedDocZoom.value) : null
+    record('PHTML-32-html-zoom-survives-close-reopen', Boolean(
+      zoomSeeded && zoomSeededState.ok && zoomClosed && zoomReopened && zoomFixtureBack &&
+      zoomRestored.ok && appliedDocZoomValue === ZOOM_PERSIST_TARGET
+    ), {
+      target: ZOOM_PERSIST_TARGET,
+      seededState: zoomSeededState.state,
+      restoredState: zoomRestored.state,
+      appliedDocZoom: appliedDocZoomValue
+    })
+    // Reset so later suites observe the default factor.
+    await getApi()?.setHtmlPreviewZoomFactor?.(1)
+    if (cancelled()) return results
+
+    // ── Zoom re-applied after IN-PLACE reload + link navigation ──
+    // The remembered zoom must follow every document the preview session
+    // shows, not only the first one. The toolbar reload runs an in-frame
+    // location.reload() (browserId/reloadKey unchanged — locked by PHTML-21),
+    // and a link click swaps the iframe src within the same session; both
+    // load a fresh document whose zoom style starts at 1.
+    const waitForAppliedZoom = async (
+      label: string,
+      expected: number,
+      timeoutMs = 8000
+    ): Promise<{ ok: boolean; last: number | null }> => {
+      const start = performance.now()
+      let last: number | null = null
+      while (performance.now() - start < timeoutMs) {
+        const result = await (getApi()?.evaluateHtmlPreviewForTest?.(
+          'Number(document.documentElement.style.zoom) || 1'
+        ) ?? Promise.resolve(null))
+        if (result?.success) {
+          last = Number(result.value)
+          if (last === expected) return { ok: true, last }
+        }
+        await sleep(120)
+      }
+      ctx.log('html-preview-applied-zoom-timeout', { label, expected, last })
+      return { ok: false, last }
+    }
+
+    const reloadZoomSeeded = await (getApi()?.setHtmlPreviewZoomFactor?.(ZOOM_PERSIST_TARGET) ?? Promise.resolve(false))
+    const reloadZoomApplied = await waitForAppliedZoom('phtml-zoom-reload-seed', ZOOM_PERSIST_TARGET)
+    // Discriminate the reloaded document from the pre-reload one (PHTML-21
+    // pattern): inject a DOM marker the reload must discard. Without it the
+    // "document rendered" predicate matches the OLD document and every
+    // assertion below races the in-flight reload.
+    const ZOOM_RELOAD_MUTATION = 'ZOOM_RELOAD_TEMP_MUTATION'
+    const zoomReloadMutationInjected = await injectDomMutation(ZOOM_RELOAD_MUTATION)
+    const zoomReloadMutationVisible = await waitForDocumentState(
+      'phtml-zoom-reload-mutation-visible',
+      (state) => Boolean(state.bodyText?.includes(ZOOM_RELOAD_MUTATION)),
+      5000
+    )
+    const readerBeforeReload = getApi()?.getHtmlReaderState?.() ?? null
+    navButton('reload')?.click()
+    const reloadedDoc = await waitForDocumentState(
+      'phtml-zoom-reload-rendered',
+      (state) => state.readyState === 'complete' && state.title === expectedTitle &&
+        !state.bodyText?.includes(ZOOM_RELOAD_MUTATION)
+    )
+    const readerAfterReload = getApi()?.getHtmlReaderState?.() ?? null
+    const zoomReloadInPlace = Boolean(
+      readerBeforeReload && readerAfterReload &&
+      readerAfterReload.browserId === readerBeforeReload.browserId &&
+      readerAfterReload.reloadKey === readerBeforeReload.reloadKey
+    )
+    const zoomAfterReload = await waitForAppliedZoom('phtml-zoom-after-reload', ZOOM_PERSIST_TARGET)
+    record('PHTML-33-html-zoom-survives-in-place-reload', Boolean(
+      reloadZoomSeeded && reloadZoomApplied.ok && zoomReloadMutationInjected && zoomReloadMutationVisible.ok &&
+      reloadedDoc.ok && zoomReloadInPlace && zoomAfterReload.ok
+    ), {
+      target: ZOOM_PERSIST_TARGET,
+      seedApplied: reloadZoomApplied.last,
+      mutationInjected: zoomReloadMutationInjected,
+      reloadInPlace: zoomReloadInPlace,
+      appliedAfterReload: zoomAfterReload.last,
+      uiAfterReload: getApi()?.getHtmlPreviewZoomFactor?.() ?? null
+    })
+    if (cancelled()) return results
+
+    // The link click can race the tail of the reload above (document swapped
+    // mid-evaluate returns "link not found") — retry until the click lands.
+    let navLinkClicked = false
+    {
+      const clickStart = performance.now()
+      while (!navLinkClicked && performance.now() - clickStart < 8000) {
+        navLinkClicked = await clickPreviewLink('nav-second-link')
+        if (!navLinkClicked) await sleep(200)
+      }
+    }
+    const navSecondRendered = await waitForDocumentState(
+      'phtml-zoom-nav-second-rendered',
+      (state) => state.title === SECOND_PAGE_TITLE && Boolean(state.bodyText?.includes(SECOND_PAGE_MARKER))
+    )
+    const zoomAfterNav = await waitForAppliedZoom('phtml-zoom-after-nav', ZOOM_PERSIST_TARGET)
+    record('PHTML-34-html-zoom-applies-to-navigated-page', Boolean(
+      navLinkClicked && navSecondRendered.ok && zoomAfterNav.ok
+    ), {
+      target: ZOOM_PERSIST_TARGET,
+      linkClicked: navLinkClicked,
+      renderedTitle: navSecondRendered.state?.title ?? null,
+      appliedAfterNav: zoomAfterNav.last,
+      uiAfterNav: getApi()?.getHtmlPreviewZoomFactor?.() ?? null
+    })
+    // Return home and reset zoom so later suites observe the default state.
+    navButton('home')?.click()
+    await waitForDocumentState(
+      'phtml-zoom-nav-home-restored',
+      (state) => state.title === expectedTitle,
+      10000
+    )
+    await getApi()?.setHtmlPreviewZoomFactor?.(1)
   } finally {
     if (detourCreated.success) {
       await window.electronAPI.project.deletePath(ctx.rootPath, detourPath)
