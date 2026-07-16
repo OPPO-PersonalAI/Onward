@@ -174,7 +174,6 @@ export function ChangeLogModal({ isOpen, onClose, result, isLoading }: ChangeLog
       className="change-log-modal-overlay"
       ref={overlayRef}
       data-testid="change-log-overlay"
-      onClick={onClose}
     >
       <div
         className="change-log-modal"

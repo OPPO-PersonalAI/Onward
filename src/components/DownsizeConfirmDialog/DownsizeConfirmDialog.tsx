@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useI18n } from '../../i18n/useI18n'
+import { useModalEscape } from '../../hooks/useModalEscape'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import './DownsizeConfirmDialog.css'
@@ -72,6 +73,10 @@ export function DownsizeConfirmDialog({
       return [...prev, id]
     })
   }, [requiredCount])
+
+  // ESC safely cancels the downsize (unified modal dismiss); backdrop
+  // clicks stay inert so the keep-selection cannot be lost by a stray click.
+  useModalEscape(open, onCancel, 'downsize-confirm')
 
   const ordered = useMemo(() => {
     // Confirm callback receives the ids in the user-selected display order

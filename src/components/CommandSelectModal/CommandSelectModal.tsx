@@ -6,6 +6,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { CommandPreset } from '../../types/electron'
 import { useI18n } from '../../i18n/useI18n'
+import { useModalEscape } from '../../hooks/useModalEscape'
 import './CommandSelectModal.css'
 
 interface CommandSelectModalProps {
@@ -96,11 +97,12 @@ export function CommandSelectModal({
     }
   }
 
+  // ESC cancels regardless of where focus sits (unified modal dismiss).
+  useModalEscape(true, onCancel, 'command-select')
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !isAddingCustom) {
       handleConfirm()
-    } else if (e.key === 'Escape') {
-      onCancel()
     }
   }
 
@@ -108,6 +110,8 @@ export function CommandSelectModal({
     if (e.key === 'Enter') {
       handleAddCustomCommand()
     } else if (e.key === 'Escape') {
+      // ESC inside the custom-command field only exits add-custom mode.
+      e.stopPropagation()
       setIsAddingCustom(false)
       setCustomCommand('')
     }
@@ -118,7 +122,7 @@ export function CommandSelectModal({
   const customCommands = commands.filter(c => !c.isBuiltin)
 
   return (
-    <div className="command-modal-overlay" onClick={onCancel}>
+    <div className="command-modal-overlay">
       <div
         className="command-modal"
         onClick={e => e.stopPropagation()}

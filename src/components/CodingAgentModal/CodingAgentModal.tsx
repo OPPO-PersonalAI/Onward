@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CodingAgentConfigInput, CodingAgentHistoryEntry, EnvVarEntry } from '../../types/electron'
 import { useI18n } from '../../i18n/useI18n'
 import type { TranslationKey, TranslationParams } from '../../i18n/core'
+import { useModalEscape } from '../../hooks/useModalEscape'
 import './CodingAgentModal.css'
 
 interface CodingAgentModalProps {
@@ -302,9 +303,13 @@ export function CodingAgentModal({ onLaunch, onCancel }: CodingAgentModalProps) 
     onLaunch(payload)
   }
 
+  // ESC cancels regardless of where focus sits (unified modal dismiss);
+  // the previous React onKeyDown Escape branch went dead once focus left
+  // the modal subtree (e.g. after a click on the inert backdrop).
+  useModalEscape(true, onCancel, 'coding-agent')
+
   const handleKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key === 'Escape') onCancel()
-    else if (event.key === 'Enter' && canStart) {
+    if (event.key === 'Enter' && canStart) {
       // Do not trigger launch when user is typing in an input field
       const tag = (event.target as HTMLElement).tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return

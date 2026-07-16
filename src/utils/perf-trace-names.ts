@@ -537,6 +537,16 @@ export const PERF_TRACE_EVENT = {
   RENDERER_DOWNSIZE_DIALOG_OPEN: 'renderer:downsize-dialog.open',
   RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE: 'renderer:terminal.destroy-by-downsize',
 
+  // ───────── Renderer — unified modal dismiss policy ─────────
+  // Modal dialogs never dismiss on backdrop click; besides the dialog's
+  // own buttons the only safe dismissal is ESC (= cancel). This instant
+  // fires on every ESC-driven modal cancel, from both the shared
+  // useModalEscape hook and the subpage-host escape chains that settle
+  // an open dialog before the subpage itself would close (GitDiff /
+  // GitHistory large-file confirm, ProjectEditor file-open-choice).
+  // Payload: { dialog } naming the surface.
+  RENDERER_MODAL_ESC_CANCELLED: 'renderer:modal-dismiss.esc-cancelled',
+
   // ───────── Autotest bundle-marker (V10 closed-loop check) ─────────
   // Emitted ONLY by the `debug:emit-bundle-marker` IPC, which is
   // gated on ONWARD_AUTOTEST=1. The diagnostic-bundle verifier's V10

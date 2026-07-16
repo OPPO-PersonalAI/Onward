@@ -136,10 +136,31 @@ export async function testTaskLayout(ctx: AutotestContext): Promise<TestResult[]
     )
     record('TLM-04-downsize-dialog-shown', dialogShown)
     if (dialogShown) {
-      // Dismiss so we don't leave the app in a modal state.
-      const cancel = document.querySelector<HTMLButtonElement>('.downsize-confirm-secondary')
-      cancel?.click()
-      await sleep(100)
+      // Unified modal dismiss (2026-07-16): backdrop clicks are inert.
+      const backdrop = document.querySelector('.downsize-confirm-backdrop')
+      backdrop?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      backdrop?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await sleep(300)
+      record('TLM-04b-downsize-backdrop-click-keeps-dialog',
+        document.querySelector('.downsize-confirm-dialog') !== null, {
+          backdropFound: backdrop !== null
+        })
+
+      // ESC safely cancels (newly added useModalEscape) without downsizing.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      const dialogClosedByEscape = await waitFor(
+        'downsize-dialog-esc-closed',
+        () => document.querySelector('.downsize-confirm-dialog') === null,
+        4000,
+        80
+      )
+      record('TLM-04c-downsize-escape-cancels-dialog', dialogClosedByEscape)
+      if (!dialogClosedByEscape) {
+        // Fallback dismiss so we don't leave the app in a modal state.
+        const cancel = document.querySelector<HTMLButtonElement>('.downsize-confirm-secondary')
+        cancel?.click()
+        await sleep(100)
+      }
     }
   } else {
     record('TLM-04-downsize-dialog-shown', false, { reason: 'single-button-not-found' })

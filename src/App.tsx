@@ -418,7 +418,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   // active tab's notebook. Other suites (prompt-integrity, schedule,
   // markdown-session-restore, …) keep the default null/hidden behaviour
   // because they assume the terminal grid takes the full panel area.
-  const promptNotebookAutotestSuites = ['prompt-list', 'prompt-editor-context-menu']
+  const promptNotebookAutotestSuites = ['prompt-list', 'prompt-editor-context-menu', 'modal-dismiss']
   const isPromptNotebookAutotest =
     window.electronAPI?.debug?.autotest === true &&
     typeof window.electronAPI?.debug?.autotestSuite === 'string' &&

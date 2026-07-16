@@ -8200,6 +8200,10 @@ export function ProjectEditor({
     handleSaveRef.current = handleSave
   }, [handleSave])
 
+  // Forward ref: handleNewFile is declared further down but the autotest
+  // debug api (createProjectEditorDebugApi) needs to trigger it.
+  const handleNewFileRef = useRef<((baseDirOverride?: string) => Promise<void>) | null>(null)
+
   const handleRequestClose = useCallback(async () => {
     const canClose = await confirmDiscardChanges()
     if (!canClose) return
@@ -8253,7 +8257,13 @@ export function ProjectEditor({
       return
     }
     if (dialog) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_MODAL_ESC_CANCELLED, { dialog: 'project-editor-dialog' })
       handleDialogCancel()
+      return
+    }
+    if (fileOpenChoiceDialog) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_MODAL_ESC_CANCELLED, { dialog: 'project-editor-file-open-choice' })
+      handleFileOpenChoiceCancel()
       return
     }
     if (searchOpen) {
@@ -8273,7 +8283,7 @@ export function ProjectEditor({
       return
     }
     void handleRequestClose()
-  }, [closeHtmlPreviewSearch, closePreviewSearch, dialog, handleDialogCancel, htmlPreviewSearchOpen, searchOpen, handleCloseSearch, previewSearchOpen, handleRequestClose, sidebarMode, pinOverflowOpen, recentOverflowOpen])
+  }, [closeHtmlPreviewSearch, closePreviewSearch, dialog, fileOpenChoiceDialog, handleDialogCancel, handleFileOpenChoiceCancel, htmlPreviewSearchOpen, searchOpen, handleCloseSearch, previewSearchOpen, handleRequestClose, sidebarMode, pinOverflowOpen, recentOverflowOpen])
 
   const handleOpenGitDiff = useCallback(async (
     source: 'user' | 'debug' = 'user',
@@ -8536,6 +8546,15 @@ export function ProjectEditor({
       },
       cancelDialog: () => {
         handleDialogCancel()
+      },
+      openNewFileDialog: () => {
+        void handleNewFileRef.current?.('')
+      },
+      // Read the DOM input instead of `dialogInput` state so exposing the
+      // api does not need to re-run on every dialog keystroke.
+      getDialogInput: () => dialogInputRef.current?.value ?? '',
+      setDialogInputValue: (value: string) => {
+        setDialogInput(value)
       },
       getOpenChoiceDialogState: () => ({
         visible: Boolean(fileOpenChoiceDialog),
@@ -9773,6 +9792,10 @@ export function ProjectEditor({
     await openFile(targetPath, 'user', { trackRecent: true })
     showStatus('success', t('projectEditor.fileCreated'))
   }, [openFile, refreshDirectory, requestPrompt, selectedPath, showStatus, t, tree])
+
+  useEffect(() => {
+    handleNewFileRef.current = handleNewFile
+  }, [handleNewFile])
 
   const handleNewFolder = useCallback(async (baseDirOverride?: string) => {
     const root = rootRef.current
@@ -11613,7 +11636,7 @@ export function ProjectEditor({
         )}
 
         {dialog && (
-          <div className="project-editor-dialog-overlay" onClick={handleDialogCancel}>
+          <div className="project-editor-dialog-overlay">
             <div className="project-editor-dialog" onClick={(event) => event.stopPropagation()}>
               <div className="project-editor-dialog-title">{dialog.title}</div>
               <div className="project-editor-dialog-message">{dialog.message}</div>
@@ -11644,7 +11667,7 @@ export function ProjectEditor({
         )}
 
         {fileOpenChoiceDialog && (
-          <div className="project-editor-dialog-overlay" onClick={handleFileOpenChoiceCancel}>
+          <div className="project-editor-dialog-overlay">
             <div className="project-editor-dialog project-editor-open-choice-dialog" onClick={(event) => event.stopPropagation()}>
               <div className="project-editor-dialog-title">{t('projectEditor.binaryChoice.title')}</div>
               <div className="project-editor-dialog-message">

@@ -450,6 +450,8 @@ export interface PromptNotebookDebugApi {
   pauseSchedule: (promptId: string) => boolean
   resumeSchedule: (promptId: string) => boolean
   deleteSchedule: (promptId: string) => boolean
+  openSendHistory?: (promptId: string) => boolean
+  isSendHistoryOpen?: () => boolean
 }
 
 export interface ProjectEditorDebugApi {
@@ -490,6 +492,9 @@ export interface ProjectEditorDebugApi {
   getDialogState?: () => { type: 'confirm' | 'prompt'; title: string; message: string } | null
   confirmDialog?: () => void
   cancelDialog?: () => void
+  openNewFileDialog?: () => void
+  getDialogInput?: () => string
+  setDialogInputValue?: (value: string) => void
   getOpenChoiceDialogState?: () => {
     visible: boolean
     extension: string

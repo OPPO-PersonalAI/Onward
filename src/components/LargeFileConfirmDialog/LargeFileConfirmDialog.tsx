@@ -26,7 +26,6 @@ export function LargeFileConfirmDialog({
     <div
       className="large-file-confirm-overlay"
       data-testid="large-file-confirm-dialog"
-      onMouseDown={onCancel}
     >
       <div
         className="large-file-confirm-dialog"
