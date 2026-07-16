@@ -5,6 +5,7 @@
 
 import type { AutotestContext, TestResult } from './types'
 import { buildChangeDirectoryCommand } from '../utils/terminal-command'
+import { parseNavigationSourceFilter, navigationSourcesFor } from './subpage-navigation-source'
 
 function normalizePath(value: string): string {
   const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '')
@@ -31,6 +32,13 @@ function getNavigationTestGroup(): NavigationTestGroup {
   const group = suite.match(/(?:^|;)group=(core|html|pdf|epub)(?:;|$)/i)?.[1]?.toLowerCase()
   if (group === 'html' || group === 'pdf' || group === 'epub') return group
   return 'core'
+}
+
+// Which entry points (git-diff / git-history) this run exercises. The html group
+// is split by source across two runners to fit the 180s regression budget; `all`
+// (the default) keeps both for a standalone run. See subpage-navigation-source.ts.
+function getNavigationSources(): ReturnType<typeof navigationSourcesFor> {
+  return navigationSourcesFor(parseNavigationSourceFilter(window.electronAPI.debug.autotestSuite))
 }
 
 function dispatchEscape(): void {
@@ -1558,7 +1566,7 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     })
 
     if (navigationGroup === 'core') {
-      for (const source of ['diff', 'history'] as const) {
+      for (const source of getNavigationSources()) {
         const coldResult = await runColdCodeJumpRoundTrip(source)
         _assert(`SNJ-CODE-${source.toUpperCase()}-COLD-DIFFERENT-FILE`, coldResult.ok, coldResult)
       }
@@ -1768,7 +1776,7 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
         }
       }
 
-      for (const source of ['diff', 'history'] as const) {
+      for (const source of getNavigationSources()) {
         const trials = []
         for (let trial = 1; trial <= 5; trial += 1) {
           trials.push(await runSourceRootDriftTrial(source, trial))
@@ -2119,7 +2127,7 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     const resultPrefix = `SNJ-${navigationFile.kind.toUpperCase()}`
 
     if (navigationGroup === 'core') {
-      for (const source of ['diff', 'history'] as const) {
+      for (const source of getNavigationSources()) {
         const scrollResults: Array<Awaited<ReturnType<typeof runSourceScrollRoundTrip>>> = []
         for (let trial = 1; trial <= 5; trial += 1) {
           if (cancelled()) break
@@ -2144,7 +2152,7 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     }
 
     if (navigationGroup !== 'core') {
-      for (const source of ['diff', 'history'] as const) {
+      for (const source of getNavigationSources()) {
         const coldResults: Array<Awaited<ReturnType<typeof runColdRichJumpRoundTrip>>> = []
         for (let trial = 1; trial <= 5; trial += 1) {
           if (cancelled()) break
@@ -2175,7 +2183,7 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
       }
     }
 
-    for (const source of ['diff', 'history'] as const) {
+    for (const source of getNavigationSources()) {
       const trialResults: Array<Awaited<ReturnType<typeof runWarmJumpRoundTrip>>> = []
       for (let trial = 1; trial <= navigationTrials; trial += 1) {
         if (cancelled()) break

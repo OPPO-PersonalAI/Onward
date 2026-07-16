@@ -7,6 +7,14 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 GROUP="${ONWARD_SUBPAGE_NAVIGATION_GROUP:-core}"
+SOURCE="${ONWARD_SUBPAGE_NAVIGATION_SOURCE:-all}"
+case "$SOURCE" in
+  diff|history|all) ;;
+  *)
+    echo "ERROR: unsupported subpage navigation source: $SOURCE" >&2
+    exit 2
+    ;;
+esac
 case "$GROUP" in
   core|html|pdf|epub) ;;
   *)
@@ -21,7 +29,14 @@ if [[ -n "${1:-}" ]]; then
 elif ! APP_BIN="$(resolve_dev_app_bin "$ROOT_DIR")"; then
   APP_BIN=""
 fi
-LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/subpage-navigation-${GROUP}-autotest.log}"
+# Source-aware suite label so the two html-split runners (diff / history) write
+# to distinct logs instead of clobbering one shared file. `all` keeps the plain
+# group label for backward compatibility with the standalone group runners.
+SUITE_LABEL="$GROUP"
+if [[ "$SOURCE" != "all" ]]; then
+  SUITE_LABEL="${GROUP}-${SOURCE}"
+fi
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/subpage-navigation-${SUITE_LABEL}-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
@@ -80,11 +95,18 @@ if command -v pgrep >/dev/null 2>&1 && pgrep -lx "$APP_NAME" >/dev/null 2>&1; th
   sleep 0.5
 fi
 
+# The completion marker is the LAST WARM assertion the run emits. When the run is
+# filtered to a single source, that source is the last (and only) one, so the
+# marker must track it — a diff-only run never emits the HISTORY marker.
+MARKER_SOURCE="HISTORY"
+if [[ "$SOURCE" == "diff" ]]; then
+  MARKER_SOURCE="DIFF"
+fi
 case "$GROUP" in
-  core) EXPECTED_RESULT="SNJ-CODE-HISTORY-WARM" ;;
-  html) EXPECTED_RESULT="SNJ-HTML-HISTORY-WARM-5X" ;;
-  pdf) EXPECTED_RESULT="SNJ-PDF-HISTORY-WARM-5X" ;;
-  epub) EXPECTED_RESULT="SNJ-EPUB-HISTORY-WARM-5X" ;;
+  core) EXPECTED_RESULT="SNJ-CODE-${MARKER_SOURCE}-WARM" ;;
+  html) EXPECTED_RESULT="SNJ-HTML-${MARKER_SOURCE}-WARM-5X" ;;
+  pdf) EXPECTED_RESULT="SNJ-PDF-${MARKER_SOURCE}-WARM-5X" ;;
+  epub) EXPECTED_RESULT="SNJ-EPUB-${MARKER_SOURCE}-WARM-5X" ;;
 esac
 
 echo "Starting subpage navigation autotest..."
@@ -99,7 +121,7 @@ echo ""
 APP_EXIT_CODE=0
 if ONWARD_DEBUG=1 \
   ONWARD_AUTOTEST=1 \
-  ONWARD_AUTOTEST_SUITE="subpage-navigation;group=$GROUP" \
+  ONWARD_AUTOTEST_SUITE="subpage-navigation;group=$GROUP;source=$SOURCE" \
   ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
   ONWARD_AUTOTEST_FIXTURE_EXTRA="$FIXTURE_BASE" \
   ONWARD_AUTOTEST_EXIT=1 \

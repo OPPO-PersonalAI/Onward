@@ -209,7 +209,12 @@ SCRIPTS: List[str] = [
     "test/autotest/run-subpage-cdp-clicks-autotest.sh",
     "test/autotest/run-subpage-navigation-autotest.sh",
     "test/autotest/run-subpage-navigation-epub-autotest.sh",
-    "test/autotest/run-subpage-navigation-html-autotest.sh",
+    # The full html group (diff + history, COLD + WARM) runs ~242s and overruns the
+    # 180s per-suite budget, so it is split by source into two sub-runners (~120s
+    # each). The standalone run-subpage-navigation-html-autotest.sh still runs both
+    # for a manual full pass, but the gate uses the two halves.
+    "test/autotest/run-subpage-navigation-html-diff-autotest.sh",
+    "test/autotest/run-subpage-navigation-html-history-autotest.sh",
     "test/autotest/run-subpage-navigation-pdf-autotest.sh",
     "test/autotest/run-subpage-viewstate-restore-autotest.sh",
     "test/autotest/run-telemetry-autotest.sh",

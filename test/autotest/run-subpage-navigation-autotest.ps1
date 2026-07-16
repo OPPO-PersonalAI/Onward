@@ -8,14 +8,21 @@ $Group = if ($env:ONWARD_SUBPAGE_NAVIGATION_GROUP) { $env:ONWARD_SUBPAGE_NAVIGAT
 if ($Group -notin @("core", "html", "pdf", "epub")) {
   Write-Error "Unsupported subpage navigation group: $Group"
 }
+$Source = if ($env:ONWARD_SUBPAGE_NAVIGATION_SOURCE) { $env:ONWARD_SUBPAGE_NAVIGATION_SOURCE } else { "all" }
+if ($Source -notin @("diff", "history", "all")) {
+  Write-Error "Unsupported subpage navigation source: $Source"
+}
 . (Join-Path $RootDir "test\autotest\Resolve-DevAppBin.ps1")
 $DefaultExe = Resolve-DevAppBin -RootDir $RootDir
 $AppExe = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { $DefaultExe }
 $AppProcessName = [System.IO.Path]::GetFileNameWithoutExtension($AppExe)
+# Source-aware suite label so the two html-split runners (diff / history) write
+# to distinct logs instead of clobbering one shared file (mirrors the .sh).
+$SuiteLabel = if ($Source -ne "all") { "$Group-$Source" } else { $Group }
 $LogFile = if ($args.Count -ge 2 -and $args[1]) {
   $args[1]
 } else {
-  Join-Path $RootDir "traces\test-logs\subpage-navigation-$Group-autotest.log"
+  Join-Path $RootDir "traces\test-logs\subpage-navigation-$SuiteLabel-autotest.log"
 }
 
 if (-not $AppExe -or -not (Test-Path $AppExe)) {
@@ -30,11 +37,14 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogFile) | Out-Nu
 $UserDataDir = Join-Path $env:TEMP ("onward-subpage-nav-userdata-" + [guid]::NewGuid().ToString("N"))
 $FixtureBase = Join-Path $env:TEMP ("onward-subpage-nav-fixtures-" + [guid]::NewGuid().ToString("N"))
 
+# The completion marker is the LAST WARM assertion the run emits; when filtered to
+# a single source it tracks that source (a diff-only run never emits HISTORY).
+$MarkerSource = if ($Source -eq "diff") { "DIFF" } else { "HISTORY" }
 $ExpectedResult = switch ($Group) {
-  "core" { "SNJ-CODE-HISTORY-WARM" }
-  "html" { "SNJ-HTML-HISTORY-WARM-5X" }
-  "pdf" { "SNJ-PDF-HISTORY-WARM-5X" }
-  "epub" { "SNJ-EPUB-HISTORY-WARM-5X" }
+  "core" { "SNJ-CODE-$MarkerSource-WARM" }
+  "html" { "SNJ-HTML-$MarkerSource-WARM-5X" }
+  "pdf" { "SNJ-PDF-$MarkerSource-WARM-5X" }
+  "epub" { "SNJ-EPUB-$MarkerSource-WARM-5X" }
 }
 
 try {
@@ -50,7 +60,7 @@ try {
   $env:ONWARD_DEBUG = "1"
   $env:ONWARD_USER_DATA_DIR = $UserDataDir
   $env:ONWARD_AUTOTEST = "1"
-  $env:ONWARD_AUTOTEST_SUITE = "subpage-navigation;group=$Group"
+  $env:ONWARD_AUTOTEST_SUITE = "subpage-navigation;group=$Group;source=$Source"
   $env:ONWARD_AUTOTEST_CWD = $RootDir
   $env:ONWARD_AUTOTEST_FIXTURE_EXTRA = $FixtureBase
   $env:ONWARD_AUTOTEST_EXIT = "1"
