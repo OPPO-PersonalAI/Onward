@@ -22,7 +22,7 @@ import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
 import { useGitStateMirror } from '../../hooks/useGitStateMirror'
-import { perfTraceDiagnostic } from '../../utils/perf-trace'
+import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { resolveDefaultSelectedFile, resolveSelectionAfterReload } from './defaultFileSelection'
 import { DiffEmptyState } from '../common/DiffEmptyState'
@@ -1635,7 +1635,19 @@ export function GitHistoryViewer({
     }
   }, [isOpen, commits, selectedShas, files, selectedFile, selectedFileContent, loading, filesLoading, diffLoading, diffError, diffStyle, diffDisplayMode, hideWhitespace, imageCompareMode, imageDisplayMode, svgViewMode, selectedRepoRoot, cachedParentCwd, repoSearch, cachedRepos, visibleRepoItems, setRepoExpanded, selectionInfo.isContiguous, selectionInfo.base, selectionInfo.head, loadFileContentForHistory, loadTextFileDiffContent, settleLargeFileConfirmation, toggleImageCompareMode, toggleImageDisplayMode, switchRepo])
 
-  useSubpageEscape({ isOpen, onEscape: onClose })
+  // ESC settles an open large-file confirmation before it can close the
+  // whole viewer (unified modal dismiss; useSubpageEscape is capture-phase
+  // so the dialog cannot preempt it with its own listener).
+  const handleSubpageEscape = useCallback(() => {
+    if (largeFileConfirmRef.current) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_MODAL_ESC_CANCELLED, { dialog: 'git-history-large-file' })
+      settleLargeFileConfirmation(false)
+      return
+    }
+    onClose()
+  }, [onClose, settleLargeFileConfirmation])
+
+  useSubpageEscape({ isOpen, onEscape: handleSubpageEscape })
 
   const handleCommitClick = useCallback((commit: GitCommitInfo, event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault()

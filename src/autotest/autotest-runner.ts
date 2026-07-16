@@ -74,6 +74,7 @@ import { testProjectEditorFileMemory } from './test-project-editor-file-memory'
 import { testProjectEditorMarkdownSessionRestore } from './test-project-editor-markdown-session-restore'
 import { testMarkdownPreviewLatency } from './test-markdown-preview-latency'
 import { testChangeLog } from './test-change-log'
+import { testModalDismiss } from './test-modal-dismiss'
 import { testFeedback } from './test-feedback'
 import { testFeedbackUi } from './test-feedback-ui'
 import { testFeedbackPersistenceSeed, testFeedbackPersistenceVerify } from './test-feedback-persistence'
@@ -430,6 +431,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.878:begin')
       const results = await testChangeLog(ctx)
       collectSuiteResults('ChangeLog', results)
+      await sleep(300)
+    }
+
+    if (!ctx.cancelled() && shouldRun('modal-dismiss', { explicitOnly: true })) {
+      log('phase0.879:begin')
+      const results = await testModalDismiss(ctx)
+      collectSuiteResults('ModalDismiss', results)
       await sleep(300)
     }
 

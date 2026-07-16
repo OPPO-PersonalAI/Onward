@@ -123,10 +123,27 @@ export async function testChangeLog(ctx: AutotestContext): Promise<TestResult[]>
     record('CL-08-reopen-after-close', reopenedForOverlay, {
       open: getApi()?.isOpen() ?? false
     })
-    const closedByOverlay = reopenedForOverlay
-      ? await closeChangeLog('change-log-close-overlay', () => getApi()?.clickOverlay() ?? false)
-      : false
-    record('CL-09-overlay-closes-modal', closedByOverlay, {
+    // Unified modal dismiss policy: backdrop clicks are inert — the modal
+    // must STAY open after an overlay click (was CL-09-overlay-closes-modal
+    // before the 2026-07-16 policy change).
+    let overlayKeptOpen = false
+    if (reopenedForOverlay) {
+      const overlayClicked = getApi()?.clickOverlay() ?? false
+      if (overlayClicked) {
+        // Give a would-be close handler a beat to run, then require open.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        overlayKeptOpen = getApi()?.isOpen() ?? false
+      }
+    }
+    record('CL-09-overlay-click-keeps-modal-open', overlayKeptOpen, {
+      openAfterOverlayClick: getApi()?.isOpen() ?? false
+    })
+    if (cancelled()) {
+      return results
+    }
+    // Close via the explicit button before the ESC scenario re-opens it.
+    const closedAfterOverlay = await closeChangeLog('change-log-close-after-overlay', () => getApi()?.clickCloseButton() ?? false)
+    record('CL-09b-close-button-still-works-after-overlay-click', closedAfterOverlay, {
       openAfterClose: getApi()?.isOpen() ?? false
     })
     if (cancelled()) {
@@ -145,7 +162,7 @@ export async function testChangeLog(ctx: AutotestContext): Promise<TestResult[]>
     })
   } finally {
     if (getApi()?.isOpen()) {
-      await closeChangeLog('change-log-cleanup-close', () => getApi()?.clickOverlay() ?? false).catch(() => {})
+      await closeChangeLog('change-log-cleanup-close', () => getApi()?.clickCloseButton() ?? false).catch(() => {})
     }
   }
 

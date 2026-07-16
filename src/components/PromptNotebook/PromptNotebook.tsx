@@ -14,6 +14,7 @@ import { perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { decideDraftPreservation } from './prompt-draft-preservation'
 import type { ScheduleNotification } from '../../hooks/useScheduleEngine'
+import { useModalEscape, useModalOpenRegistration } from '../../hooks/useModalEscape'
 import { PromptSearch } from './PromptSearch'
 import { PromptList } from './PromptList'
 import { PromptSender } from './PromptSender'
@@ -579,7 +580,15 @@ export const PromptNotebook = memo(function PromptNotebook({
         if (!s) return false
         onDeleteSchedule(promptId)
         return true
-      }
+      },
+      openSendHistory: (promptId: string) => {
+        const prompt = prompts.find((p) => p.id === promptId)
+        if (!prompt) return false
+        setSendHistoryPrompt(prompt)
+        return true
+      },
+      // DOM-derived so the api effect needs no dependency on the state.
+      isSendHistoryOpen: () => document.querySelector('.prompt-send-history-overlay') !== null
     }
     ;(window as any).__onwardPromptNotebookDebug = api
     return () => {
@@ -1227,6 +1236,16 @@ export const PromptNotebook = memo(function PromptNotebook({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [retentionConfirm.isOpen, handleCancelRetention, handleConfirmRetention, canConfirmRetention])
 
+  // Send-history panel: ESC closes (unified modal dismiss)
+  const closeSendHistory = useCallback(() => setSendHistoryPrompt(null), [])
+  useModalEscape(!hidden && sendHistoryPrompt !== null, closeSendHistory, 'prompt-send-history')
+
+  // The three confirms keep their own key handling (y/n/Enter + Escape)
+  // but must still suppress subpage-host capture-phase Escape while open.
+  useModalOpenRegistration(!hidden && deleteConfirm.isOpen)
+  useModalOpenRegistration(!hidden && importConfirm.isOpen)
+  useModalOpenRegistration(retentionConfirm.isOpen)
+
   return (
     <>
       <div className={`prompt-notebook${hidden ? ' prompt-notebook-hidden' : ''}`} style={{ width }}>
@@ -1337,7 +1356,7 @@ export const PromptNotebook = memo(function PromptNotebook({
 
       {/* Delete confirmation dialog */}
       {!hidden && deleteConfirm.isOpen && (
-        <div className="confirm-dialog-overlay" onClick={handleCancelDelete}>
+        <div className="confirm-dialog-overlay">
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="confirm-dialog-title">{t('promptNotebook.deleteTitle')}</div>
             <div className="confirm-dialog-message">
@@ -1357,7 +1376,7 @@ export const PromptNotebook = memo(function PromptNotebook({
 
       {/* Import confirmation dialog */}
       {!hidden && importConfirm.isOpen && (
-        <div className="confirm-dialog-overlay" onClick={handleCancelImport}>
+        <div className="confirm-dialog-overlay">
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="confirm-dialog-title">{t('promptNotebook.importConfirm.title')}</div>
             <div className="confirm-dialog-message">
@@ -1399,7 +1418,7 @@ export const PromptNotebook = memo(function PromptNotebook({
       )}
 
       {retentionConfirm.isOpen && (
-        <div className="confirm-dialog-overlay" onClick={handleCancelRetention}>
+        <div className="confirm-dialog-overlay">
           <div className="confirm-dialog prompt-retention-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="confirm-dialog-title">
               {retentionConfirm.mode === 'auto' ? t('promptNotebook.retention.autoTitle') : t('promptNotebook.retention.manualTitle')}
@@ -1474,7 +1493,7 @@ export const PromptNotebook = memo(function PromptNotebook({
 
       {/* Send record panel */}
       {!hidden && sendHistoryPrompt && (
-        <div className="prompt-send-history-overlay" onClick={() => setSendHistoryPrompt(null)}>
+        <div className="prompt-send-history-overlay">
           <div className="prompt-send-history-panel" onClick={(e) => e.stopPropagation()}>
             <div className="prompt-send-history-header">
               <span className="prompt-send-history-title">

@@ -5434,7 +5434,19 @@ export function GitDiffViewer({
     }
   }, [captureDiffView, confirmCloseWithDraft, detachDiffEditor, handleOpenHistory, persistCurrentDiffSplitRatio, terminalId])
 
-  useSubpageEscape({ isOpen, onEscape: requestClose })
+  // ESC settles an open large-file confirmation before it can close the
+  // whole viewer (unified modal dismiss; useSubpageEscape is capture-phase
+  // so the dialog cannot preempt it with its own listener).
+  const handleSubpageEscape = useCallback(() => {
+    if (largeFileConfirmRef.current) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_MODAL_ESC_CANCELLED, { dialog: 'git-diff-large-file' })
+      settleLargeFileConfirmation(false)
+      return
+    }
+    requestClose()
+  }, [requestClose, settleLargeFileConfirmation])
+
+  useSubpageEscape({ isOpen, onEscape: handleSubpageEscape })
   const lineSelectionInfo = useMemo<LineSelectionInfo | null>(
     () => resolveLineSelectionInfo(selectedLineRange, t('gitDiff.line.invalid.crossSide')),
     [selectedLineRange, t]
@@ -7572,7 +7584,6 @@ export function GitDiffViewer({
   return (
     <div
       className={`${overlayClassName} ${isOpen ? 'is-open' : 'is-hidden'}`}
-      onClick={isPanel ? undefined : requestClose}
       aria-hidden={!isOpen}
     >
       <div

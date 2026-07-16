@@ -6,6 +6,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { TabItem } from './TabItem'
 import { useAppState } from '../../hooks/useAppState'
+import { useModalEscape } from '../../hooks/useModalEscape'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
@@ -160,9 +161,11 @@ export function TabBar() {
     setConfirmDialog({ isOpen: false, tabId: '', tabName: '' })
   }
 
-  const handleCancelClose = () => {
+  const handleCancelClose = useCallback(() => {
     setConfirmDialog({ isOpen: false, tabId: '', tabName: '' })
-  }
+  }, [])
+
+  useModalEscape(confirmDialog.isOpen, handleCancelClose, 'tab-close-confirm')
 
   return (
     <>
@@ -274,7 +277,7 @@ export function TabBar() {
 
       {/* Confirm to close dialog */}
       {confirmDialog.isOpen && (
-        <div className="confirm-dialog-overlay" onClick={handleCancelClose}>
+        <div className="confirm-dialog-overlay">
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="confirm-dialog-title">{t('tabBar.confirmClose.title', { tabName: confirmDialog.tabName })}</div>
             <div className="confirm-dialog-message">

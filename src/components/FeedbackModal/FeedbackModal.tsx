@@ -346,7 +346,6 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
   return (
     <div
       className={`feedback-modal-overlay ${isOpen ? 'is-open' : 'is-hidden'}`}
-      onClick={onClose}
       data-testid="feedback-modal-overlay"
       data-feedback-open={isOpen ? 'true' : 'false'}
       aria-hidden={!isOpen}

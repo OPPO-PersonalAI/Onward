@@ -65,6 +65,22 @@ export async function testGitLargeFileConfirmation(ctx: AutotestContext): Promis
     }, 12000)
   }
 
+  // Unified modal dismiss (2026-07-16) helpers: backdrop clicks on the
+  // confirm dialog are inert; ESC settles the dialog without closing the
+  // hosting viewer. Exercised while the prompt is armed and BEFORE any
+  // confirm (a confirmed file does not re-prompt within the session).
+  const clickLargeFileBackdrop = () => {
+    const overlay = document.querySelector('.large-file-confirm-overlay')
+    if (!overlay) return false
+    overlay.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    return true
+  }
+  const pressEscape = () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  }
+  const settleDelay = () => new Promise((resolve) => setTimeout(resolve, 300))
+
   const manifest = await loadManifest(window.electronAPI.debug.autotestFixtureExtra)
   record('GLF-00-fixture-loaded', Boolean(manifest), {
     extra: window.electronAPI.debug.autotestFixtureExtra ?? null
@@ -137,6 +153,38 @@ export async function testGitLargeFileConfirmation(ctx: AutotestContext): Promis
     prompt: window.__onwardGitDiffDebug?.getLargeFileConfirmState?.() ?? null
   })
   if (!diffPromptAgain || cancelled()) return results
+
+  // GLF-16/17 — unified modal dismiss on the armed (pre-confirm) prompt.
+  const diffBackdropClicked = clickLargeFileBackdrop()
+  await settleDelay()
+  const diffPromptStillVisible = window.__onwardGitDiffDebug?.getLargeFileConfirmState?.().visible === true
+  record('GLF-16-diff-backdrop-click-keeps-prompt', diffBackdropClicked && diffPromptStillVisible, {
+    backdropClicked: diffBackdropClicked,
+    prompt: window.__onwardGitDiffDebug?.getLargeFileConfirmState?.() ?? null
+  })
+  if (cancelled()) return results
+
+  pressEscape()
+  const diffEscSettled = await waitFor('glf-diff-esc-cancels-prompt', () => {
+    return window.__onwardGitDiffDebug?.getLargeFileConfirmState?.().visible !== true
+  }, 5000)
+  const diffStillOpen = window.__onwardGitDiffDebug?.isOpen?.() === true
+  record('GLF-17-diff-escape-cancels-prompt-keeps-viewer', diffEscSettled && diffStillOpen, {
+    escSettled: diffEscSettled,
+    viewerOpen: diffStillOpen
+  })
+  if (cancelled()) return results
+
+  // Re-arm the prompt for the confirm path below (same refresh path GLF-05
+  // just proved).
+  void window.__onwardGitDiffDebug?.refreshChanges?.()
+  const diffPromptForConfirm = await waitFor('glf-diff-prompt-visible-for-confirm', () => {
+    return window.__onwardGitDiffDebug?.getLargeFileConfirmState?.().visible === true
+  }, 8000)
+  record('GLF-05b-diff-prompt-rearms-after-esc-cancel', diffPromptForConfirm, {
+    prompt: window.__onwardGitDiffDebug?.getLargeFileConfirmState?.() ?? null
+  })
+  if (!diffPromptForConfirm || cancelled()) return results
 
   window.__onwardGitDiffDebug?.confirmLargeFile?.()
   const diffDisplayed = await waitFor('glf-diff-displayed-after-confirm', () => {
@@ -219,6 +267,38 @@ export async function testGitLargeFileConfirmation(ctx: AutotestContext): Promis
     prompt: window.__onwardGitHistoryDebug?.getLargeFileConfirmState?.() ?? null
   })
   if (!historyPromptAgain || cancelled()) return results
+
+  // GLF-14/15 — unified modal dismiss on the armed (pre-confirm) prompt.
+  const historyBackdropClicked = clickLargeFileBackdrop()
+  await settleDelay()
+  const historyPromptStillVisible = window.__onwardGitHistoryDebug?.getLargeFileConfirmState?.().visible === true
+  record('GLF-14-history-backdrop-click-keeps-prompt', historyBackdropClicked && historyPromptStillVisible, {
+    backdropClicked: historyBackdropClicked,
+    prompt: window.__onwardGitHistoryDebug?.getLargeFileConfirmState?.() ?? null
+  })
+  if (cancelled()) return results
+
+  pressEscape()
+  const historyEscSettled = await waitFor('glf-history-esc-cancels-prompt', () => {
+    return window.__onwardGitHistoryDebug?.getLargeFileConfirmState?.().visible !== true
+  }, 5000)
+  const historyStillOpen = window.__onwardGitHistoryDebug?.isOpen?.() === true
+  record('GLF-15-history-escape-cancels-prompt-keeps-viewer', historyEscSettled && historyStillOpen, {
+    escSettled: historyEscSettled,
+    viewerOpen: historyStillOpen
+  })
+  if (cancelled()) return results
+
+  // Re-arm the prompt for the confirm path below (same reload path GLF-11
+  // just proved).
+  window.__onwardGitHistoryDebug?.reloadSelectedFileContent?.()
+  const historyPromptForConfirm = await waitFor('glf-history-prompt-visible-for-confirm', () => {
+    return window.__onwardGitHistoryDebug?.getLargeFileConfirmState?.().visible === true
+  }, 8000)
+  record('GLF-11b-history-prompt-rearms-after-esc-cancel', historyPromptForConfirm, {
+    prompt: window.__onwardGitHistoryDebug?.getLargeFileConfirmState?.() ?? null
+  })
+  if (!historyPromptForConfirm || cancelled()) return results
 
   window.__onwardGitHistoryDebug?.confirmLargeFile?.()
   const historyConfirmed = await waitFor('glf-history-confirmed-content', () => {

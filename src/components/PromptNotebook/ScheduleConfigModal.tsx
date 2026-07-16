@@ -9,6 +9,7 @@ import type { PromptSchedule, ScheduleType } from '../../types/tab.d.ts'
 import type { TerminalInfo } from '../../types/prompt'
 import { computeNextExecution } from '../../utils/schedule'
 import { useI18n } from '../../i18n/useI18n'
+import { useModalOpenRegistration } from '../../hooks/useModalEscape'
 import './ScheduleConfigModal.css'
 
 interface ScheduleConfigModalProps {
@@ -187,6 +188,10 @@ export function ScheduleConfigModal({
     onConfirm(base)
   }, [validationError, prompt.id, tabId, selectedTerminalIds, scheduleType, absoluteTime, relativeMinutes, intervalValue, intervalUnit, recurStartTime, onConfirm])
 
+  // Suppress subpage-host capture-phase Escape while this modal is open
+  // (its own window keydown below keeps handling Escape + Enter).
+  useModalOpenRegistration(true)
+
   // shortcut
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -205,7 +210,7 @@ export function ScheduleConfigModal({
   const displayText = prompt.title || prompt.content.slice(0, 80)
 
   return (
-    <div className="confirm-dialog-overlay" onClick={onCancel}>
+    <div className="confirm-dialog-overlay">
       <div className="confirm-dialog schedule-modal" onClick={(e) => e.stopPropagation()}>
         <div className="confirm-dialog-title">
           {isEditing ? t('scheduleModal.title.edit') : t('scheduleModal.title.create')}

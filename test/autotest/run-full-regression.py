@@ -179,6 +179,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-markdown-preview-cpu-editor-autotest.sh",
     "test/autotest/run-markdown-preview-latency-autotest.sh",
     "test/autotest/run-mermaid-panzoom-autotest.sh",
+    "test/autotest/run-modal-dismiss-autotest.sh",
     "test/autotest/run-pdf-epub-diff-autotest.sh",
     "test/autotest/run-pdf-epub-full-autotest.sh",
     "test/autotest/run-pdf-epub-preview-autotest.sh",
@@ -318,6 +319,13 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # GitDiff click-latency suite measures multi-trial first-click vs
     # cache-warm latencies; needs more headroom than 180s allows.
     "test/autotest/run-git-diff-click-latency-autotest.sh": 300,
+    # Large-file confirmation suite grew GLF-14..17 (unified modal dismiss:
+    # backdrop-inert + ESC-settles checks across BOTH viewers, incl. a diff
+    # reopen + refresh re-arm). The runner's own in-app watchdog is 240s
+    # (GLF_WATCHDOG_SEC); 280 keeps the orchestrator fence above it so a
+    # wedged app is killed by the in-app fence first (clear signal), same
+    # pattern as the GDS family. Measured ~90-140s on a healthy host.
+    "test/autotest/run-git-large-file-confirmation-autotest.sh": 280,
     # Heavy multi-commit git fixture (~8 sequential git spawns, each EDR-taxed 1.3-12.9s) +
     # 8 ref-decoration reopen/verify steps. The 90s->150s internal fixture-ready ceiling can
     # need >180s total under peak full-run EDR load; 240s < 300s (NOT over-budget backlog),
