@@ -32,7 +32,10 @@ import {
   WORKER_TID
 } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
-import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
+import {
+  gitDiffCacheInvalidator,
+  normaliseGitDiffInvalidationTargets
+} from './git-diff-cache-invalidator'
 import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
 import { shouldRespawnGitStateMirrorWorker } from './git-state-mirror-teardown'
 import type {
@@ -461,7 +464,7 @@ class GitStateMirrorRouter {
         // GitDiffViewer refetch chain that re-runs `git status`,
         // because the worker's `computeDelta` step short-circuits when
         // git status produces the same answer twice in a row.
-        for (const invalidateCwd of new Set([msg.cwd, msg.state.repoRoot].filter(Boolean) as string[])) {
+        for (const invalidateCwd of normaliseGitDiffInvalidationTargets([msg.cwd, msg.state.repoRoot])) {
           gitDiffCacheInvalidator.invalidate(invalidateCwd, 'mirror')
         }
         return

@@ -27,6 +27,21 @@ export type GitDiffInvalidationReason =
   | 'mirror'
 
 /**
+ * Normalize invalidation targets before fan-out so equivalent path spellings
+ * produce one listener notification. Distinct directories remain distinct.
+ */
+export function normaliseGitDiffInvalidationTargets(
+  targets: Iterable<string | null | undefined>
+): string[] {
+  const normalisedTargets = new Set<string>()
+  for (const target of targets) {
+    if (!target) continue
+    normalisedTargets.add(resolve(target))
+  }
+  return [...normalisedTargets]
+}
+
+/**
  * Optional scope refinement carried with an invalidation. When `files` is a
  * non-empty list of repo-relative paths, the caller asserts the mutation
  * touched ONLY those files (single-file stage/discard/save), so downstream

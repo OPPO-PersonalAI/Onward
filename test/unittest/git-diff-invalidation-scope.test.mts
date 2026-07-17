@@ -17,10 +17,12 @@
  */
 
 import assert from 'node:assert/strict'
+import { resolve } from 'node:path'
 import { test } from 'node:test'
 import { buildCacheKey, cacheKeyMatchesFiles } from '../../electron/main/git-diff-content-cache-state.ts'
 import {
   gitDiffCacheInvalidator,
+  normaliseGitDiffInvalidationTargets,
   type GitDiffInvalidationDetail,
   type GitDiffInvalidationReason
 } from '../../electron/main/git-diff-cache-invalidator.ts'
@@ -67,4 +69,27 @@ test('IVS-04 invalidator passes the files detail through to listeners verbatim',
   assert.equal(seen[1].detail, undefined)
   assert.equal(seen[2].detail, undefined)
   assert.equal(seen[2].reason, 'mirror')
+})
+
+test('IVS-05 equivalent native path spellings produce one invalidation target', () => {
+  const nativePath = resolve('test', 'autotest', 'fixtures', 'ivs-repo')
+  const equivalentPath = process.platform === 'win32'
+    ? nativePath.replace(/\\/g, '/')
+    : `${nativePath}/.`
+
+  assert.notEqual(equivalentPath, nativePath)
+  assert.deepEqual(normaliseGitDiffInvalidationTargets([nativePath, equivalentPath]), [nativePath])
+})
+
+test('IVS-06 a repository subdirectory and root remain distinct targets', () => {
+  const repoRoot = resolve('test', 'autotest', 'fixtures', 'ivs-repo')
+  const nestedCwd = resolve(repoRoot, 'nested')
+
+  assert.deepEqual(normaliseGitDiffInvalidationTargets([nestedCwd, repoRoot]), [nestedCwd, repoRoot])
+})
+
+test('IVS-07 empty and duplicate targets are removed without losing cwd', () => {
+  const cwd = resolve('test', 'autotest', 'fixtures', 'ivs-repo')
+
+  assert.deepEqual(normaliseGitDiffInvalidationTargets([null, undefined, '', cwd, cwd]), [cwd])
 })

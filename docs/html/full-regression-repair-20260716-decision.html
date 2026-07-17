@@ -1,0 +1,301 @@
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>全回归修复决策：Git Diff 重复对账 / Full Regression Repair Decision</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d14;
+      --panel: #111824;
+      --panel-2: #172131;
+      --line: #2a3a51;
+      --text: #e8eef8;
+      --muted: #9aacbf;
+      --blue: #62a8ff;
+      --cyan: #55d8d0;
+      --green: #6ee7a5;
+      --yellow: #ffd166;
+      --red: #ff7d8d;
+      --violet: #b69cff;
+      --toc-width: 280px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: auto; background: var(--bg); }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 85% 5%, rgba(98, 168, 255, .12), transparent 30rem),
+        radial-gradient(circle at 65% 70%, rgba(85, 216, 208, .07), transparent 34rem),
+        var(--bg);
+      font: 15px/1.68 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--blue); }
+    code {
+      padding: .12rem .35rem;
+      border: 1px solid #31435e;
+      border-radius: 5px;
+      color: #c9e2ff;
+      background: #0a111c;
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+    .en { color: var(--muted); font-size: .9em; }
+    .toc {
+      position: fixed;
+      inset: 0 auto 0 0;
+      width: var(--toc-width);
+      padding: 30px 22px;
+      border-right: 1px solid var(--line);
+      background: rgba(9, 13, 20, .96);
+      overflow-y: auto;
+      z-index: 5;
+    }
+    .toc .eyebrow { color: var(--cyan); letter-spacing: .12em; text-transform: uppercase; font-size: 11px; }
+    .toc h1 { margin: 8px 0 22px; font-size: 19px; line-height: 1.35; }
+    .toc nav { display: grid; gap: 6px; }
+    .toc a {
+      display: block;
+      padding: 8px 10px;
+      border-left: 2px solid transparent;
+      border-radius: 0 7px 7px 0;
+      color: var(--muted);
+      text-decoration: none;
+    }
+    .toc a:hover, .toc a.active { color: var(--text); border-left-color: var(--cyan); background: #131d2a; }
+    .toc .meta { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    main { margin-left: var(--toc-width); width: min(1180px, calc(100% - var(--toc-width))); padding: 44px 44px 90px; }
+    section { scroll-margin-top: 20px; margin: 0 0 48px; }
+    .hero {
+      padding: 30px;
+      border: 1px solid #365276;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(98,168,255,.16), rgba(17,24,36,.9) 48%, rgba(85,216,208,.08));
+      box-shadow: 0 22px 70px rgba(0,0,0,.28);
+    }
+    .hero h2 { margin: 8px 0 12px; font-size: clamp(26px, 4vw, 44px); line-height: 1.15; }
+    .hero p { max-width: 900px; color: #c5d2e2; font-size: 17px; }
+    h2 { margin: 0 0 18px; font-size: 27px; }
+    h3 { margin: 0 0 10px; font-size: 18px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 0; }
+    .badge { padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: #0d1521; font-size: 12px; }
+    .badge.bad { color: #ffd2d7; border-color: #7d3945; background: #2a151c; }
+    .badge.good { color: #c7ffe0; border-color: #347454; background: #11271b; }
+    .badge.warn { color: #ffe9ae; border-color: #776135; background: #2a2414; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+    .card {
+      grid-column: span 6;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(23,33,49,.92), rgba(14,21,32,.92));
+    }
+    .card.third { grid-column: span 4; }
+    .card.full { grid-column: 1 / -1; }
+    .metric { font-size: 32px; font-weight: 750; color: var(--yellow); }
+    .muted { color: var(--muted); }
+    .callout { padding: 16px 18px; border-left: 4px solid var(--blue); border-radius: 8px; background: #101b2a; }
+    .callout.warn { border-left-color: var(--yellow); background: #231f12; }
+    .callout.good { border-left-color: var(--green); background: #11241a; }
+    .flow-wrap { overflow-x: auto; padding: 10px 0; }
+    svg { display: block; min-width: 900px; width: 100%; height: auto; }
+    .svg-title { fill: var(--text); font: 700 16px system-ui, sans-serif; }
+    .svg-text { fill: #dce7f4; font: 13px system-ui, sans-serif; }
+    .svg-small { fill: var(--muted); font: 11px system-ui, sans-serif; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #0e1622; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: #dbe9fb; background: #182539; }
+    tr:last-child td { border-bottom: 0; }
+    .recommended td { background: rgba(110, 231, 165, .07); }
+    .yes { color: var(--green); font-weight: 700; }
+    .no { color: var(--red); font-weight: 700; }
+    pre {
+      margin: 12px 0 0;
+      padding: 16px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #080e17;
+      color: #cde4ff;
+      line-height: 1.55;
+    }
+    ul, ol { padding-left: 22px; }
+    li + li { margin-top: 7px; }
+    .decision {
+      padding: 24px;
+      border: 1px solid #3d7a5a;
+      border-radius: 14px;
+      background: linear-gradient(135deg, rgba(110,231,165,.12), rgba(17,36,26,.88));
+    }
+    @media (max-width: 880px) {
+      .toc { position: static; width: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .toc nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      main { margin-left: 0; width: 100%; padding: 28px 18px 70px; }
+      .card, .card.third { grid-column: 1 / -1; }
+    }
+  </style>
+</head>
+<body>
+  <aside class="toc" aria-label="目录 / Table of contents">
+    <div class="eyebrow">Repair decision · 2026-07-16</div>
+    <h1>Git Diff 重复对账<br><span class="en">Duplicate reconciliation</span></h1>
+    <nav>
+      <a href="#summary">1. 结论 / Summary</a>
+      <a href="#evidence">2. 证据 / Evidence</a>
+      <a href="#current">3. 当前链路 / Current</a>
+      <a href="#proposal">4. 建议链路 / Proposed</a>
+      <a href="#tradeoffs">5. 方案权衡 / Trade-offs</a>
+      <a href="#scope">6. 修改与验证 / Scope</a>
+      <a href="#decision">7. 决策结果 / Decision</a>
+    </nav>
+    <div class="meta">运行：<code>20260716T185330</code><br>状态：已批准并验证<br><span class="en">Status: approved and verified</span></div>
+  </aside>
+
+  <main>
+    <section id="summary" class="hero">
+      <div class="eyebrow">Cluster 1 · Bucket 3 · Product drift</div>
+      <h2>同一个 Windows 仓库路径，在“规范化之前”被当成两个目标</h2>
+      <p><span class="en">The same physical Windows repository is treated as two invalidation targets because raw strings are deduplicated before path normalization.</span></p>
+      <p>建议只调整 <code>GitStateMirrorRouter</code> 的目标生成顺序：先用已有的路径解析规则统一 <code>D:\repo</code> 与 <code>D:/repo</code>，再建立 <code>Set</code>。不改变 cache scope、TTL、mirror debounce、刷新优先级或 watcher authority。</p>
+      <div class="badges">
+        <span class="badge bad">现状：2 次 force reload</span>
+        <span class="badge good">目标：1 次 authoritative reconcile</span>
+        <span class="badge warn">策略项：invalidation fan-out</span>
+        <span class="badge">跨平台：Windows / macOS / Linux</span>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <h2>2. 失败证据 <span class="en">Failure evidence</span></h2>
+      <div class="grid">
+        <article class="card third"><h3>功能结果</h3><div class="metric">PASS</div><p><code>betaRestored=true</code><br><code>betaRowGone=true</code></p></article>
+        <article class="card third"><h3>对账次数</h3><div class="metric">2</div><p>期望 <code>0..1</code><br><span class="en">Observed loadDelta=2</span></p></article>
+        <article class="card third"><h3>复现稳定性</h3><div class="metric">2 / 2</div><p>首轮失败；隔离重试仍失败<br><span class="en">Confirmed deterministic failure</span></p></article>
+        <article class="card full">
+          <h3>关键链路</h3>
+          <ul>
+            <li><code>msg.cwd = D:\...\repo</code>：router 的 <code>realpathSync</code> 产物。</li>
+            <li><code>msg.state.repoRoot = D:/.../repo</code>：worker 的 Git root 规范为正斜杠。</li>
+            <li>原始字符串上的 <code>new Set</code> 保留两个值；它们后来分别被 <code>path.resolve</code> 成同一路径，但 listener 已经触发两轮。</li>
+            <li>renderer 记录 <code>token 6 force:true</code>，第二个请求进入 in-flight queue，随后执行 <code>token 7 force:true</code>。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="current">
+      <h2>3. 当前策略 <span class="en">Current strategy</span></h2>
+      <div class="callout warn"><strong>问题不在缓存失效粒度。</strong> file-scoped invalidation 已经正确；重复发生在 mirror update 的 fan-out 目标去重顺序。</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1040 330" role="img" aria-label="当前路径在规范化前去重，导致两次失效">
+          <defs><marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#ff7d8d"/></marker></defs>
+          <text x="20" y="28" class="svg-title">Current · raw strings first</text>
+          <rect x="20" y="60" width="210" height="92" rx="12" fill="#172131" stroke="#4d6482"/>
+          <text x="38" y="91" class="svg-text">Mirror update</text><text x="38" y="116" class="svg-small">cwd: D:\repo</text><text x="38" y="136" class="svg-small">repoRoot: D:/repo</text>
+          <path d="M230 106 H310" stroke="#ff7d8d" stroke-width="3" marker-end="url(#arrow-red)"/>
+          <rect x="315" y="60" width="205" height="92" rx="12" fill="#2a151c" stroke="#a94b5b"/>
+          <text x="335" y="91" class="svg-text">new Set(raw)</text><text x="335" y="116" class="svg-small">2 string identities</text><text x="335" y="136" class="svg-small">两个原始字符串</text>
+          <path d="M520 106 H600" stroke="#ff7d8d" stroke-width="3" marker-end="url(#arrow-red)"/>
+          <rect x="605" y="42" width="190" height="62" rx="12" fill="#2a151c" stroke="#a94b5b"/><text x="625" y="78" class="svg-text">invalidate #1</text>
+          <rect x="605" y="122" width="190" height="62" rx="12" fill="#2a151c" stroke="#a94b5b"/><text x="625" y="158" class="svg-text">invalidate #2</text>
+          <path d="M795 73 H875" stroke="#ff7d8d" stroke-width="3" marker-end="url(#arrow-red)"/><path d="M795 153 H875" stroke="#ff7d8d" stroke-width="3" marker-end="url(#arrow-red)"/>
+          <rect x="880" y="60" width="140" height="124" rx="12" fill="#2a151c" stroke="#a94b5b"/>
+          <text x="900" y="94" class="svg-text">Renderer</text><text x="900" y="120" class="svg-small">force load #1</text><text x="900" y="142" class="svg-small">queued #2</text><text x="900" y="164" class="svg-small">visible extra work</text>
+          <rect x="315" y="230" width="500" height="66" rx="10" fill="#111824" stroke="#52677f"/>
+          <text x="335" y="258" class="svg-text">Too late: invalidator resolves both paths after two calls already exist</text>
+          <text x="335" y="280" class="svg-small">规范化发生得太晚，无法撤回已经发出的两轮 listener fan-out</text>
+        </svg>
+      </div>
+    </section>
+
+    <section id="proposal">
+      <h2>4. 建议策略 <span class="en">Proposed strategy</span></h2>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1040 260" role="img" aria-label="建议先解析路径再去重，只触发一次失效">
+          <defs><marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#6ee7a5"/></marker></defs>
+          <text x="20" y="28" class="svg-title">Proposed · normalize identity first</text>
+          <rect x="20" y="65" width="210" height="92" rx="12" fill="#172131" stroke="#4d6482"/>
+          <text x="38" y="96" class="svg-text">Mirror update</text><text x="38" y="121" class="svg-small">D:\repo + D:/repo</text>
+          <path d="M230 111 H310" stroke="#6ee7a5" stroke-width="3" marker-end="url(#arrow-green)"/>
+          <rect x="315" y="65" width="210" height="92" rx="12" fill="#11271b" stroke="#4b9c70"/>
+          <text x="335" y="96" class="svg-text">resolvePath(each)</text><text x="335" y="121" class="svg-small">both → D:\repo</text><text x="335" y="141" class="svg-small">先统一逻辑身份</text>
+          <path d="M525 111 H605" stroke="#6ee7a5" stroke-width="3" marker-end="url(#arrow-green)"/>
+          <rect x="610" y="65" width="190" height="92" rx="12" fill="#11271b" stroke="#4b9c70"/>
+          <text x="630" y="96" class="svg-text">new Set(normalized)</text><text x="630" y="121" class="svg-small">1 logical target</text><text x="630" y="141" class="svg-small">一个目标</text>
+          <path d="M800 111 H880" stroke="#6ee7a5" stroke-width="3" marker-end="url(#arrow-green)"/>
+          <rect x="885" y="65" width="135" height="92" rx="12" fill="#11271b" stroke="#4b9c70"/>
+          <text x="905" y="99" class="svg-text">invalidate ×1</text><text x="905" y="126" class="svg-small">reconcile ×1</text>
+          <text x="20" y="218" class="svg-small">Distinct cwd/subdirectory and repoRoot values remain distinct after resolve; only equivalent spellings collapse.</text>
+          <text x="20" y="239" class="svg-small">仓库子目录与仓库根目录仍会保留为两个目标；只合并指向同一路径的不同写法。</text>
+        </svg>
+      </div>
+      <pre><code>const targets = normaliseGitDiffInvalidationTargets([
+  msg.cwd,
+  msg.state.repoRoot
+])
+for (const target of targets) gitDiffCacheInvalidator.invalidate(target, 'mirror')</code></pre>
+    </section>
+
+    <section id="tradeoffs">
+      <h2>5. 方案权衡 <span class="en">Trade-offs</span></h2>
+      <table>
+        <thead><tr><th>方案</th><th>正确性</th><th>风险</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr class="recommended"><td><strong>A · router 先规范化，再去重</strong><br><span class="en">Normalize before dedupe</span></td><td>router 调用可由 Node unit test 验证的纯函数；只合并等价路径，保留真实不同目标</td><td>低；纯身份修正，不改变时间或缓存策略</td><td class="yes">建议</td></tr>
+          <tr><td>B · invalidator 加时间窗口去重<br><span class="en">Temporal debounce</span></td><td>可能把两次真实 mirror update 合并</td><td>高；引入时间语义、TTL 与新鲜度风险</td><td class="no">不建议</td></tr>
+          <tr><td>C · renderer 丢弃 queued force load<br><span class="en">Drop queued reload</span></td><td>可能漏掉首轮读取后到达的新变化</td><td>高；改变并发与 freshness authority</td><td class="no">不建议</td></tr>
+        </tbody>
+      </table>
+      <div class="callout good" style="margin-top:16px"><strong>明确不改：</strong>invalidation scope、缓存层次、TTL、eviction、prewarm、mirror debounce、load queue、线程模型。</div>
+    </section>
+
+    <section id="scope">
+      <h2>6. 修改与验证范围 <span class="en">Change and verification scope</span></h2>
+      <div class="grid">
+        <article class="card">
+          <h3>生产代码 <span class="en">Production</span></h3>
+          <p><code>electron/main/git-state-mirror-router.ts</code><br><code>electron/main/git-diff-cache-invalidator.ts</code></p>
+          <p>在无 Electron 依赖的 invalidator 模块导出纯路径去重函数；router 用它生成 mirror invalidation targets。现有单目标 <code>invalidate()</code> 语义不变。</p>
+        </article>
+        <article class="card">
+          <h3>测试 <span class="en">Tests</span></h3>
+          <p>现有 GRS-04 断言不放宽、不删除。</p>
+          <p>扩充 <code>test/unittest/git-diff-invalidation-scope.test.mts</code>，覆盖 Windows 分隔符等价路径与“子目录仍不同”决策表。</p>
+        </article>
+        <article class="card full">
+          <h3>验证顺序</h3>
+          <ol>
+            <li>运行相关 unit test，确认路径身份决策。</li>
+            <li>通过编排器执行 <code>py test/autotest/run-full-regression.py --build --only run-git-diff-revert-scope</code>。</li>
+            <li>本簇通过后更新 <code>repair-progress.json</code>，再单独提交 Prompt IME 修复簇的计划。</li>
+            <li>所有簇分别通过后，才运行最终完整回归；Prompt IME 属 timing flake，因此最终需要 <code>--repeat 2</code> 连续绿色。</li>
+          </ol>
+        </article>
+      </div>
+    </section>
+
+    <section id="decision" class="decision">
+      <h2>7. 决策结果 <span class="en">Decision outcome</span></h2>
+      <p><strong>方案 A 已批准并实施：</strong>router 对每个候选路径先执行 <code>resolvePath</code>，再用 <code>Set</code> 去重；同时补充 unit 决策表，保持现有 GRS autotest 契约不变。</p>
+      <p class="muted">定向构建与 GRS 验证通过；最终完整回归连续两轮均为 0 FAIL。<span class="en">The targeted build and GRS verification passed; two consecutive full-regression iterations completed with zero failures.</span></p>
+    </section>
+  </main>
+
+  <script>
+    const links = [...document.querySelectorAll('.toc a')]
+    const sections = links.map((link) => document.querySelector(link.getAttribute('href'))).filter(Boolean)
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]
+      if (!visible) return
+      links.forEach((link) => link.classList.toggle('active', link.getAttribute('href') === `#${visible.target.id}`))
+    }, { rootMargin: '-10% 0px -75% 0px', threshold: [0, 1] })
+    sections.forEach((section) => observer.observe(section))
+  </script>
+</body>
+</html>

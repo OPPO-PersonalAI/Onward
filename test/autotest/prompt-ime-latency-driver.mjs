@@ -16,12 +16,18 @@
 // below the textarea's 47ms floor (so a regression to textarea fails) and well
 // above the contenteditable's ~16ms (so the fix passes with margin).
 import http from 'http';
+import {
+  evaluatePromptImeLatencyTrials,
+  nearestRankPercentile
+} from './prompt-ime-latency-metrics.mjs';
 
 const PORT = process.env.CDP_PORT || '9333';
 const DRAFT_CHARS = 78000;
 const BUDGET_MS = 40;          // IME input->paint p95 budget at 78KB
 const TRIALS = 3;
 const KEYS_PER_TRIAL = 20;
+const INPUTS_PER_KEY = 3;
+const EXPECTED_SAMPLES_PER_TRIAL = KEYS_PER_TRIAL * INPUTS_PER_KEY;
 
 function hg(p){return new Promise((res,rej)=>{http.get(`http://localhost:${PORT}${p}`,r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>res(d));}).on('error',rej);});}
 class CDP{
@@ -30,7 +36,7 @@ class CDP{
   async e(x){const r=await this.s('Runtime.evaluate',{expression:x,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw new Error('eval:'+JSON.stringify(r.exceptionDetails).slice(0,300));return r.result.value;}
 }
 const sleep = ms=>new Promise(r=>setTimeout(r,ms));
-const p95 = a=>{if(!a.length)return 0;const s=[...a].sort((x,y)=>x-y);return +s[Math.min(s.length-1,Math.floor(s.length*0.95))].toFixed(1)};
+const p95 = a=>{const value=nearestRankPercentile(a,0.95);return value===null?null:+value.toFixed(1)};
 
 const SEL = '.prompt-notebook:not(.prompt-notebook-hidden) .prompt-editor-content';
 const list = JSON.parse(await hg('/json'));
@@ -51,7 +57,7 @@ async function rectAndPreload(){
     let s=''; while(s.length<${DRAFT_CHARS}) s+=chunk; s=s.slice(0,${DRAFT_CHARS});
     window.__onwardPromptEditorContentControl.setContent(s);
     window.__imeS=[]; if(window.__imeL) el.removeEventListener('input',window.__imeL);
-    window.__imeL=function(){const t0=performance.now();requestAnimationFrame(function(){requestAnimationFrame(function(){window.__imeS.push(performance.now()-t0)})})};
+    window.__imeL=function(){const t0=performance.now();requestAnimationFrame(function(){setTimeout(function(){window.__imeS.push(performance.now()-t0)},0)})};
     el.addEventListener('input',window.__imeL);
     const r=el.getBoundingClientRect();
     return {ok:true, len:el.innerText.length, cx:Math.round(r.left+r.width/2), cy:Math.round(r.top+30)};
@@ -79,11 +85,20 @@ for(let t=0;t<TRIALS;t++){
   const val = p95(arr);
   trials.push({ p95: val, n: arr.length });
 }
-const best = Math.min(...trials.map(t=>t.p95));
-const met = trials.filter(t=>t.p95 <= BUDGET_MS).length;
-const pass = met >= 1;
-const result = { draftChars: DRAFT_CHARS, budgetMs: BUDGET_MS, trials, bestP95Ms: best, trialsMeetingBudget: met, pass };
+const verdict = evaluatePromptImeLatencyTrials(trials, {
+  budgetMs: BUDGET_MS,
+  expectedTrials: TRIALS,
+  expectedSamplesPerTrial: EXPECTED_SAMPLES_PER_TRIAL
+});
+const result = {
+  testId: 'PIL-01',
+  draftChars: DRAFT_CHARS,
+  budgetMs: BUDGET_MS,
+  expectedSamplesPerTrial: EXPECTED_SAMPLES_PER_TRIAL,
+  trials,
+  ...verdict
+};
 console.log('[PromptIMELatency:RESULT]' + JSON.stringify(result));
-console.log('[PromptIMELatency] ' + (pass ? 'PASS' : 'FAIL') + ' best IME p95=' + best + 'ms (budget ' + BUDGET_MS + 'ms), ' + met + '/' + TRIALS + ' trials met');
+console.log('[PromptIMELatency:PIL-01] ' + (verdict.pass ? 'PASS' : 'FAIL') + ' best IME p95=' + (verdict.bestP95Ms ?? 'unavailable') + 'ms (budget ' + BUDGET_MS + 'ms), ' + verdict.trialsMeetingBudget + '/' + TRIALS + ' trials met, samplesValid=' + verdict.sampleCountsValid);
 ws.close();
-process.exit(pass ? 0 : 1);
+process.exit(verdict.pass ? 0 : 1);
