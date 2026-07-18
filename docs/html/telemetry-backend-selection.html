@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Onward 使用量统计后端选型决策 — Azure 替换方案</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --text: #d7dce3;
+    --text-dim: #8b93a1;
+    --accent: #4f9cf9;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --purple: #a78bfa;
+    --border: #2a2f3a;
+    --code-bg: #12141a;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 15px; line-height: 1.7;
+  }
+  /* ---------- fixed left ToC ---------- */
+  nav#toc {
+    position: fixed; top: 0; left: 0; width: 260px; height: 100vh;
+    overflow-y: auto; background: var(--panel); border-right: 1px solid var(--border);
+    padding: 24px 12px; font-size: 13px;
+  }
+  nav#toc h2 { font-size: 14px; color: var(--text-dim); margin: 0 0 12px 8px; letter-spacing: 1px; }
+  nav#toc a {
+    display: block; color: var(--text-dim); text-decoration: none;
+    padding: 5px 10px; border-radius: 6px; margin-bottom: 2px;
+  }
+  nav#toc a:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--text); }
+  nav#toc a.active { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); font-weight: 600; }
+  nav#toc a.lvl2 { padding-left: 24px; font-size: 12px; }
+  main {
+    margin-left: 260px; max-width: 980px; padding: 40px 48px 80px;
+  }
+  @media (max-width: 900px) {
+    nav#toc { display: none; }
+    main { margin-left: 0; padding: 24px; }
+  }
+  h1 { font-size: 26px; border-bottom: 2px solid var(--accent); padding-bottom: 12px; }
+  h2 { font-size: 21px; margin-top: 48px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 17px; margin-top: 28px; color: var(--accent); }
+  code {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; color: #9fd0ff;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.5;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--text); }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 22px; margin: 18px 0;
+  }
+  .card h3 { margin-top: 0; }
+  .callout {
+    border-left: 4px solid var(--amber); background: rgba(251,191,36,0.08);
+    border-radius: 0 8px 8px 0; padding: 12px 18px; margin: 16px 0;
+  }
+  .callout.info { border-left-color: var(--accent); background: rgba(79,156,249,0.08); }
+  .callout.danger { border-left-color: var(--red); background: rgba(248,113,113,0.08); }
+  .callout.ok { border-left-color: var(--green); background: rgba(52,211,153,0.08); }
+  .pill {
+    display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 12px;
+    font-weight: 600; margin-right: 6px; vertical-align: middle;
+  }
+  .pill.green { background: rgba(52,211,153,0.15); color: var(--green); border: 1px solid var(--green); }
+  .pill.amber { background: rgba(251,191,36,0.15); color: var(--amber); border: 1px solid var(--amber); }
+  .pill.red { background: rgba(248,113,113,0.15); color: var(--red); border: 1px solid var(--red); }
+  .pill.blue { background: rgba(79,156,249,0.15); color: var(--accent); border: 1px solid var(--accent); }
+  .pill.purple { background: rgba(167,139,250,0.15); color: var(--purple); border: 1px solid var(--purple); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  svg text { font-family: -apple-system, "PingFang SC", sans-serif; }
+  .meta {
+    margin-top: 64px; border-top: 1px dashed var(--border); padding-top: 20px;
+    font-size: 12.5px; color: var(--text-dim);
+  }
+  .meta table { font-size: 12.5px; }
+  a { color: var(--accent); }
+  ul li { margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#sec-background">1. 背景与问题</a>
+  <a href="#sec-current">2. 现状架构</a>
+  <a href="#sec-surface">3. 替换面分析</a>
+  <a href="#sec-candidates">4. 候选方案对比</a>
+  <a href="#sec-aptabase" class="lvl2">4.1 Aptabase</a>
+  <a href="#sec-posthog" class="lvl2">4.2 PostHog</a>
+  <a href="#sec-selfhost" class="lvl2">4.3 完全自建</a>
+  <a href="#sec-rejected" class="lvl2">4.4 排除项</a>
+  <a href="#sec-peers">5. 同类产品做法</a>
+  <a href="#sec-proposed">6. 迁移后架构（三选一）</a>
+  <a href="#sec-tradeoffs">7. 权衡与建议</a>
+  <a href="#sec-questions">8. 待你确认的问题</a>
+  <a href="#sec-meta">9. 文档元数据</a>
+</nav>
+
+<main>
+<h1>Onward 使用量统计后端选型决策</h1>
+<p><span class="pill green">状态：已定案 — PostHog 云免费层（2026-07-17）</span><span class="pill blue">类型：策略级决策文档</span></p>
+<div class="callout ok"><strong>定案记录：</strong>用户选定<strong>方案 B（PostHog 云免费层）</strong>；日志对接范围 = 后续新事件 + 回填本地 JSONL；装机量级 &lt; 1 千日活，免费额度充裕。接入实现见 <code>electron/main/telemetry/telemetry-service.ts</code>（posthog-node 5.45.2, MIT）与回填脚本 <code>scripts/telemetry-backfill-posthog.mjs</code>。</div>
+<p>Azure Application Insights 后端已被微软下线，Onward 的每日使用量汇总无处可发。本文档整理了现状、候选替换方案、同类产品做法与取舍，<strong>最终选型由用户决定，未经确认不写任何接入代码</strong>。</p>
+
+<h2 id="sec-background">1. 背景与问题</h2>
+<div class="callout danger">
+  <strong>事件：</strong>Onward 之前将匿名使用量统计上报到 Azure Application Insights（eastus-8 端点，连接串硬编码于 <code>electron/main/telemetry/telemetry-constants.ts</code>）。该后台服务被微软单方面下线，上报通道中断。
+</div>
+<p>需要一个替换服务，硬性要求：</p>
+<ul>
+  <li><strong>免费</strong> —— 托管服务要有真正够用的免费额度，或者是免费的自建开源软件；</li>
+  <li><strong>能对接已抓取的日志</strong> —— 应用现有的事件格式（JSON）要能直接送进去，本地已积累的日志可以回填导入；</li>
+  <li><strong>稳定</strong> —— 不能再出现"服务突然消失"这种情况；</li>
+  <li><strong>对开源软件友好</strong> —— 许可条款与 Apache-2.0 兼容，SDK 不能带 copyleft 传染。</li>
+</ul>
+
+<h2 id="sec-current">2. 现状架构</h2>
+<p>代码摸底结论：遥测管线是<strong>我们自己的代码</strong>，Azure 只是最后一跳的"投递地址"。事件不逐条上传——本地按天聚合，每天只发<strong>一条</strong>匿名 <code>daily/summary</code> 汇总。</p>
+
+<svg viewBox="0 0 900 300" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="现状架构图">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8b93a1"/>
+    </marker>
+  </defs>
+  <!-- sources -->
+  <rect x="10" y="20" width="200" height="150" rx="10" fill="#171a21" stroke="#2a2f3a"/>
+  <text x="110" y="45" fill="#d7dce3" font-size="13" text-anchor="middle" font-weight="bold">事件源（应用内埋点）</text>
+  <text x="110" y="70" fill="#8b93a1" font-size="11" text-anchor="middle">session/start · session/end</text>
+  <text x="110" y="90" fill="#8b93a1" font-size="11" text-anchor="middle">session/heartbeat（5 分钟）</text>
+  <text x="110" y="110" fill="#8b93a1" font-size="11" text-anchor="middle">prompt/use · dropdown/*</text>
+  <text x="110" y="130" fill="#8b93a1" font-size="11" text-anchor="middle">error/rendererCrash · gpuCrash</text>
+  <text x="110" y="150" fill="#8b93a1" font-size="11" text-anchor="middle">update/error（唯一即时上报）</text>
+  <!-- consent gate -->
+  <rect x="250" y="55" width="130" height="80" rx="10" fill="#1e222b" stroke="#fbbf24"/>
+  <text x="315" y="85" fill="#fbbf24" font-size="12" text-anchor="middle" font-weight="bold">同意闸门</text>
+  <text x="315" y="105" fill="#8b93a1" font-size="10.5" text-anchor="middle">首启弹窗 + 设置开关</text>
+  <text x="315" y="121" fill="#8b93a1" font-size="10.5" text-anchor="middle">匿名 instanceId</text>
+  <!-- local stores -->
+  <rect x="430" y="20" width="210" height="70" rx="10" fill="#1e222b" stroke="#4f9cf9"/>
+  <text x="535" y="45" fill="#4f9cf9" font-size="12" text-anchor="middle" font-weight="bold">telemetry-events.jsonl</text>
+  <text x="535" y="65" fill="#8b93a1" font-size="10.5" text-anchor="middle">逐条 JSONL 明细（userData 下）</text>
+  <text x="535" y="80" fill="#8b93a1" font-size="10.5" text-anchor="middle">每日上传成功后清空</text>
+  <rect x="430" y="110" width="210" height="70" rx="10" fill="#1e222b" stroke="#4f9cf9"/>
+  <text x="535" y="135" fill="#4f9cf9" font-size="12" text-anchor="middle" font-weight="bold">telemetry-daily.json</text>
+  <text x="535" y="155" fill="#8b93a1" font-size="10.5" text-anchor="middle">按天聚合累加器（持久化）</text>
+  <text x="535" y="170" fill="#8b93a1" font-size="10.5" text-anchor="middle">跨天翻转触发上传</text>
+  <!-- azure -->
+  <rect x="700" y="60" width="180" height="90" rx="10" fill="#2b1a1a" stroke="#f87171" stroke-dasharray="6 3"/>
+  <text x="790" y="90" fill="#f87171" font-size="13" text-anchor="middle" font-weight="bold">Azure App Insights</text>
+  <text x="790" y="110" fill="#f87171" font-size="11" text-anchor="middle">已被下线 ✕</text>
+  <text x="790" y="130" fill="#8b93a1" font-size="10.5" text-anchor="middle">每天 1 条 daily/summary</text>
+  <!-- arrows -->
+  <line x1="210" y1="95" x2="245" y2="95" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="380" y1="80" x2="425" y2="55" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="380" y1="110" x2="425" y2="140" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="640" y1="145" x2="695" y2="110" stroke="#f87171" stroke-width="1.5" marker-end="url(#arr)"/>
+  <!-- separate perf trace note -->
+  <rect x="10" y="220" width="870" height="60" rx="10" fill="#171a21" stroke="#2a2f3a"/>
+  <text x="30" y="245" fill="#a78bfa" font-size="12" font-weight="bold">与本地 perf-trace 系统完全独立</text>
+  <text x="30" y="265" fill="#8b93a1" font-size="11">traces/ 下的 Chrome Trace 文件仅在本机、供 Perfetto 分析，从不联网上传。本次替换不涉及它。</text>
+</svg>
+
+<div class="card">
+  <h3>每天上传的 daily/summary 长什么样</h3>
+  <p>由 <code>telemetry-aggregator.ts</code> 的 <code>buildDailySummary()</code> 生成，纯 JSON：</p>
+  <pre><code>{ date, sessionCount, totalActiveMs,
+  sessionDuration: { min / max / avg / p50 / p95 },
+  tab/terminal/layout 的 max 与 avg, prompt 使用计数,
+  8 个下拉菜单计数, rendererCrashCount }
++ 公共字段: instanceId(随机 UUID), sessionId, appVersion,
+  buildChannel, releaseChannel, platform, arch, electronVersion</code></pre>
+  <p>事件量级极小：<strong>每个用户每天约 1 条汇总</strong>（外加去重后的 update/error）。任何候选服务的免费额度对这个量级都绰绰有余。</p>
+</div>
+
+<h2 id="sec-surface">3. 替换面分析</h2>
+<div class="callout ok">
+  <strong>好消息：真正碰 Azure 的代码只有一小段。</strong>事件采集、同意管理、按天聚合、本地日志、IPC、设置界面全部与 Azure 无关，可原样保留。
+</div>
+<table>
+  <tr><th>模块</th><th>是否需要改动</th><th>说明</th></tr>
+  <tr><td><code>telemetry-service.ts</code> 中 <code>startAzureSdk()</code> 与上传调用</td><td><span class="pill red">替换</span></td><td>换成新服务的发送逻辑（HTTP 批量接口或 MIT SDK）</td></tr>
+  <tr><td><code>telemetry-constants.ts</code> 连接串</td><td><span class="pill red">替换</span></td><td>换成新服务的 App Key / 端点，保留环境变量覆盖机制</td></tr>
+  <tr><td><code>package.json</code> 的 <code>applicationinsights</code> 依赖</td><td><span class="pill red">移除</span></td><td>换入新 SDK（须 MIT/Apache 许可）后跑 <code>pnpm generate-notices</code></td></tr>
+  <tr><td>聚合器 / 同意管理 / 会话跟踪 / JSONL 日志</td><td><span class="pill green">保留</span></td><td>与后端无关，是我们自己的代码</td></tr>
+  <tr><td>ConsentDialog / Settings 开关 / i18n 文案</td><td><span class="pill green">保留</span></td><td>文案如需提到服务商名称才需要小改</td></tr>
+  <tr><td>本地已积累日志的回填</td><td><span class="pill amber">新增</span></td><td>一次性脚本：读 JSONL / daily.json，按新服务批量接口导入</td></tr>
+</table>
+
+<h2 id="sec-candidates">4. 候选方案对比</h2>
+<table>
+  <tr>
+    <th>方案</th><th>免费额度</th><th>SDK 许可</th><th>自建选项</th><th>历史导入</th><th>稳定性风险</th>
+  </tr>
+  <tr>
+    <td><strong>Aptabase</strong>（托管）</td>
+    <td>100 万事件/月，超额暂停</td>
+    <td>MIT（<code>@aptabase/electron</code>）</td>
+    <td>有（AGPL 服务端，.NET + Postgres + ClickHouse）</td>
+    <td>批量 API，每请求 25 条，支持历史时间戳</td>
+    <td><span class="pill amber">中</span> 近乎单人维护，托管服务低 bus-factor</td>
+  </tr>
+  <tr>
+    <td><strong>PostHog</strong>（云）</td>
+    <td>100 万事件/月（另含错误、feature flag 额度）</td>
+    <td>MIT（<code>posthog-node</code>）</td>
+    <td>实际已弃：仅 ~10 万/月 hobby 版，官方不推荐生产使用</td>
+    <td>最强：<code>/batch</code> 无条数上限 + <code>historical_migration</code> 标志</td>
+    <td><span class="pill green">低</span> 风投背书、免费额度历史上未收紧过；但云锁定</td>
+  </tr>
+  <tr>
+    <td><strong>Umami</strong>（自建）</td>
+    <td>完全免费（自付服务器）</td>
+    <td>MIT（服务端也是 MIT）</td>
+    <td>是（单容器 + 仅 Postgres，最轻）</td>
+    <td>无现成导入器，需自写 ETL 调 <code>/api/send</code></td>
+    <td><span class="pill green">零跑路风险</span> 但自己运维；产品分析能力偏弱（网页分析形态）</td>
+  </tr>
+  <tr>
+    <td><strong>OTel + ClickHouse + Grafana</strong>（自建）</td>
+    <td>完全免费（自付服务器）</td>
+    <td>OTel/ClickHouse 均 Apache-2.0</td>
+    <td>是（Docker Compose 参考方案成熟）</td>
+    <td>自定义管线，导入自由</td>
+    <td><span class="pill green">零跑路风险</span> 但工程量最大，形态偏可观测性而非产品分析</td>
+  </tr>
+</table>
+
+<h3 id="sec-aptabase">4.1 Aptabase — 贴合度最高</h3>
+<div class="card">
+  <p><span class="pill green">专为桌面应用设计</span><span class="pill green">MIT Electron SDK</span><span class="pill amber">小团队风险</span></p>
+  <ul>
+    <li>唯一一个<strong>专为桌面/移动应用统计</strong>而生的开源候选，官方有 <code>@aptabase/electron</code>（区分主进程/渲染进程入口）。</li>
+    <li>托管免费额度 100 万事件/月 —— 我们每用户每天 1 条，够支撑约 <strong>3 万日活</strong>。</li>
+    <li>批量接口 <code>POST /api/v0/events</code> 接受 ISO 8601 历史时间戳 → 本地 JSONL 可回填。</li>
+    <li>限制：自定义属性只支持字符串/数字（我们的 daily/summary 是平铺数字字段，兼容）；仪表盘较简单，无自由 SQL 查询。</li>
+    <li><strong>主要风险：</strong>项目近乎单人维护。托管版若停摆，等于重演 Azure 事件——但它有自建出口（AGPL 服务端），数据主权可收回。</li>
+  </ul>
+</div>
+
+<h3 id="sec-posthog">4.2 PostHog — 最稳的云免费额度</h3>
+<div class="card">
+  <p><span class="pill green">公司体量大、免费额度稳定</span><span class="pill green">最强历史导入</span><span class="pill amber">云锁定</span></p>
+  <ul>
+    <li>免费 100 万事件/月，历史上<strong>从未收紧</strong>（对比 Mixpanel/TelemetryDeck 都改过价）；MIT 的 <code>posthog-node</code>，官方有 Electron 接入文档。</li>
+    <li>历史导入是所有候选里最完善的：<code>/batch</code> 端点单请求最大 20MB、无条数上限，且有专门的 <code>historical_migration: true</code> 标志避免触发风控。</li>
+    <li>产品分析能力最强（漏斗、留存、自由查询）。</li>
+    <li><strong>主要风险：</strong>自建通道实际上已废弃（hobby 版约 10 万事件/月且官方不推荐生产使用），选它基本等于绑定它的云。风投驱动，长期存在免费额度商业化压力。</li>
+  </ul>
+</div>
+
+<h3 id="sec-selfhost">4.3 完全自建 — 零跑路风险，代价是运维</h3>
+<div class="card">
+  <p><span class="pill green">数据完全归自己</span><span class="pill red">需要自己有服务器并长期运维</span></p>
+  <ul>
+    <li><strong>Umami（推荐的轻量自建）：</strong>MIT、单容器 + Postgres，服务端 <code>/api/send</code> 可直接收桌面应用事件；代价是仪表盘偏网页分析形态、回填要自写脚本。</li>
+    <li><strong>Aptabase 自建：</strong>兼得"桌面应用形态 + 数据主权"，但要运维 .NET + Postgres + ClickHouse 三件套，服务端 AGPL（作为独立服务运行，不传染应用代码，政策上需要知悉）。</li>
+    <li><strong>OTel + ClickHouse + Grafana：</strong>许可最干净（全 Apache-2.0/AGPL 仅 Grafana），扩展性最强，但事件模型、看板全要自己搭，工程量最大。</li>
+  </ul>
+</div>
+
+<h3 id="sec-rejected">4.4 排除项及理由</h3>
+<table>
+  <tr><th>服务</th><th>排除理由</th></tr>
+  <tr><td>TelemetryDeck</td><td>2026-07-01 刚把免费额度从 10 万砍到 5 万/月；服务端闭源、无自建出口 —— 在"免费、稳定"两条上都不达标</td></tr>
+  <tr><td>Mixpanel / Amplitude</td><td>额度目前慷慨（100 万/200 万每月）但纯商业闭源、无自建出口，结构性跑路风险与 Azure 同类</td></tr>
+  <tr><td>Countly Lite</td><td>可用（AGPL 自建），但形态和运维成本相对 Aptabase/Umami 无优势</td></tr>
+  <tr><td>Plausible / Matomo</td><td>网页分析形态，自定义事件属性受限（Plausible）或 GPL + PHP 栈过重（Matomo）</td></tr>
+  <tr><td>Sentry</td><td>形态是错误监控不是产品分析；云免费额度极小；自建栈极重。可作为崩溃上报的<em>补充</em>，不是本次替换对象</td></tr>
+</table>
+
+<h2 id="sec-peers">5. 同类产品做法</h2>
+<table>
+  <tr><th>产品</th><th>方案</th><th>对我们的启示</th></tr>
+  <tr><td>VS Code</td><td>Application Insights → 微软内部 1DS 管线</td><td>正是我们刚被赶出来的那条路，1DS 外部项目不可用</td></tr>
+  <tr><td>Zed</td><td>自建：客户端批量（5 分钟或 50 条）→ 自家服务器 → Snowflake + Amplitude</td><td>"客户端聚合 + 批量上传"与我们现有设计一致，验证了架构方向</td></tr>
+  <tr><td>Warp</td><td>RudderStack → Amplitude + Sentry</td><td>商业管线组合，非免费路线</td></tr>
+  <tr><td>n8n</td><td>PostHog</td><td>开源产品用 PostHog 的成熟先例</td></tr>
+  <tr><td>Signal / Obsidian / Joplin</td><td>完全不采集</td><td>隐私极端派；我们已有同意弹窗 + 匿名每日汇总，介于两派之间</td></tr>
+</table>
+<p style="color:var(--text-dim); font-size:13px;">未发现主流开源 Electron 应用在生产使用 Aptabase 的公开案例（它面向的正是这个细分市场，但缺少大型先例）——这是选它时要知悉的一点。</p>
+
+<h2 id="sec-proposed">6. 迁移后架构（三选一）</h2>
+<p>三个方案的共同点：<strong>只换图中红色虚线那一跳</strong>，本地管线原样保留。</p>
+
+<svg viewBox="0 0 900 340" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="迁移后架构图">
+  <defs>
+    <marker id="arr2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8b93a1"/>
+    </marker>
+  </defs>
+  <rect x="10" y="90" width="330" height="120" rx="10" fill="#171a21" stroke="#34d399"/>
+  <text x="175" y="115" fill="#34d399" font-size="13" text-anchor="middle" font-weight="bold">现有本地管线（原样保留）</text>
+  <text x="175" y="140" fill="#8b93a1" font-size="11" text-anchor="middle">埋点 → 同意闸门 → JSONL 明细</text>
+  <text x="175" y="160" fill="#8b93a1" font-size="11" text-anchor="middle">→ 按天聚合 → 每天 1 条 daily/summary</text>
+  <text x="175" y="185" fill="#8b93a1" font-size="11" text-anchor="middle">telemetry-service.ts 仅替换发送段</text>
+  <!-- option A -->
+  <rect x="480" y="20" width="400" height="80" rx="10" fill="#1e222b" stroke="#4f9cf9"/>
+  <text x="500" y="45" fill="#4f9cf9" font-size="13" font-weight="bold">方案 A：Aptabase 托管云</text>
+  <text x="500" y="65" fill="#8b93a1" font-size="11">@aptabase/electron (MIT) → aptabase.com 批量接口</text>
+  <text x="500" y="83" fill="#8b93a1" font-size="11">免费 100 万/月 · 支持历史时间戳回填 · 小团队风险</text>
+  <!-- option B -->
+  <rect x="480" y="120" width="400" height="80" rx="10" fill="#1e222b" stroke="#a78bfa"/>
+  <text x="500" y="145" fill="#a78bfa" font-size="13" font-weight="bold">方案 B：PostHog 云免费层</text>
+  <text x="500" y="165" fill="#8b93a1" font-size="11">posthog-node (MIT) → /batch + historical_migration</text>
+  <text x="500" y="183" fill="#8b93a1" font-size="11">免费 100 万/月 · 导入最强 · 分析最强 · 云锁定</text>
+  <!-- option C -->
+  <rect x="480" y="220" width="400" height="80" rx="10" fill="#1e222b" stroke="#fbbf24"/>
+  <text x="500" y="245" fill="#fbbf24" font-size="13" font-weight="bold">方案 C：完全自建（Umami / Aptabase 自建 / OTel）</text>
+  <text x="500" y="265" fill="#8b93a1" font-size="11">HTTP 批量上报 → 自己的服务器（Postgres / ClickHouse）</text>
+  <text x="500" y="283" fill="#8b93a1" font-size="11">零跑路风险 · 数据主权 · 需要服务器与长期运维</text>
+  <!-- arrows -->
+  <line x1="340" y1="130" x2="475" y2="60" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <line x1="340" y1="150" x2="475" y2="160" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <line x1="340" y1="175" x2="475" y2="255" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arr2)"/>
+</svg>
+
+<h2 id="sec-tradeoffs">7. 权衡与建议</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>如果最看重"不再被下线"</h3>
+    <p>选 <strong>方案 C 自建</strong>。数据和服务都在自己手里，代价是需要一台长期在线的服务器和运维投入。前提：你有可用的服务器资源。</p>
+  </div>
+  <div class="card">
+    <h3>如果最看重"零运维 + 稳定免费"</h3>
+    <p>选 <strong>方案 B PostHog 云</strong>。公司体量、免费额度稳定史、导入能力都是最好的；接受的代价是绑定它的云（自建出口很弱）。</p>
+  </div>
+  <div class="card">
+    <h3>如果最看重"形态贴合 + 保留退路"</h3>
+    <p>选 <strong>方案 A Aptabase 托管</strong>，它是唯一专为桌面应用设计的候选，且托管若出问题可迁到自建版（同一套 API）。接受的代价是小团队的存续风险。</p>
+  </div>
+  <div class="card">
+    <h3>组合思路</h3>
+    <p>本地 JSONL + 按天聚合这层<strong>无论选谁都保留</strong>，它天然就是"服务商中立"的缓冲层——将来再换后端，同样只动发送段。</p>
+  </div>
+</div>
+<div class="callout info">
+  <strong>倾向性意见（仅供参考，决定权在你）：</strong>就"免费、稳定、开源友好、能回填"四条硬要求的综合得分，PostHog 云免费层最均衡；若你手上有现成服务器且愿意运维，自建 Umami 是把"稳定"做到极致的做法；Aptabase 形态最贴合但存续风险最高。
+</div>
+
+<h2 id="sec-questions">8. 待你确认的问题</h2>
+<ol>
+  <li><strong>选哪个方案？</strong>A（Aptabase 托管）/ B（PostHog 云）/ C（自建，需说明用哪套）。</li>
+  <li><strong>"对接已抓取的日志"的范围？</strong>只需新服务接收现有格式的后续事件；还是要把各机器本地已积累的 JSONL 回填导入；Azure 侧的历史数据是否已有导出（若无导出，随服务下线大概率已不可取回）。</li>
+  <li><strong>大致装机量/日活量级？</strong>用于核对免费额度是否长期够用（当前设计下 100 万事件/月 ≈ 3 万日活）。</li>
+  <li><strong>若选自建：</strong>是否已有可用服务器（配置、位置）？由谁负责运维？</li>
+</ol>
+
+<h2 id="sec-meta">9. 文档元数据</h2>
+<div class="meta">
+  <table>
+    <tr><th>生成分支</th><td>20260717-feat-apm</td></tr>
+    <tr><th>应用版本 / commit</th><td>2.0.1 / b503e11</td></tr>
+    <tr><th>文档版本</th><td>v1.2</td></tr>
+  </table>
+  <h3 style="color:var(--text-dim); font-size:14px;">更新历史（只增不改）</h3>
+  <table>
+    <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+    <tr><td>v1.0</td><td>2026-07-17</td><td>20260717-feat-apm</td><td>首版：Azure 下线背景、现状架构、候选方案对比（Aptabase / PostHog / 自建）、同类产品调研、待确认问题清单</td></tr>
+    <tr><td>v1.1</td><td>2026-07-17</td><td>20260717-feat-apm</td><td>定案：用户选定 PostHog 云免费层；完成接入（posthog-node 替换 applicationinsights、`disabled` 哨兵、8 个 trace 事件、TEL-11 断言、TBF-01..06 单测、JSONL 回填脚本）</td></tr>
+    <tr><td>v1.2</td><td>2026-07-17</td><td>20260717-feat-apm</td><td>补救式上传常规化（用户决策）：outbox 语义——本地记录 = 未确认送达，flush 应答（reject 即失败）作为删除凭据；日报 ack 后仅删当日记录；早于聚合日的积压走 historicalMigration 专用客户端补传，确定性 uuid 幂等去重；20 MB 上限丢最旧（16 MB 滞回）；新增 5 个 trace 事件、TOB-01..07 单测、TEL-12/13 三段式 autotest（本地 mock 应答服务器）</td></tr>
+  </table>
+</div>
+</main>
+
+<script>
+  // ToC current-section highlight; jumps are instant (scroll-behavior: auto)
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('nav#toc a'));
+    var sections = links.map(function (a) {
+      return document.getElementById(a.getAttribute('href').slice(1));
+    });
+    function onScroll() {
+      var pos = window.scrollY + 100;
+      var active = 0;
+      for (var i = 0; i < sections.length; i++) {
+        if (sections[i] && sections[i].offsetTop <= pos) active = i;
+      }
+      links.forEach(function (a, i) { a.classList.toggle('active', i === active); });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+</body>
+</html>

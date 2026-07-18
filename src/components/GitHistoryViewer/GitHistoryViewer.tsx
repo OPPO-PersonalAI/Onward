@@ -22,6 +22,7 @@ import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
 import { useGitStateMirror } from '../../hooks/useGitStateMirror'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { resolveDefaultSelectedFile, resolveSelectionAfterReload } from './defaultFileSelection'
@@ -1663,6 +1664,8 @@ export function GitHistoryViewer({
       const start = Math.min(anchorIndex, index)
       const end = Math.max(anchorIndex, index)
       const range = commits.slice(start, end + 1).map(item => item.sha)
+      // Product telemetry: count each commit range (shift-select) comparison.
+      trackFeatureUse('git-history-range')
       setSelectedShas(range)
       return
     }
@@ -2048,7 +2051,7 @@ export function GitHistoryViewer({
             <div
               key={`${file.filename}-${file.status}`}
               className={`git-history-file-item ${isSelected ? 'selected' : ''}`}
-              onClick={() => { explicitSelectionRef.current = file.filename; setSelectedFile(file) }}
+              onClick={() => { explicitSelectionRef.current = file.filename; trackFeatureUse('git-history-file-diff'); setSelectedFile(file) }}
               onContextMenu={(e) => handleFileContextMenu(e, file)}
               title={renameText}
             >

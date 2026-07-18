@@ -16,6 +16,7 @@ import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { shouldRetainProjectEditorViewOnClose } from './utils/projectEditorCloseRetention'
@@ -1574,6 +1575,8 @@ export function ProjectEditor({
   const markdownWorkerOwnerRef = useRef<string | null>(null)
   const mermaidRenderTokenRef = useRef(0)
   const mermaidRenderInFlightRef = useRef(false)
+  // Product telemetry: last file whose mermaid diagrams were counted (once-per-file guard).
+  const mermaidTrackedFileRef = useRef<string | null>(null)
   const openFileTokenRef = useRef(0)
   const largeFileChunkTokenRef = useRef(0)
   const largeFileStateRef = useRef<LargeFileState | null>(null)
@@ -2310,6 +2313,16 @@ export function ProjectEditor({
   const editorLanguage = useMemo(() => resolveMonacoLanguage(activeFilePath), [activeFilePath])
   const isMarkdownPreviewVisible = isMarkdownFile && isMarkdownPreviewOpen && !isBinary && !isImage && !isSqlite
   const isHtmlPreviewVisible = isHtmlFile && isMarkdownPreviewOpen && !isBinary && !isImage && !isSqlite
+
+  // Product telemetry: count the markdown preview pane becoming active per file
+  // (once per file activation, guarded by a ref so re-renders don't re-fire).
+  const markdownPreviewTrackedFileRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (isMarkdownPreviewVisible && activeFilePath && markdownPreviewTrackedFileRef.current !== activeFilePath) {
+      markdownPreviewTrackedFileRef.current = activeFilePath
+      trackFeatureUse('markdown-preview')
+    }
+  }, [isMarkdownPreviewVisible, activeFilePath])
   const htmlPreviewUrlWithReload = useMemo(() => {
     if (!isHtmlPreviewVisible) return null
     return withHtmlPreviewReloadKey(htmlPreviewUrl, htmlPreviewReloadKey)
@@ -5139,6 +5152,8 @@ export function ProjectEditor({
     })
     const currentActiveFilePath = activeFilePathRef.current
     if (source === 'user') {
+      // Product telemetry: count each user-initiated file open (excludes restore/debug sources).
+      trackFeatureUse('editor-file-open')
       // User manual navigation has the highest priority, canceling any ongoing recovery process to avoid being "pulled back to old files".
       restoreTokenRef.current += 1
       restoreCancelledByUserRef.current = true
@@ -7109,6 +7124,8 @@ export function ProjectEditor({
   }, [buildFileIndex, isOpen, openFile, rootError, rootPath, tree])
 
   const handleSearchSelect = useCallback(async (path: string) => {
+    // Product telemetry: count each quick-open pick (selection confirmed, not palette open).
+    trackFeatureUse('quick-open')
     handleCloseSearch()
     await openFile(path, 'user', { trackRecent: true })
   }, [handleCloseSearch, openFile])
@@ -7755,6 +7772,13 @@ export function ProjectEditor({
       if (token !== mermaidRenderTokenRef.current) return
       mermaidRenderInFlightRef.current = false
       if (signal.cancelled) return
+      // Product telemetry: count once per file where mermaid diagrams render
+      // (ref-guarded so nonce/content re-renders of the same file don't re-fire).
+      const mermaidActiveFile = activeFilePathRef.current
+      if (mermaidActiveFile && mermaidTrackedFileRef.current !== mermaidActiveFile) {
+        mermaidTrackedFileRef.current = mermaidActiveFile
+        trackFeatureUse('mermaid')
+      }
       mdpTrace('mermaid:complete', { wasRestoring })
 
       enhanceMermaidDiagrams(preview, signal, {
@@ -10886,6 +10910,8 @@ export function ProjectEditor({
                   <button
                     className="project-editor-action-btn project-editor-preview-toggle"
                     onClick={() => {
+                      // Product telemetry: count each reader/preview mode toggle.
+                      trackFeatureUse('reader-mode')
                       setMarkdownPreviewOpenState(!isMarkdownPreviewOpenRef.current)
                     }}
                   >

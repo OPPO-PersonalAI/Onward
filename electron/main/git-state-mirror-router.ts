@@ -37,6 +37,7 @@ import {
   normaliseGitDiffInvalidationTargets
 } from './git-diff-cache-invalidator'
 import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
+import { getTelemetryService } from './telemetry/telemetry-service'
 import { shouldRespawnGitStateMirrorWorker } from './git-state-mirror-teardown'
 import type {
   MainToMirrorMessage,
@@ -479,7 +480,25 @@ class GitStateMirrorRouter {
         }
         return
       }
-      case 'watcher-status':
+      case 'watcher-status': {
+        // Stability telemetry on the DEGRADATION EDGE only: fire when a cwd
+        // transitions from healthy into a degraded state, not on every
+        // repeated status broadcast. Live lane dedupes to one discrete
+        // event per day; the aggregate counts each edge.
+        const previousHealth = this.watcherStatuses.get(msg.status.cwd)?.health
+        const nowDegraded =
+          msg.status.health === 'degraded-polling' ||
+          msg.status.health === 'suspended' ||
+          msg.status.health === 'failed'
+        const wasDegraded =
+          previousHealth === 'degraded-polling' ||
+          previousHealth === 'suspended' ||
+          previousHealth === 'failed'
+        if (nowDegraded && !wasDegraded) {
+          try {
+            getTelemetryService().track('error/recovered', { kind: 'watcher-degraded' })
+          } catch {}
+        }
         this.watcherStatuses.set(msg.status.cwd, msg.status)
         if (
           process.env.ONWARD_DEBUG === '1' ||
@@ -498,6 +517,7 @@ class GitStateMirrorRouter {
         }
         this.fanoutWatcherStatus(msg.status)
         return
+      }
       case 'log':
         if (msg.level === 'error') {
           console.error('[git-state-mirror-worker]', msg.message, msg.data ?? '')

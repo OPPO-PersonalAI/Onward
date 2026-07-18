@@ -618,9 +618,6 @@ function launchWindowsUpdateScript(params: {
   }
 }
 
-/** Track when update failure telemetry was last sent (keyed by date string). */
-let lastFailureTelemetryDate = ''
-
 function trackUpdateEvent(
   name: string,
   properties: Record<string, string | number | boolean | null>
@@ -634,28 +631,15 @@ function trackUpdateFailure(
   error: string,
   properties: Record<string, string | number | boolean | null> = {}
 ): void {
-  const today = new Date().toISOString().slice(0, 10)
-  const telemetry = getTelemetryService()
-
-  // Always log locally
-  telemetry.track('update/error', {
+  // Single tracked event: the Tier-2 live lane uploads it ack-gated within
+  // one heartbeat (deduplicated per phase per day at upload selection), so
+  // the old immediate-send path and its once-a-day throttle are gone.
+  getTelemetryService().track('update/error', {
     phase,
     error,
     platform: process.platform,
     ...properties
   })
-
-  // Send to Azure immediately, but at most once per day
-  if (lastFailureTelemetryDate !== today) {
-    lastFailureTelemetryDate = today
-    telemetry.trackImmediate('update/error', {
-      phase,
-      error,
-      platform: process.platform,
-      ...properties
-    })
-    console.log(`${LOG_PREFIX} Update failure telemetry sent for ${today}`)
-  }
 }
 
 function readPackageMetadata(): Record<string, unknown> | null {

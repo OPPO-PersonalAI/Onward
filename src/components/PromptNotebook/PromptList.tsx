@@ -12,6 +12,7 @@ import { useI18n } from '../../i18n/useI18n'
 import { PROMPT_COLORS } from './prompt-colors'
 import { perfTrace } from '../../utils/perf-trace'
 import { computeMenuPosition, computeSubmenuLayout } from '../../utils/popup-position'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 
 type PromptColorFilter = 'red' | 'yellow' | 'green' | null
 
@@ -415,11 +416,17 @@ export const PromptList = memo(function PromptList({
 
   // Switch Pin
   const handleTogglePin = useCallback((id: string) => {
+    // Count only the pin-on direction (adoption signal), not un-pinning.
+    const prompt = prompts.find(p => p.id === id)
+    if (!prompt?.pinned) {
+      trackFeatureUse('prompt-pin')
+    }
     onTogglePin(id)
-  }, [onTogglePin])
+  }, [prompts, onTogglePin])
 
   // Append to input box
   const handleAppend = useCallback((prompt: Prompt) => {
+    trackFeatureUse('prompt-history-reuse')
     onAppend(prompt)
   }, [onAppend])
 
@@ -429,6 +436,10 @@ export const PromptList = memo(function PromptList({
     const prompt = prompts.find(p => p.id === id)
     // If the current color is the same as the clicked color, clear the color; otherwise set a new color
     const newColor = prompt?.color === color ? null : color
+    // Count only color assignment, not clearing an existing tag.
+    if (newColor) {
+      trackFeatureUse('prompt-color')
+    }
     onColorChange(id, newColor)
   }, [prompts, onColorChange])
 

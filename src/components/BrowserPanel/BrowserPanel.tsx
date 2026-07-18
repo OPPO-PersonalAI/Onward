@@ -8,6 +8,7 @@ import { useI18n } from '../../i18n/useI18n'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import {
   formatHtmlPreviewZoomPercent,
   HTML_PREVIEW_MAX_ZOOM_FACTOR,
@@ -350,6 +351,10 @@ export function BrowserPanel({
     if (!result) return
     const next = clampAutoRefreshIntervalMs(result.intervalMs)
     perfTrace(PERF_TRACE_EVENT.RENDERER_BROWSER_AUTO_REFRESH_TOGGLE, { intervalMs: next })
+    if (next != null) {
+      // Product telemetry: auto-refresh turned ON (an interval was selected).
+      trackFeatureUse('browser-auto-refresh')
+    }
     onAutoRefreshChange?.(next)
   }, [autoRefreshIntervalMs, autoRefreshPresetLabel, onAutoRefreshChange, t])
 

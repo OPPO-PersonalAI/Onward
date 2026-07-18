@@ -353,6 +353,15 @@ export class TerminalRendererLifecycle {
     }
 
     this.webglDisabledUntil = performance.now() + this.policy.webglFallbackCooldownMs
+    // Stability telemetry: the terminal just degraded from WebGL to the DOM
+    // renderer for a cooldown period — user-visible quality loss without a
+    // crash. Live lane dedupes to one discrete event per day; the daily
+    // aggregate counts every occurrence.
+    try {
+      if (typeof window !== 'undefined') {
+        window.electronAPI?.telemetry?.track('error/recovered', { kind: 'webgl-fallback' })
+      }
+    } catch {}
   }
 
   // ─────────── Canvas-level WebGL context lifecycle ───────────

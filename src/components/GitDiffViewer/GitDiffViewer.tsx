@@ -23,6 +23,7 @@ import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useGitStateMirror } from '../../hooks/useGitStateMirror'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { DiffEmptyState } from '../common/DiffEmptyState'
 import type { ProjectEditorOpenEventDetail, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { SubpagePanelButton, SubpagePanelShell, SubpageSwitcher, type SubpagePanelShellState } from '../SubpageSwitcher'
@@ -1819,6 +1820,8 @@ export function GitDiffViewer({
   }, [activeCwd, terminalId, updateUIPreferences])
 
   const setSplitViewMode = useCallback((mode: GitDiffSplitViewMode) => {
+    // Product telemetry: count each split/inline display-mode toggle.
+    trackFeatureUse('git-diff-mode-toggle')
     setSplitViewModeState(mode)
     try {
       localStorage.setItem(STORAGE_KEY_DIFF_SPLIT_VIEW_MODE, mode)
@@ -5321,6 +5324,8 @@ export function GitDiffViewer({
 
   const handleKeep = useCallback(async () => {
     if (!selectedFile || !activeCwd) return
+    // Product telemetry: count each whole-file stage (Keep) action.
+    trackFeatureUse('git-diff-stage')
     const fileKey = getFileKey(selectedFile)
     setActionState({ type: 'keep', fileKey })
     setActionMessage(null)
@@ -5346,6 +5351,8 @@ export function GitDiffViewer({
       const confirmed = window.confirm(t('gitDiff.confirm.deleteUntracked', { fileName: selectedFile.filename }))
       if (!confirmed) return
     }
+    // Product telemetry: count each whole-file discard (Deny) action that proceeds.
+    trackFeatureUse('git-diff-discard')
     const fileKey = getFileKey(selectedFile)
     setActionState({ type: 'deny', fileKey })
     setActionMessage(null)
@@ -5621,6 +5628,8 @@ export function GitDiffViewer({
       return true
     }
 
+    // Product telemetry: count each partial (line-range) stage/discard commit.
+    trackFeatureUse('git-diff-partial-stage')
     const fileKey = getFileKey(selectedFile)
     setLineActionState({ type: action, fileKey })
     setLineMessage(null)
@@ -5704,6 +5713,8 @@ export function GitDiffViewer({
     if (!state) return false
     if (file.changeType === 'untracked' || file.status === 'D' || state.isBinary) return false
     if (isDraftDirtyRef.current) return false
+    // Product telemetry: count each per-hunk keep/deny widget action that proceeds.
+    trackFeatureUse('git-diff-hunk')
     const startedAt = performance.now()
     hunkActionInFlightRef.current = true
     setLineMessage(null)

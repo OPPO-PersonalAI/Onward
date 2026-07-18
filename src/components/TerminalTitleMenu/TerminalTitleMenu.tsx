@@ -6,6 +6,7 @@
 import { createPortal } from 'react-dom'
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './TerminalTitleMenu.css'
 
 const MENU_VIEWPORT_PADDING = 8
@@ -168,7 +169,7 @@ export function TerminalTitleMenu({
         className="terminal-title-menu-item"
         role="menuitem"
         title={t('terminalTitleMenu.renameTooltip')}
-        onClick={() => handleItemClick(onRename)}
+        onClick={() => { trackFeatureUse('terminal-rename'); handleItemClick(onRename) }}
         data-action="rename"
       >
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -183,7 +184,7 @@ export function TerminalTitleMenu({
         role="menuitemcheckbox"
         aria-checked={autoFollowEnabled}
         title={t('terminalTitleMenu.autoFollowBranchTooltip')}
-        onClick={() => onToggleAutoFollow()}
+        onClick={() => { trackFeatureUse('auto-follow'); onToggleAutoFollow() }}
         data-action="auto-follow-toggle"
         data-checked={autoFollowEnabled ? 'true' : 'false'}
       >
@@ -206,7 +207,7 @@ export function TerminalTitleMenu({
         disabled={!canUseBranch}
         aria-disabled={!canUseBranch}
         title={canUseBranch ? t('terminalTitleMenu.useBranchTooltip') : t('terminalTitleMenu.useBranchDisabledTooltip')}
-        onClick={() => { if (canUseBranch) handleItemClick(onUseBranch) }}
+        onClick={() => { if (canUseBranch) { trackFeatureUse('title-from-branch'); handleItemClick(onUseBranch) } }}
         data-action="use-branch"
       >
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -221,7 +222,7 @@ export function TerminalTitleMenu({
         disabled={!canUseRepo}
         aria-disabled={!canUseRepo}
         title={canUseRepo ? t('terminalTitleMenu.useRepoTooltip') : t('terminalTitleMenu.useRepoDisabledTooltip')}
-        onClick={() => { if (canUseRepo) handleItemClick(onUseRepoName) }}
+        onClick={() => { if (canUseRepo) { trackFeatureUse('title-from-branch'); handleItemClick(onUseRepoName) } }}
         data-action="use-repo"
       >
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

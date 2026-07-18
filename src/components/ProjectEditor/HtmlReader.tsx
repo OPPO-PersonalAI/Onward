@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import type { BrowserFoundInPageResult } from '../../types/electron'
 import type { HtmlPreviewScrollState } from '../../utils/html-file'
 import {
@@ -76,6 +77,10 @@ export function HtmlReader({
   onStateChange
 }: HtmlReaderProps) {
   const { t } = useI18n()
+
+  // Product telemetry: count once per HTML preview open (mount), never per re-render.
+  useEffect(() => { trackFeatureUse('html-preview') }, [])
+
   const [state, setState] = useState<HtmlReaderState | null>(null)
   const [frameUrl, setFrameUrl] = useState<string | null>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)

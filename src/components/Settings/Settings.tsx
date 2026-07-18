@@ -17,6 +17,7 @@ import type { ShortcutConfig, TerminalStyleConfig, GlobalTerminalStyle } from '.
 import type { AppInfo, DownloadErrorCode, UpdatePhase, UpdaterStatus } from '../../types/electron.d.ts'
 import type { TranslationKey } from '../../i18n/core'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './Settings.css'
 
 interface SettingsProps {
@@ -543,6 +544,11 @@ export function Settings({ terminals, onClose, width, onWidthChange }: SettingsP
     window.electronAPI.telemetry.getConsent().then((consent) => {
       setTelemetryEnabled(consent === true)
     })
+  }, [])
+
+  // Product telemetry: Settings surface mounted (opened) — count once per open.
+  useEffect(() => {
+    trackFeatureUse('settings-open')
   }, [])
 
   const handleTelemetryToggle = useCallback(() => {

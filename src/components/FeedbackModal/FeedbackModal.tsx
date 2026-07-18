@@ -16,6 +16,7 @@ import {
 import { useI18n } from '../../i18n/useI18n'
 import { requestOpenExternalHttpLink } from '../../utils/externalLink'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './FeedbackModal.css'
 
 interface FeedbackModalProps {
@@ -211,6 +212,8 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
   const handleGenerateDiagnosticBundle = useCallback(async () => {
     setBundleStatus('generating')
     setBundleMessage(null)
+    // Product telemetry: user triggered a diagnostic-bundle export.
+    trackFeatureUse('diagnostic-bundle')
     try {
       const result = await window.electronAPI.feedback.exportDiagnosticBundle()
       if (result.canceled) {
@@ -281,6 +284,8 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
         return
       }
 
+      // Product telemetry: feedback submitted successfully.
+      trackFeatureUse('feedback')
       const latestState = await window.electronAPI.feedback.load()
       startTransition(() => {
         setFeedbackState(latestState)

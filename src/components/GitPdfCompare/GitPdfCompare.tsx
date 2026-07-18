@@ -4,6 +4,7 @@
  */
 
 import { useEffect, useMemo, useRef } from 'react'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { redispatchPdfHostKey } from '../../utils/pdfHostKey'
 import { computePaneVisibility, type GitPdfStatus } from './computePaneVisibility'
 import './GitPdfCompare.css'
@@ -73,6 +74,9 @@ export function GitPdfCompare({
 }: GitPdfCompareProps) {
   const originalBlobRef = useRef<string | null>(null)
   const modifiedBlobRef = useRef<string | null>(null)
+
+  // Product telemetry: count once per PDF-diff view open (mount), never per re-render.
+  useEffect(() => { trackFeatureUse('pdf-diff') }, [])
 
   const originalSrc = useMemo(() => {
     if (originalBlobRef.current) {

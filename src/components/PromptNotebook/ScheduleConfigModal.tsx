@@ -10,6 +10,7 @@ import type { TerminalInfo } from '../../types/prompt'
 import { computeNextExecution } from '../../utils/schedule'
 import { useI18n } from '../../i18n/useI18n'
 import { useModalOpenRegistration } from '../../hooks/useModalEscape'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './ScheduleConfigModal.css'
 
 interface ScheduleConfigModalProps {
@@ -185,6 +186,8 @@ export function ScheduleConfigModal({
       }
     }
 
+    // Schedule create/update confirmed (validation already passed above).
+    trackFeatureUse('schedule-create')
     onConfirm(base)
   }, [validationError, prompt.id, tabId, selectedTerminalIds, scheduleType, absoluteTime, relativeMinutes, intervalValue, intervalUnit, recurStartTime, onConfirm])
 

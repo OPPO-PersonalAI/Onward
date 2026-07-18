@@ -20,6 +20,7 @@ import { migrateLayoutMode, DEFAULT_LAYOUT_MODE } from '../utils/layout-mode'
 import { isValidCustomLayoutCells } from '../utils/custom-layout-validator'
 import { canonicalizeTerminalCwdForPersist } from '../utils/terminal-cwd-osc'
 import { appStateContentChanged } from '../utils/app-state-diff'
+import { trackFeatureUse } from '../telemetry/track-feature-use'
 
 export const normalizeProjectCwd = normalizeProjectCwdImpl
 
@@ -815,6 +816,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         tabs: [...prev.tabs, newTab]
       }
     })
+    // Tab was created (cap check already passed above).
+    trackFeatureUse('tab-create')
     return true
   }, [updateState, canCreateTab])
 
@@ -863,6 +866,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       saveState(newState)
       return newState
     })
+    // Only count closes that actually proceeded (not last-tab / not-found).
+    if (canClose) {
+      trackFeatureUse('tab-close')
+    }
     return canClose
   }, [saveState])
 

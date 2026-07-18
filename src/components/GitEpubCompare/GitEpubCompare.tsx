@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import ePub from 'epubjs'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import type { Book } from 'epubjs'
 import './GitEpubCompare.css'
 
@@ -241,6 +242,9 @@ export function GitEpubCompare({
   const [chapters, setChapters] = useState<ChapterMeta[]>([])
   const [resources, setResources] = useState<ResourceChange[]>([])
   const [selectedHref, setSelectedHref] = useState<string | null>(null)
+
+  // Product telemetry: count once per EPUB-diff view open (mount), never per re-render.
+  useEffect(() => { trackFeatureUse('epub-diff') }, [])
 
   useEffect(() => {
     let cancelled = false

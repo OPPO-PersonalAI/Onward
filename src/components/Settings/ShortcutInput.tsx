@@ -5,6 +5,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 
 interface ShortcutInputProps {
   value: string | null
@@ -163,6 +164,8 @@ export function ShortcutInput({
     // Set the new shortcut
     setConflict(null)
     setIsRecording(false)
+    // Product telemetry: a recorded shortcut was committed.
+    trackFeatureUse('shortcut-edit')
     onChange(accelerator)
     onConflict?.(null)
   }, [onChange, onConflict, checkConflict])

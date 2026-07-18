@@ -55,6 +55,25 @@ export const PERF_TRACE_EVENT = {
   MAIN_APP_STATE_SAVE: 'main:app-state-save',
   MAIN_APP_STATE_SAVE_ERROR: 'main:app-state-save-error',
 
+  // ───────── Main process — telemetry upload pipeline ─────────
+  // Backend-neutral names: the upload client is PostHog today, but these
+  // events describe the pipeline stages, not the vendor. See
+  // `electron/main/telemetry/telemetry-service.ts`.
+  MAIN_TELEMETRY_UPLOAD_CLIENT_STARTED: 'main:telemetry.upload-client-started',
+  MAIN_TELEMETRY_UPLOAD_CLIENT_START_FAILED: 'main:telemetry.upload-client-start-failed',
+  MAIN_TELEMETRY_UPLOAD_CLIENT_STOPPED: 'main:telemetry.upload-client-stopped',
+  MAIN_TELEMETRY_UPLOAD_CLIENT_NOT_CONFIGURED: 'main:telemetry.upload-client-not-configured',
+  MAIN_TELEMETRY_DAILY_SUMMARY_UPLOADED: 'main:telemetry.daily-summary-uploaded',
+  MAIN_TELEMETRY_DAILY_SUMMARY_UPLOAD_FAILED: 'main:telemetry.daily-summary-upload-failed',
+  MAIN_TELEMETRY_DAILY_SUMMARY_LOCAL_ONLY: 'main:telemetry.daily-summary-local-only',
+  MAIN_TELEMETRY_IMMEDIATE_EVENT_SENT: 'main:telemetry.immediate-event-sent',
+  MAIN_TELEMETRY_UPLOAD_ERROR: 'main:telemetry.upload-error',
+  MAIN_TELEMETRY_OUTBOX_DAY_CLEARED: 'main:telemetry.outbox-day-cleared',
+  MAIN_TELEMETRY_OUTBOX_REMEDIATION_UPLOADED: 'main:telemetry.outbox-remediation-uploaded',
+  MAIN_TELEMETRY_OUTBOX_REMEDIATION_FAILED: 'main:telemetry.outbox-remediation-failed',
+  MAIN_TELEMETRY_OUTBOX_TRIMMED: 'main:telemetry.outbox-trimmed',
+  MAIN_TELEMETRY_SHUTDOWN_LIVE_PUSH: 'main:telemetry.shutdown-live-push',
+
   // ───────── Main process — IPC hot paths (latency ph='X') ─────────
   // Newly instrumented; see `electron/main/ipc-handlers.ts`.
   MAIN_IPC_PROJECT_READ_FILE: 'main:ipc.project.read-file',

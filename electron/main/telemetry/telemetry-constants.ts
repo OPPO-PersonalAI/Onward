@@ -4,13 +4,31 @@
  */
 
 /**
- * Azure Application Insights connection string.
- * This is NOT a secret — it identifies the telemetry resource endpoint only.
- * Replace with your own Application Insights connection string.
+ * PostHog project API key (write-only ingestion key, `phc_...`).
+ * This is NOT a secret — it identifies the ingestion project only.
+ * An empty value or the literal string `disabled` keeps the upload client
+ * off while the local pipeline (JSONL log + daily aggregator) stays active.
+ * Override at runtime via ONWARD_TELEMETRY_POSTHOG_KEY.
  */
-export const TELEMETRY_CONNECTION_STRING =
-  process.env.ONWARD_TELEMETRY_CONNECTION_STRING ||
-  'InstrumentationKey=eb3ba3c1-253c-4a08-b825-16c9af05fbe1;IngestionEndpoint=https://eastus-8.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus.livediagnostics.monitor.azure.com/;ApplicationId=696f3684-0511-4ee5-a0b0-32fe69d04cbf'
+export const TELEMETRY_POSTHOG_API_KEY =
+  process.env.ONWARD_TELEMETRY_POSTHOG_KEY ||
+  'phc_nPQFxSfqQZ2qM9S7jr2CoJjxMn5hm36zybwDYnVvFu9y'
+
+/**
+ * PostHog ingestion host. Defaults to PostHog Cloud US.
+ * Override via ONWARD_TELEMETRY_POSTHOG_HOST (EU cloud or a self-managed
+ * reverse proxy).
+ */
+export const TELEMETRY_POSTHOG_HOST =
+  process.env.ONWARD_TELEMETRY_POSTHOG_HOST || 'https://us.i.posthog.com'
+
+/**
+ * True when the PostHog upload client has a usable key. The `disabled`
+ * sentinel lets autotests force the not-configured path deterministically
+ * even after a real default key ships in this file.
+ */
+export const TELEMETRY_POSTHOG_CONFIGURED =
+  TELEMETRY_POSTHOG_API_KEY !== '' && TELEMETRY_POSTHOG_API_KEY !== 'disabled'
 
 /**
  * Whether telemetry is fully disabled at build time.
@@ -54,8 +72,15 @@ export const TELEMETRY_FAST_HEARTBEAT = process.env.ONWARD_TELEMETRY_FAST_HEARTB
  */
 export const TELEMETRY_FORCE_UPLOAD = process.env.ONWARD_TELEMETRY_FORCE_UPLOAD === '1'
 
-/** Flush interval: how often buffered events are sent to the backend (ms) */
-export const TELEMETRY_FLUSH_INTERVAL_MS = 4 * 60 * 60 * 1000 // 4 hours
+/**
+ * Outbox (`telemetry-events.jsonl`) size cap. Records are only deleted
+ * after a confirmed upload, so long offline stretches grow the file;
+ * past the cap the OLDEST records are dropped down to the trim target
+ * (hysteresis keeps full-file rewrites rare). ~5 MB/month at current
+ * event volume, so 20 MB ≈ 4 months of backlog.
+ */
+export const TELEMETRY_OUTBOX_MAX_BYTES = 20 * 1024 * 1024
+export const TELEMETRY_OUTBOX_TRIM_TARGET_BYTES = 16 * 1024 * 1024
 
 /** Session heartbeat interval (ms) */
 export const TELEMETRY_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes

@@ -59,6 +59,7 @@ import { registerTerminalFocusDebugApi } from './terminal/focus-debug-api'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from './utils/terminal-command'
 import { performanceTrace } from './utils/performance-trace'
 import { findStickyProjectEditorRoot } from './utils/projectEditorStateKey'
+import { trackFeatureUse } from './telemetry/track-feature-use'
 import './App.css'
 import './styles/form-controls.css'
 
@@ -1146,15 +1147,18 @@ function AppContent({
   // when state has not yet propagated.
   const handleLayoutChange = useCallback((mode: LayoutMode, hintEffectiveCount?: number) => {
     if (!activeTab) {
+      trackFeatureUse('layout-preset')
       updateActiveTab({ layoutMode: mode })
       return
     }
     const resolvedCount = hintEffectiveCount ?? getEffectiveCount(mode, state.customLayoutPresets)
     const currentCount = activeTab.terminals.length
     if (currentCount > resolvedCount) {
+      // Deferred to the downsize dialog; counted there as 'downsize-confirm'.
       setPendingDialog({ kind: 'layout-change', mode, requiredCount: resolvedCount })
       return
     }
+    trackFeatureUse('layout-preset')
     updateActiveTab({ layoutMode: mode })
   }, [activeTab, state.customLayoutPresets, updateActiveTab])
 
@@ -1212,6 +1216,8 @@ function AppContent({
       setPendingDialog(null)
       return
     }
+    // User confirmed the downsize dialog (covers both layout-change and preset-edit).
+    trackFeatureUse('downsize-confirm')
     const keepSet = new Set(keepIds)
 
     if (pendingDialog.kind === 'layout-change') {
@@ -2099,6 +2105,8 @@ function SettingsProviderWithHandler() {
 
   // Handle shortcut actions (global and window-level shortcuts from the main process)
   const handleShortcutAction = useCallback((action: ShortcutAction) => {
+    // Product telemetry: central shortcut dispatch — one counter per fired shortcut.
+    trackFeatureUse('shortcut-fired')
     const resolveTerminalId = () => {
       if (!activeTab) return null
       if (activeTab.activeTerminalId) return activeTab.activeTerminalId

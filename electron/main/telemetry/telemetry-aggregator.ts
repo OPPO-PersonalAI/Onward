@@ -7,135 +7,25 @@ import { app } from 'electron'
 import { join } from 'path'
 import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { TELEMETRY_FORCE_UPLOAD } from './telemetry-constants'
+import {
+  buildDailySummary,
+  createEmptyStats,
+  getTodayDate,
+  mergeStatsWithDefaults,
+  type DailyStats
+} from './telemetry-daily-stats'
 
 /**
  * Daily telemetry aggregator.
  *
  * Accumulates usage statistics in memory and persists to disk periodically.
- * Once per day, the aggregated summary is uploaded to Azure and counters are reset.
+ * Once per day, the aggregated summary is uploaded to the telemetry backend
+ * and counters are reset. The stats shape and roll-up math live in
+ * `telemetry-daily-stats.ts` (pure, unit-tested); this module owns the
+ * Electron/fs side effects only.
  */
 
-export interface DailyStats {
-  /** Date string YYYY-MM-DD for which this data applies */
-  date: string
-  /** Timestamp of last upload (0 = never uploaded) */
-  lastUploadedAt: number
-
-  // --- Session ---
-  /** Number of app sessions started today */
-  sessionCount: number
-  /** Array of individual session active durations (ms) for min/max/avg/p50/p95 */
-  sessionDurations: number[]
-
-  // --- Heartbeat snapshots (for tab/terminal/layout analysis) ---
-  /** Sampled tabCount values from heartbeats */
-  tabCounts: number[]
-  /** Sampled terminalCount values from heartbeats */
-  terminalCounts: number[]
-  /** Sampled layoutMode values from heartbeats */
-  layoutModes: number[]
-
-  // --- Feature usage counts ---
-  /** prompt/use action counts */
-  promptSend: number
-  promptExecute: number
-  promptSendAndExecute: number
-
-  /** dropdown feature click counts (menu + shortcut) */
-  dropdownWorkspaceOpenDir: number
-  dropdownWorkspaceChangeDir: number
-  dropdownDevelopmentEditor: number
-  dropdownDevelopmentGitDiff: number
-  dropdownDevelopmentGitHistory: number
-  dropdownToolsClaudeCode: number
-  dropdownToolsCodex: number
-  dropdownToolsBrowser: number
-
-  // --- Errors ---
-  rendererCrashCount: number
-}
-
-function createEmptyStats(date: string): DailyStats {
-  return {
-    date,
-    lastUploadedAt: 0,
-    sessionCount: 0,
-    sessionDurations: [],
-    tabCounts: [],
-    terminalCounts: [],
-    layoutModes: [],
-    promptSend: 0,
-    promptExecute: 0,
-    promptSendAndExecute: 0,
-    dropdownWorkspaceOpenDir: 0,
-    dropdownWorkspaceChangeDir: 0,
-    dropdownDevelopmentEditor: 0,
-    dropdownDevelopmentGitDiff: 0,
-    dropdownDevelopmentGitHistory: 0,
-    dropdownToolsClaudeCode: 0,
-    dropdownToolsCodex: 0,
-    dropdownToolsBrowser: 0,
-    rendererCrashCount: 0
-  }
-}
-
-function getTodayDate(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function computePercentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0
-  const idx = Math.ceil((p / 100) * sorted.length) - 1
-  return sorted[Math.max(0, idx)]
-}
-
-/**
- * Build an aggregated summary from daily stats for upload.
- */
-export function buildDailySummary(stats: DailyStats): Record<string, string | number> {
-  const durations = [...stats.sessionDurations].sort((a, b) => a - b)
-  const totalActiveMs = durations.reduce((sum, d) => sum + d, 0)
-
-  const tabSorted = [...stats.tabCounts].sort((a, b) => a - b)
-  const termSorted = [...stats.terminalCounts].sort((a, b) => a - b)
-  const layoutSorted = [...stats.layoutModes].sort((a, b) => a - b)
-
-  return {
-    date: stats.date,
-
-    // Session statistics
-    sessionCount: stats.sessionCount,
-    totalActiveMs,
-    sessionDurationMin: durations[0] ?? 0,
-    sessionDurationMax: durations[durations.length - 1] ?? 0,
-    sessionDurationAvg: durations.length > 0 ? Math.round(totalActiveMs / durations.length) : 0,
-    sessionDurationP50: computePercentile(durations, 50),
-    sessionDurationP95: computePercentile(durations, 95),
-
-    // Workspace scale (from heartbeat snapshots)
-    tabCountMax: tabSorted[tabSorted.length - 1] ?? 0,
-    tabCountAvg: tabSorted.length > 0 ? Math.round(tabSorted.reduce((s, v) => s + v, 0) / tabSorted.length) : 0,
-    terminalCountMax: termSorted[termSorted.length - 1] ?? 0,
-    terminalCountAvg: termSorted.length > 0 ? Math.round(termSorted.reduce((s, v) => s + v, 0) / termSorted.length) : 0,
-    layoutModeMax: layoutSorted[layoutSorted.length - 1] ?? 0,
-
-    // Feature usage counts
-    promptSend: stats.promptSend,
-    promptExecute: stats.promptExecute,
-    promptSendAndExecute: stats.promptSendAndExecute,
-    dropdownWorkspaceOpenDir: stats.dropdownWorkspaceOpenDir,
-    dropdownWorkspaceChangeDir: stats.dropdownWorkspaceChangeDir,
-    dropdownDevelopmentEditor: stats.dropdownDevelopmentEditor,
-    dropdownDevelopmentGitDiff: stats.dropdownDevelopmentGitDiff,
-    dropdownDevelopmentGitHistory: stats.dropdownDevelopmentGitHistory,
-    dropdownToolsClaudeCode: stats.dropdownToolsClaudeCode,
-    dropdownToolsCodex: stats.dropdownToolsCodex,
-    dropdownToolsBrowser: stats.dropdownToolsBrowser,
-
-    // Errors
-    rendererCrashCount: stats.rendererCrashCount
-  }
-}
+export { buildDailySummary, type DailyStats }
 
 class DailyAggregator {
   private stats: DailyStats
@@ -189,6 +79,8 @@ class DailyAggregator {
       case 'dropdown/development/gitHistory': this.stats.dropdownDevelopmentGitHistory++; break
       case 'dropdown/tools/claudeCode': this.stats.dropdownToolsClaudeCode++; break
       case 'dropdown/tools/codex': this.stats.dropdownToolsCodex++; break
+      // Unified launcher key emitted since the claudeCode/codex split retired
+      case 'dropdown/tools/codeAgent': this.stats.dropdownToolsCodeAgent++; break
       case 'dropdown/tools/browser': this.stats.dropdownToolsBrowser++; break
     }
     this.persist()
@@ -199,7 +91,47 @@ class DailyAggregator {
     this.persist()
   }
 
+  recordGpuCrash(): void {
+    this.stats.gpuCrashCount++
+    this.persist()
+  }
+
+  recordRecovered(kind: string): void {
+    switch (kind) {
+      case 'unresponsive': this.stats.unresponsiveCount++; break
+      case 'webgl-fallback': this.stats.webglFallbackCount++; break
+      case 'watcher-degraded': this.stats.watcherDegradedCount++; break
+    }
+    this.persist()
+  }
+
+  recordFeatureUse(featureUseId: string): void {
+    if (!featureUseId) return
+    this.stats.featureUse[featureUseId] = (this.stats.featureUse[featureUseId] ?? 0) + 1
+    this.persist()
+  }
+
+  recordUpdateEvent(eventName: string): void {
+    switch (eventName) {
+      case 'update/check': this.stats.updateCheckCount++; break
+      case 'update/downloaded': this.stats.updateDownloadedCount++; break
+      case 'update/installStart': this.stats.updateInstallStartCount++; break
+      case 'update/installComplete': this.stats.updateInstallCompleteCount++; break
+      case 'update/error': this.stats.updateErrorCount++; break
+    }
+    this.persist()
+  }
+
   // --- Upload check ---
+
+  /**
+   * UTC date the in-memory stats currently accumulate for. Outbox lines
+   * strictly older than this date belong to the remediation pipeline;
+   * this date itself is still owned by the daily-summary pipeline.
+   */
+  getStatsDate(): string {
+    return this.stats.date
+  }
 
   /**
    * Check if a daily upload is due. Returns the aggregated summary if yes, null if no.
@@ -251,9 +183,11 @@ class DailyAggregator {
     try {
       if (existsSync(this.storagePath)) {
         const raw = readFileSync(this.storagePath, 'utf-8')
-        const parsed = JSON.parse(raw) as DailyStats
+        const parsed = JSON.parse(raw) as Partial<DailyStats>
         if (parsed.date && typeof parsed.sessionCount === 'number') {
-          return parsed
+          // Merge over defaults so counters added by newer app versions
+          // load as 0 instead of undefined (NaN after ++).
+          return mergeStatsWithDefaults(parsed, getTodayDate())
         }
       }
     } catch {}
