@@ -682,6 +682,25 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_BODY_PREFETCH: 'renderer:git-diff.body-prefetch',
   RENDERER_GIT_DIFF_FILE_LOAD: 'renderer:git-diff.file-load',
   RENDERER_GIT_DIFF_FILE_LOAD_MEMORY_HIT: 'renderer:git-diff.file-load-memory-hit',
+  // Restore-vs-reveal decision of the render-then-reveal cycle (warm reopen /
+  // file switch). Payload: { action (restore-scroll | restore-anchor |
+  // reveal-first-change), reason (content-changed | no-entry | ...), trigger
+  // (what advanced waiting-diff → restoring-scroll: diff-computed |
+  // model-bound | warm-ready | deferred-diff-computed | timeout), filename }.
+  // `trigger: 'timeout'` in a trace = the cycle idled the full safety window —
+  // the 2026-07-18 diagnostic bundle's "diff looks stale until manual refresh"
+  // signature. Diagnostic tier (prod default-on), ph='i', reopen frequency.
+  RENDERER_GIT_DIFF_RESTORE_DECISION: 'renderer:git-diff.restore-decision',
+  // Viewport-goal self-heal lifecycle (companion to restore-decision). A
+  // restore/reveal applied against a not-yet-measured diff layout gets
+  // CLAMPED by Monaco; the goal parks and onDidContentSizeChange re-applies
+  // it. phase: 'parked' (registered), 'satisfied' (target honored),
+  // 'cancelled-scroll' (user scrolled away), 'expired' (10 s window),
+  // 'cancelled-context' (file/editor changed). Emitted on transitions only
+  // (never per size event), reopen frequency, ph='i', diagnostic tier —
+  // a "restore landed at the wrong offset" bundle shows whether the goal
+  // parked and how it resolved.
+  RENDERER_GIT_DIFF_VIEWPORT_GOAL: 'renderer:git-diff.viewport-goal',
   RENDERER_GIT_DIFF_MODEL_SYNC: 'renderer:git-diff.model-sync',
   RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
   RENDERER_GIT_DIFF_CACHE_INVALIDATION: 'renderer:git-diff.cache-invalidation',

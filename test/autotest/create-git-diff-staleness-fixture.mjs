@@ -158,11 +158,24 @@ init(subSource, {
 }, 'submodule baseline')
 
 // ------------ clean/root ------------
+// deep-change-target: a LONG committed file (1200 lines) whose edits land in
+// the MIDDLE of the file. GDS-52 needs three mutually distinguishable
+// viewport positions — top (fresh model bind, ~1), the first-change line
+// (~600), and the parked bottom (~1050) — which a short-baseline file cannot
+// provide: with a 1-line HEAD every worktree line is one added hunk starting
+// at line 2, so "revealed the first change" and "sat at the top" are the
+// same pixel; and at 300 lines a tall autotest window (~150 visible lines)
+// collapses "bottom" (first visible ≈ 147) onto the change line (150).
+const deepChangeTargetLines = Array.from(
+  { length: 1200 },
+  (_, i) => `deep baseline line ${i + 1}`
+).join('\n')
 const cleanRoot = join(reposRoot, 'clean', 'root')
 init(cleanRoot, {
   'README.md': '# Clean parent\n\nbaseline parent content\n',
   'src/main.txt': 'parent source line\n',
-  'nested/repeated-edit-target.md': '# Repeated edit target\n\nbaseline body\n'
+  'nested/repeated-edit-target.md': '# Repeated edit target\n\nbaseline body\n',
+  'src/deep-change-target.txt': `${deepChangeTargetLines}\n`
 }, 'parent baseline')
 addSubmodule(cleanRoot, subSource, 'modules/sub')
 commit(cleanRoot, 'add submodule')
@@ -248,6 +261,7 @@ const manifest = {
   submoduleRelPath: 'modules/sub',
   parentEditableFile: 'src/main.txt',
   stableStatusEditableFile: 'nested/repeated-edit-target.md',
+  deepChangeTargetFile: 'src/deep-change-target.txt',
   submoduleEditableFile: 'README.md',
   submoduleUntrackedRelPath: 'modules/sub/lib/new-untracked.txt'
 }

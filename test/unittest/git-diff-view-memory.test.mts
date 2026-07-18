@@ -12,6 +12,7 @@ import {
   clearGitDiffMemorySelection,
   clearGitDiffMemorySelectionWhenEmpty,
   mergeGitDiffSnapshotScroll,
+  resolveDiffRestoreDecision,
   resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
   resolveGitDiffSnapshotSelection,
@@ -289,5 +290,120 @@ describe('git diff view memory', () => {
     assert.equal(resolveGitDiffSnapshotScrollTop(2400, 3000, 900), 2100)
     assert.equal(resolveGitDiffSnapshotScrollTop(Number.NaN, 3000, 500), null)
     assert.equal(resolveGitDiffSnapshotScrollTop(10, 3000, -1), null)
+  })
+})
+
+// Restore-vs-reveal decision table for the render-then-reveal cycle
+// (2026-07-18 warm-reopen staleness fix). Lockstep with the wiring in
+// GitDiffViewer.tsx's `restoring-scroll` layout effect. Precedence:
+// no entry < deleted < content-changed < saved scroll < saved anchor < reveal.
+describe('git diff restore-vs-reveal decision (DRD)', () => {
+  const entry = (over: Partial<Pick<import('../../src/components/GitDiffViewer/diffViewMemory.ts').DiffViewMemoryEntry, 'scrollTop' | 'anchor' | 'signature'>> = {}) => ({
+    scrollTop: 0,
+    anchor: null,
+    signature: null,
+    ...over
+  })
+
+  it('DRD-01: no memory entry reveals the first change', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({ entry: null, isDeletedFile: false, currentSignature: 'sig' }),
+      { action: 'reveal-first-change', reason: 'no-entry' }
+    )
+  })
+
+  it('DRD-02: a deleted file never restores, even with a saved position', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ scrollTop: 800, signature: 'old' }),
+        isDeletedFile: true,
+        currentSignature: 'old'
+      }),
+      { action: 'reveal-first-change', reason: 'deleted-file' }
+    )
+  })
+
+  it('DRD-03: content changed since last view beats the saved scroll (regression lock — the branch used to abort WITHOUT revealing)', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ scrollTop: 800, signature: 'seen-before' }),
+        isDeletedFile: false,
+        currentSignature: 'changed-now'
+      }),
+      { action: 'reveal-first-change', reason: 'content-changed' }
+    )
+  })
+
+  it('DRD-04: unchanged content restores the saved scroll (VS Code view-state precedence)', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ scrollTop: 800, signature: 'same' }),
+        isDeletedFile: false,
+        currentSignature: 'same'
+      }),
+      { action: 'restore-scroll', scrollTop: 800 }
+    )
+  })
+
+  it('DRD-05: zero scroll falls back to the saved anchor line', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ anchor: { line: 42, scrollTop: 0 }, signature: 'same' }),
+        isDeletedFile: false,
+        currentSignature: 'same'
+      }),
+      { action: 'restore-anchor', line: 42 }
+    )
+  })
+
+  it('DRD-06: an entry with no saved position reveals the first change', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({ entry: entry(), isDeletedFile: false, currentSignature: 'sig' }),
+      { action: 'reveal-first-change', reason: 'no-saved-position' }
+    )
+  })
+
+  it('DRD-07: an entry without a saved signature cannot prove change — restore wins', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ scrollTop: 300, signature: null }),
+        isDeletedFile: false,
+        currentSignature: 'anything'
+      }),
+      { action: 'restore-scroll', scrollTop: 300 }
+    )
+  })
+
+  it('DRD-08: unknown current signature (binary / not comparable) skips the comparison — restore wins', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ scrollTop: 300, signature: 'seen' }),
+        isDeletedFile: false,
+        currentSignature: null
+      }),
+      { action: 'restore-scroll', scrollTop: 300 }
+    )
+  })
+
+  it('DRD-09: content changed beats a saved anchor too', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ anchor: { line: 42, scrollTop: 0 }, signature: 'seen-before' }),
+        isDeletedFile: false,
+        currentSignature: 'changed-now'
+      }),
+      { action: 'reveal-first-change', reason: 'content-changed' }
+    )
+  })
+
+  it('DRD-10: a non-positive anchor line does not count as a saved position', () => {
+    assert.deepEqual(
+      resolveDiffRestoreDecision({
+        entry: entry({ anchor: { line: 0, scrollTop: 0 }, signature: 'same' }),
+        isDeletedFile: false,
+        currentSignature: 'same'
+      }),
+      { action: 'reveal-first-change', reason: 'no-saved-position' }
+    )
   })
 })

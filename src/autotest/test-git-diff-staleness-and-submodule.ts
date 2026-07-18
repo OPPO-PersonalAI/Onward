@@ -46,6 +46,7 @@ interface FixtureManifest {
   submoduleRelPath: string
   parentEditableFile: string
   stableStatusEditableFile: string
+  deepChangeTargetFile: string
   submoduleEditableFile: string
   submoduleUntrackedRelPath: string
 }
@@ -422,6 +423,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   const subPath = manifest.submoduleRelPath
   const parentFile = manifest.parentEditableFile
   const stableStatusFile = manifest.stableStatusEditableFile
+  const deepChangeFile = manifest.deepChangeTargetFile
   const subEditableFile = manifest.submoduleEditableFile
   const subFile = `${subPath}/${subEditableFile}`
   const subUntracked = manifest.submoduleUntrackedRelPath
@@ -1096,6 +1098,239 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
     await waitFor('GDS-17-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+  }
+
+  // ─── GDS-52/53: warm-reopen restore-vs-reveal (2026-07-18 staleness bundle) ───
+  // GDS-52: content changed while Git Diff was CLOSED → the reopen must land the
+  // viewport on the FIRST CHANGE, not silently restore the old scroll offset.
+  // This is the user-visible half of the 2026-07-18 diagnostic-bundle bug: data
+  // converged but the view stayed at a stale position until "Refresh Changes".
+  // GDS-53: content UNCHANGED across close/reopen → the saved position must be
+  // restored WITHOUT idling into the 2 s reveal safety timeout (the warm-reopen
+  // fast path; probed via getLastRestoreDecision().trigger !== 'timeout').
+  // Chained after GDS-17 so both reopens ride the already-paid cold diff cost
+  // (~2-4 s warm vs ~35 s cold under EDR). VS Code-precedence contract: restore
+  // view state when the content signature still matches what the user last saw,
+  // reveal the first change when it does not.
+  if (!cancelled() && runGroup('reentry')) {
+    await restoreBaseline()
+    // deep-change-target: 1200 COMMITTED lines (see the fixture builder). The
+    // edit sits at line 600 so the three interesting viewport positions are
+    // mutually distinguishable even in a tall autotest window (~150 visible
+    // lines): top (~1, fresh model bind), first change (~600, where the
+    // reveal must land — band [560, 660]), parked bottom (~1050, sanity
+    // > 800). Earlier iterations failed both ways: a 1-line HEAD makes the
+    // whole worktree one added hunk at line 2 ("revealed" == "sat at top"),
+    // and a 300-line file collapses "bottom" (first visible ≈ 147) onto the
+    // change line (150).
+    const deepBaselineLines = Array.from({ length: 1200 }, (_, i) => `deep baseline line ${i + 1}`)
+    const v1 = deepBaselineLines
+      .map((l, i) => (i === 599 ? 'deep baseline line 600 EDITED-V1' : l))
+      .join('\n') + '\n'
+    const v2 = deepBaselineLines
+      .map((l, i) => (i === 599 ? 'deep baseline line 600 EDITED-V2-WHILE-CLOSED' : l))
+      .join('\n') + '\n'
+
+    await window.electronAPI.git.saveFileContent(cleanRoot, deepChangeFile, v1)
+    await sleep(280)
+
+    const firstOpenMark = Date.now()
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-52-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-52-first-list', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === deepChangeFile))
+    }, adaptiveDiffBudget())
+    const api52 = window.__onwardGitDiffDebug
+    if (api52 && api52.getSelectedFile()?.filename !== deepChangeFile) {
+      api52.selectFileByPath(deepChangeFile)
+    }
+    const firstViewReady = await waitForSelectedContentAndModel('GDS-52-first-content-model-ready', v1, {
+      timeoutMs: adaptiveDiffBudget()
+    })
+
+    // The first open's own render-then-reveal cycle ends with a reveal (no
+    // saved position yet). Parking BEFORE that reveal lands loses the race —
+    // the reveal snaps the viewport back to ~600 (observed in the red-run
+    // iteration: parked read 597). Wait for the open's decision to settle,
+    // THEN park.
+    await waitFor('GDS-52-first-decision-settled', () => {
+      const d = window.__onwardGitDiffDebug?.getLastRestoreDecision?.()
+      return Boolean(d && d.at >= firstOpenMark)
+    }, 8000)
+    // Park the viewport far from the first change so the reopen assertion
+    // can distinguish "revealed the first hunk" (~line 600 → scroll fraction
+    // ~0.5) from "never moved" (bottom, fraction ~1) and from "fresh model
+    // bind" (top, fraction ~0). All position probes use raw
+    // getScrollMetrics().scrollTop — getFirstVisibleLine() short-circuits
+    // through restoredAnchorRef and can report a stale anchor line.
+    // NOTE hideUnchangedRegions is enabled: the default view of this
+    // 1-change/1200-line file COLLAPSES to ~190 rendered lines (~5.4k px),
+    // so absolute pixel thresholds are meaningless — the park is enrichment
+    // only; the case's gate is the decision record's revealTargetLine.
+    const parkedOk = await waitFor('GDS-52-parked', () => {
+      const api = window.__onwardGitDiffDebug
+      if (!api) return false
+      api.scrollToFraction(1)
+      const m = api.getScrollMetrics()
+      return Boolean(m && m.maxScrollTop > 500 && m.scrollTop / m.maxScrollTop >= 0.9)
+    }, 5000)
+    await sleep(160)
+    const parkedMetrics = api52?.getScrollMetrics() ?? null
+    const parkedFraction = parkedMetrics && parkedMetrics.maxScrollTop > 0
+      ? parkedMetrics.scrollTop / parkedMetrics.maxScrollTop
+      : -1
+    log('GDS-52-park-result', { parkedOk, parkedFraction })
+    log('GDS-52-parked-viewport', {
+      parkedScrollTop: parkedMetrics?.scrollTop ?? null,
+      parkedMaxScrollTop: parkedMetrics?.maxScrollTop ?? null,
+      parkedFraction,
+      parkedFirstVisibleProbe: api52?.getFirstVisibleLine() ?? null
+    })
+
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-52-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+
+    // Mutate while CLOSED — the exact 2026-07-18 bundle shape.
+    await window.electronAPI.git.saveFileContent(cleanRoot, deepChangeFile, v2)
+    await sleep(320)
+
+    const reopen52Mark = Date.now()
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-52-reopen', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-52-reopen-list', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === deepChangeFile))
+    }, adaptiveDiffBudget())
+    const api52b = window.__onwardGitDiffDebug
+    if (api52b && api52b.getSelectedFile()?.filename !== deepChangeFile) {
+      api52b.selectFileByPath(deepChangeFile)
+    }
+    const reopenContentFresh = await waitForSelectedContentAndModel('GDS-52-reopen-content-model-ready', v2, {
+      timeoutMs: adaptiveDiffBudget()
+    })
+    // PRIMARY GATE — the decision record, not pixels. Monaco measures the
+    // diff layout asynchronously after a remount, so raw scroll offsets are
+    // unstable for seconds (three red-run iterations died on that); the
+    // decision's `revealTargetLine` is computed from getLineChanges() at
+    // apply time and is deterministic from content: the single edited line
+    // is 600, so the reveal must target ~600. The pre-fix build never
+    // applies the content-changed reveal → revealTargetLine stays null →
+    // deterministic red. Pixel metrics are logged as enrichment only.
+    const decision52Applied = await waitFor('GDS-52-reveal-decision-applied', () => {
+      const d = window.__onwardGitDiffDebug?.getLastRestoreDecision?.()
+      return Boolean(d && d.at >= reopen52Mark && d.action === 'reveal-first-change' && d.revealTargetLine !== null)
+    }, 8000)
+    const decision52 = window.__onwardGitDiffDebug?.getLastRestoreDecision?.() ?? null
+    const finalMetrics = window.__onwardGitDiffDebug?.getScrollMetrics() ?? null
+    const revealTargetInBand = typeof decision52?.revealTargetLine === 'number' &&
+      decision52.revealTargetLine >= 590 && decision52.revealTargetLine <= 610
+    record('GDS-52-reopen-changed-content-reveals-first-change', Boolean(
+      firstViewReady &&
+      reopenContentFresh &&
+      decision52Applied &&
+      decision52?.action === 'reveal-first-change' &&
+      decision52?.reason === 'content-changed' &&
+      revealTargetInBand
+    ), {
+      firstViewReady,
+      parkedOk,
+      parkedFraction,
+      parkedScrollTop: parkedMetrics?.scrollTop ?? null,
+      reopenContentFresh,
+      decision52Applied,
+      revealTargetInBand,
+      revealTargetLine: decision52?.revealTargetLine ?? null,
+      finalScrollTop: finalMetrics?.scrollTop ?? null,
+      finalMaxScrollTop: finalMetrics?.maxScrollTop ?? null,
+      finalFirstVisibleProbe: window.__onwardGitDiffDebug?.getFirstVisibleLine() ?? null,
+      decisionProbeAvailable: typeof window.__onwardGitDiffDebug?.getLastRestoreDecision === 'function',
+      decisionAction: decision52?.action ?? null,
+      decisionReason: decision52?.reason ?? null,
+      decisionTrigger: decision52?.trigger ?? null
+    })
+
+    // ── GDS-53: unchanged content across close/reopen restores the saved
+    // position on the CLICK path, without idling into the 2 s reveal safety
+    // timeout. Master's designed reopen is blank-until-click — the
+    // `openingFromClosed` layout effect wipes the body cache, clears the
+    // selection, and detaches the editor — so the flow under contract is:
+    // reopen → click the file → decision `restore-scroll` (signature still
+    // matches what the user last saw) → viewport back at the saved offset,
+    // `trigger !== 'timeout'`.
+    //
+    // Collapse-state coherence: hideUnchangedRegions means pixel offsets are
+    // only comparable within the SAME collapse state, and GDS-52's reveal
+    // just EXPANDED the region around line 600. Cycle the page once more so
+    // BOTH the capture and the later restore happen in the default collapsed
+    // layout of a fresh reopen. Also drains GDS-52's late mirror echoes.
+    await sleep(1600)
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-53-precycle-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+    await sleep(150)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-53-precycle-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-53-precycle-list', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === deepChangeFile))
+    }, adaptiveDiffBudget())
+    const api53pre = window.__onwardGitDiffDebug
+    if (api53pre && api53pre.getSelectedFile()?.filename !== deepChangeFile) {
+      api53pre.selectFileByPath(deepChangeFile)
+    }
+    await waitForSelectedContentAndModel('GDS-53-precycle-content-ready', v2, { timeoutMs: 15000 })
+    // No pixel park: hideUnchangedRegions makes pixel offsets a function of
+    // Monaco's async collapse layout (four red-run iterations could not
+    // stabilize a park), and the PIXEL-level restore contract is already
+    // locked by the SVR suite (SVR-01..15). GDS-53's unique contract is the
+    // DECISION: unchanged content on reopen must take a restore action (not
+    // a reveal, not the 2 s timeout path). The close below captures the v2
+    // signature + whatever position the collapsed view sits at.
+    await sleep(160)
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-53-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+    await sleep(150)
+
+    const reopenMark = Date.now()
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-53-reopen', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-53-reopen-list', () => {
+      const api = window.__onwardGitDiffDebug
+      return Boolean(api?.getFileList().some((f) => f.filename === deepChangeFile))
+    }, adaptiveDiffBudget())
+    const api53 = window.__onwardGitDiffDebug
+    if (api53 && api53.getSelectedFile()?.filename !== deepChangeFile) {
+      api53.selectFileByPath(deepChangeFile)
+    }
+    // Content is served from the main-process content cache (no mutation
+    // happened) — a flat 15 s ceiling is generous; the adaptive budget is
+    // for cold EDR-taxed diff loads and would stretch a failure to 90 s.
+    const reopen53ContentReady = await waitForSelectedContentAndModel('GDS-53-reopen-content-model-ready', v2, {
+      timeoutMs: 15000
+    })
+    const decision53Arrived = await waitFor('GDS-53-restore-decision', () => {
+      const d = window.__onwardGitDiffDebug?.getLastRestoreDecision?.()
+      return Boolean(d && d.at >= reopenMark)
+    }, 6000)
+    const decision53 = window.__onwardGitDiffDebug?.getLastRestoreDecision?.() ?? null
+    const decisionIsRestore =
+      decision53?.action === 'restore-scroll' || decision53?.action === 'restore-anchor'
+    record('GDS-53-reopen-unchanged-content-restores-position', Boolean(
+      reopen53ContentReady &&
+      decision53Arrived &&
+      decisionIsRestore &&
+      decision53?.trigger !== 'timeout'
+    ), {
+      reopen53ContentReady,
+      decision53Arrived,
+      decisionProbeAvailable: typeof window.__onwardGitDiffDebug?.getLastRestoreDecision === 'function',
+      decisionAction: decision53?.action ?? null,
+      decisionTrigger: decision53?.trigger ?? null,
+      decisionIsRestore
+    })
+
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-53-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
   // ───── GDS-47: read-path stat revalidation surfaces a WATCHER-MISSED edit ─────

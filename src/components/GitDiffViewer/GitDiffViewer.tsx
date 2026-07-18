@@ -64,10 +64,12 @@ import {
   clearGitDiffMemorySelection,
   clearGitDiffMemorySelectionWhenEmpty,
   mergeGitDiffSnapshotScroll,
+  resolveDiffRestoreDecision,
   resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
   resolveGitDiffSnapshotSelection,
   shouldRestoreGitDiffSnapshotScroll,
+  type DiffRestoreDecision,
   type DiffViewAnchor,
   type DiffViewMemory,
   type DiffViewMemoryEntry
@@ -199,6 +201,31 @@ const TOKENIZE_SETTLE_CAP_MS = 5000
 const HUNK_ACTION_INSTALL_SETTLE_FRAME_LIMIT = 90
 const HUNK_ACTION_INSTALL_SETTLE_MAX_MS = 1500
 const HUNK_ACTION_HOVER_HIDE_DELAY_MS = 140
+// Warm-reopen reveal settle: same model-reuse reality as the hunk-widget
+// settle above — a close/reopen with unchanged models never re-fires
+// `onDidUpdateDiff`, and the `model-bound` signal is gated on an active
+// click-latency measurement that a reopen does not have. Without this
+// bounded settle the render-then-reveal cycle idles in `waiting-diff`
+// until the 2 s safety timeout on EVERY warm reopen. Frame-bounded like
+// the hunk installer; the safety timeout stays armed as the backstop.
+const WARM_REVEAL_SETTLE_MAX_MS = 1500
+// What advanced the render-then-reveal cycle out of `waiting-diff`; carried
+// into the restore-decision diagnostic so a user trace shows whether a
+// reopen revealed promptly ('warm-ready') or idled out ('timeout').
+type DiffRevealTrigger = 'diff-computed' | 'model-bound' | 'warm-ready' | 'timeout'
+type DiffRestoreDecisionRecord = {
+  action: DiffRestoreDecision['action']
+  reason: string | null
+  trigger: DiffRevealTrigger | 'deferred-diff-computed'
+  fileKey: string | null
+  at: number
+  // Line the reveal actually targeted when a reveal-first-change APPLIED
+  // (from getLineChanges()[0] at apply time); null when no reveal ran.
+  // Deterministic from content — the autotest gates on this instead of
+  // pixel scroll offsets, which are unstable while Monaco measures the
+  // diff layout asynchronously.
+  revealTargetLine: number | null
+}
 
 // Monaco theme aligned with @pierre/diffs' pierre-dark palette so Git Diff
 // reads as the same visual family as the Git History viewer.
@@ -796,6 +823,15 @@ type GitDiffDebugApi = {
   setSelectedDraftContent: (content: string) => boolean
   getIsDraftDirty: () => boolean
   getRestoreNotice: () => { type: 'changed'; message: string; fileName?: string } | null
+  /** Autotest: last restore-vs-reveal decision of the render-then-reveal cycle. */
+  getLastRestoreDecision: () => {
+    action: 'restore-scroll' | 'restore-anchor' | 'reveal-first-change'
+    reason: string | null
+    trigger: 'diff-computed' | 'model-bound' | 'warm-ready' | 'timeout' | 'deferred-diff-computed'
+    fileKey: string | null
+    at: number
+    revealTargetLine: number | null
+  } | null
   getScrollTop: () => number
   getScrollMetrics: () => {
     scrollTop: number
@@ -1472,6 +1508,32 @@ export function GitDiffViewer({
   const suppressMemorySelectionRestoreUntilSelectionRef = useRef(false)
   const [diffRevealPhase, setDiffRevealPhase] = useState<DiffRevealPhase>('idle')
   const diffRevealPhaseRef = useRef<DiffRevealPhase>('idle')
+  // What advanced waiting-diff → restoring-scroll (see DiffRevealTrigger).
+  const lastRevealTriggerRef = useRef<DiffRevealTrigger>('timeout')
+  // One-shot: the restore decision chose reveal-first-change but Monaco had
+  // not computed line changes yet (fresh model swap); the next
+  // onDidUpdateDiff for the SAME fileKey consumes it and reveals.
+  const pendingFirstChangeRevealRef = useRef<{ fileKey: string; reason: string } | null>(null)
+  // Autotest probe: last restore-vs-reveal decision taken by the cycle.
+  const lastRestoreDecisionRef = useRef<DiffRestoreDecisionRecord | null>(null)
+  // Cancellation token for the warm-reopen reveal settle loop.
+  const warmRevealSettleRunIdRef = useRef(0)
+  // Event-driven viewport-goal self-heal. A freshly (re)mounted DiffEditor
+  // reports scrollHeight ≈ viewport for several frames until Monaco measures
+  // the diff layout, so a pixel `setScrollTop` (restore) or a line reveal
+  // executed at decision time gets CLAMPED (observed: saved 34262 → restored
+  // 0; reveal line 600 → landed ~189). The decision records the intended
+  // viewport goal here and `onDidContentSizeChange` re-applies it until the
+  // editor can actually honor it — bounded by a 3 s window, dropped on file
+  // switch / close / a user scroll away from the last applied offset.
+  const pendingViewportGoalRef = useRef<{
+    fileKey: string
+    kind: 'scroll' | 'reveal-line'
+    scrollTop?: number
+    line?: number
+    appliedScrollTop: number
+    at: number
+  } | null>(null)
   const diffRevealTimeoutRef = useRef<number | null>(null)
   const gitDiffOpenAtRef = useRef<number | null>(null)
   const coldMountRecordedRef = useRef(false)
@@ -1677,7 +1739,7 @@ export function GitDiffViewer({
       diffRevealTimeoutRef.current = null
     }
   }, [])
-  const requestDiffRevealRestore = useCallback((reason: 'diff-computed' | 'model-bound' | 'timeout') => {
+  const requestDiffRevealRestore = useCallback((reason: DiffRevealTrigger) => {
     if (diffRevealPhaseRef.current !== 'waiting-diff') return
     if (reason === 'timeout') {
       const file = selectedFileRef.current
@@ -1690,6 +1752,7 @@ export function GitDiffViewer({
         durationMs: DIFF_REVEAL_TIMEOUT_MS
       })
     }
+    lastRevealTriggerRef.current = reason
     setDiffRevealPhase('restoring-scroll')
     diffRevealPhaseRef.current = 'restoring-scroll'
   }, [activeCwd, getFileKey, terminalId])
@@ -1704,6 +1767,118 @@ export function GitDiffViewer({
       requestDiffRevealRestore('timeout')
     }, DIFF_REVEAL_TIMEOUT_MS)
   }, [cancelDiffRevealTimeout, requestDiffRevealRestore])
+
+  // Warm-reopen fast path: complete the render-then-reveal cycle when Monaco
+  // already holds this file's computed diff. Model reuse across close/reopen
+  // fires no `onDidUpdateDiff` (same reality the hunk-widget settle documents
+  // at HUNK_ACTION_INSTALL_SETTLE_*), and the 'model-bound' signal is gated
+  // on an active click-latency measurement that a reopen does not have —
+  // without this, every warm reopen idled in `waiting-diff` until the 2 s
+  // safety timeout (the 2026-07-18 "stale until manual refresh" bundle).
+  // Frame-bounded; the safety timeout stays armed as the backstop.
+  const maybeCompleteWarmReveal = useCallback(() => {
+    const runId = ++warmRevealSettleRunIdRef.current
+    const startedAt = performance.now()
+    const tick = () => {
+      if (runId !== warmRevealSettleRunIdRef.current) return
+      if (diffRevealPhaseRef.current !== 'waiting-diff') return
+      const editor = diffEditorRef.current
+      const file = selectedFileRef.current
+      if (editor && file && activeCwd) {
+        const fileKey = getFileKey(file)
+        const state = fileContentsRef.current[fileKey]
+        const originalUri = editor.getOriginalEditor().getModel()?.uri.toString()
+        const modifiedUri = editor.getModifiedEditor().getModel()?.uri.toString()
+        const modelsMatch =
+          originalUri === buildGitDiffModelPath(file, activeCwd, 'original') &&
+          modifiedUri === buildGitDiffModelPath(file, activeCwd, 'modified')
+        // A stale-marked key means a forced refetch is on its way (the
+        // selection effect fires it) — deciding against the OLD body would
+        // restore a position the fresh content invalidates, and the later
+        // onDidUpdateDiff cannot re-open an idle cycle. Wait it out.
+        const isStale = staleFileContentKeysRef.current.has(fileKey)
+        if (
+          state && !state.loading && !state.error && !state.isBinary &&
+          !isStale && modelsMatch && editor.getLineChanges() !== null
+        ) {
+          requestDiffRevealRestore('warm-ready')
+          return
+        }
+      }
+      if (performance.now() - startedAt > WARM_REVEAL_SETTLE_MAX_MS) return
+      requestAnimationFrame(tick)
+    }
+    tick()
+  }, [activeCwd, getFileKey, requestDiffRevealRestore])
+
+  // Re-apply the parked viewport goal (see pendingViewportGoalRef) once the
+  // editor's measured content can honor it. Driven by onDidContentSizeChange;
+  // self-cancels on window expiry, file switch, or a user scroll away from
+  // the last applied offset.
+  const emitViewportGoalTransition = useCallback((
+    phase: 'parked' | 'satisfied' | 'cancelled-scroll' | 'expired' | 'cancelled-context',
+    goal: { kind: 'scroll' | 'reveal-line'; scrollTop?: number; line?: number }
+  ) => {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_VIEWPORT_GOAL, {
+      cwd: activeCwd ?? '',
+      terminalId,
+      phase,
+      kind: goal.kind,
+      scrollTop: goal.scrollTop ?? null,
+      line: goal.line ?? null
+    })
+  }, [activeCwd, terminalId])
+
+  const reapplyPendingViewportGoal = useCallback(() => {
+    const goal = pendingViewportGoalRef.current
+    if (!goal) return
+    const editor = diffEditorRef.current
+    const file = selectedFileRef.current
+    const fileKey = file ? getFileKey(file) : null
+    // 10 s window: Monaco's post-remount diff layout can lag for seconds on
+    // an EDR-throttled host; the fileKey match + user-scroll cancel below
+    // keep a long window safe.
+    if (!editor || !fileKey || fileKey !== goal.fileKey) {
+      pendingViewportGoalRef.current = null
+      emitViewportGoalTransition('cancelled-context', goal)
+      return
+    }
+    if (Date.now() - goal.at > 10000) {
+      pendingViewportGoalRef.current = null
+      emitViewportGoalTransition('expired', goal)
+      return
+    }
+    const modifiedEditor = editor.getModifiedEditor()
+    if (Math.abs(modifiedEditor.getScrollTop() - goal.appliedScrollTop) > 100) {
+      pendingViewportGoalRef.current = null
+      emitViewportGoalTransition('cancelled-scroll', goal)
+      return
+    }
+    suppressScrollCaptureRef.current = true
+    try {
+      if (goal.kind === 'scroll' && goal.scrollTop !== undefined) {
+        modifiedEditor.setScrollTop(goal.scrollTop)
+        const after = modifiedEditor.getScrollTop()
+        goal.appliedScrollTop = after
+        if (Math.abs(after - goal.scrollTop) <= 2) {
+          restoredAnchorRef.current[fileKey] = { line: null, scrollTop: after }
+          pendingViewportGoalRef.current = null
+          emitViewportGoalTransition('satisfied', goal)
+        }
+      } else if (goal.kind === 'reveal-line' && goal.line !== undefined) {
+        revealLineNearTopSafe(modifiedEditor, goal.line)
+        goal.appliedScrollTop = modifiedEditor.getScrollTop()
+        const lineTop = modifiedEditor.getTopForLineNumber(goal.line)
+        const delta = lineTop - goal.appliedScrollTop
+        if (delta >= 0 && delta <= modifiedEditor.getLayoutInfo().height * 0.6) {
+          pendingViewportGoalRef.current = null
+          emitViewportGoalTransition('satisfied', goal)
+        }
+      }
+    } finally {
+      window.setTimeout(() => { suppressScrollCaptureRef.current = false }, 50)
+    }
+  }, [emitViewportGoalTransition, getFileKey])
 
   const isDraftDirty = selectedFileState?.draftContent !== undefined &&
     selectedFileState.draftContent !== selectedFileState.modifiedContent
@@ -3596,6 +3771,12 @@ export function GitDiffViewer({
       clearCurrentMemorySelection()
       wasOpenRef.current = false
     }
+    // Close cancels any in-flight warm-reveal settle and drops a parked
+    // first-change reveal — a reveal must never fire against a view the
+    // user has already left.
+    warmRevealSettleRunIdRef.current += 1
+    pendingFirstChangeRevealRef.current = null
+    pendingViewportGoalRef.current = null
   }, [captureDiffView, clearCurrentMemorySelection, getMemoryKey, getMemoryStore, isOpen])
 
   // Scroll capture is now registered via onDidScrollChange in handleEditorDidMount
@@ -4473,7 +4654,11 @@ export function GitDiffViewer({
           suppressDraftChangeRef.current = false
         }, 0)
       }
-      // Begin render-then-reveal cycle for the new file
+      // Begin render-then-reveal cycle for the new file. A parked reveal or
+      // warm settle belongs to the PREVIOUS file — drop them.
+      warmRevealSettleRunIdRef.current += 1
+      pendingFirstChangeRevealRef.current = null
+      pendingViewportGoalRef.current = null
       enterDiffWaiting()
     }
     if (memory) {
@@ -4787,12 +4972,68 @@ export function GitDiffViewer({
         markDiffComputedIfReal(liveFileKey)
       }))
 
+      // Viewport-goal self-heal: a restore/reveal applied against a
+      // not-yet-measured diff layout gets clamped; re-apply once Monaco
+      // reports the real content size (see pendingViewportGoalRef).
+      diffEditorBindingDisposablesRef.current.push(modifiedEditorForTracker.onDidContentSizeChange(() => {
+        reapplyPendingViewportGoal()
+      }))
+
       // Transition from waiting-diff to restoring-scroll when Monaco finishes computing changes
       diffEditorBindingDisposablesRef.current.push(editor.onDidUpdateDiff(() => {
         requestDiffRevealRestore('diff-computed')
         diffNavigationIndexRef.current = -1
         scheduleDiffHunkActionWidgetInstall('diff-updated')
         const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
+        // Consume a parked reveal-first-change: the restore decision ran
+        // before Monaco had computed this model pair's diff (fresh swap on
+        // the timeout path). One-shot, and only for the same fileKey — a
+        // file switch in between drops it.
+        const pendingReveal = pendingFirstChangeRevealRef.current
+        if (pendingReveal) {
+          pendingFirstChangeRevealRef.current = null
+          if (pendingReveal.fileKey === liveFileKey) {
+            const changes = editor.getLineChanges()
+            if (changes && changes.length > 0) {
+              const firstChange = changes[0]
+              const targetLine = firstChange.modifiedStartLineNumber || firstChange.originalStartLineNumber || 1
+              const deferredModifiedEditor = editor.getModifiedEditor()
+              revealLineNearTopSafe(deferredModifiedEditor, targetLine)
+              {
+                // Same height-lag self-heal as the decision-time reveal.
+                const appliedScrollTop = deferredModifiedEditor.getScrollTop()
+                const lineTop = deferredModifiedEditor.getTopForLineNumber(targetLine)
+                const delta = lineTop - appliedScrollTop
+                if (!(delta >= 0 && delta <= deferredModifiedEditor.getLayoutInfo().height * 0.6)) {
+                  pendingViewportGoalRef.current = {
+                    fileKey: liveFileKey,
+                    kind: 'reveal-line',
+                    line: targetLine,
+                    appliedScrollTop,
+                    at: Date.now()
+                  }
+                  emitViewportGoalTransition('parked', pendingViewportGoalRef.current)
+                }
+              }
+              lastRestoreDecisionRef.current = {
+                action: 'reveal-first-change',
+                reason: pendingReveal.reason,
+                trigger: 'deferred-diff-computed',
+                fileKey: liveFileKey,
+                at: Date.now(),
+                revealTargetLine: targetLine
+              }
+              perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_RESTORE_DECISION, {
+                cwd: activeCwd ?? '',
+                terminalId,
+                action: 'reveal-first-change',
+                reason: pendingReveal.reason,
+                trigger: 'deferred-diff-computed',
+                filename: selectedFileRef.current?.filename
+              })
+            }
+          }
+        }
         markDiffComputedIfReal(liveFileKey)
       }))
 
@@ -4995,6 +5236,8 @@ export function GitDiffViewer({
       enterDiffWaiting,
       getFileKey,
       revealDiffHunkActionForLine,
+      reapplyPendingViewportGoal,
+      emitViewportGoalTransition,
       scheduleDiffHunkActionWidgetInstall,
       scheduleHideDiffHunkActionWidgets,
       requestDiffRevealRestore,
@@ -5016,8 +5259,13 @@ export function GitDiffViewer({
     if (!editor) return
     if (diffRevealPhaseRef.current === 'idle') {
       enterDiffWaiting()
+      // Warm reopen: the layout-effect 'model-bound' pass has ALREADY run
+      // (layout effects fire before this effect) and was a no-op, and
+      // unchanged models will never re-fire onDidUpdateDiff — drive the
+      // cycle forward when the computed diff is already present.
+      maybeCompleteWarmReveal()
     }
-  }, [isOpen, enterDiffWaiting, selectedFileKey])
+  }, [isOpen, enterDiffWaiting, maybeCompleteWarmReveal, selectedFileKey])
 
   useLayoutEffect(() => {
     if (!isOpen || !selectedFileKey || !selectedFileState || selectedFileState.loading) return
@@ -5100,76 +5348,133 @@ export function GitDiffViewer({
     const memory = getMemoryStore()
     let scrollApplied = false
 
+    let decision: DiffRestoreDecision | null = null
     if (file && fileKey && memory) {
-      const entry = findMemoryEntry(memory, file, fileKey)
-      if (entry) {
-        const headerTitle = file.originalFilename && (file.status === 'R' || file.status === 'C')
-          ? `${file.originalFilename} → ${file.filename}`
-          : file.filename
-
-        if (file.status === 'D') {
-          diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey }
-        } else {
-          // Check signature to detect content changes
-          const currentFileState = fileContentsRef.current[fileKey]
-          if (entry.signature && currentFileState && !currentFileState.isBinary) {
-            const currentSignature = buildDiffSignature(
-              currentFileState.originalContent ?? '',
-              currentFileState.draftContent ?? currentFileState.modifiedContent ?? ''
-            )
-            if (currentSignature !== entry.signature) {
-              diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey }
-              // Banner suppressed — see the matching site at the
-              // selectedFile-mount path. Restoration is still aborted; the
-              // user just doesn't see a "content changed" prompt.
-              // Content changed — abort scroll restoration, let user land at first change
-              cancelDiffRevealTimeout()
-              setDiffRevealPhase('idle')
-              diffRevealPhaseRef.current = 'idle'
-              window.setTimeout(() => { suppressScrollCaptureRef.current = false }, 200)
-              return
-            }
+      const entry = findMemoryEntry(memory, file, fileKey) ?? null
+      const currentFileState = fileContentsRef.current[fileKey]
+      if (entry && (currentFileState?.loading || staleFileContentKeysRef.current.has(fileKey))) {
+        // The selected body is still fetching (loading) or a forced refetch
+        // is pending (stale-marked) — deciding now would compare the saved
+        // signature against a placeholder or an outdated body. Fall back to
+        // waiting-diff; the load's model sync / onDidUpdateDiff (or the
+        // re-armed safety timeout) re-enters this effect once settled. The
+        // loop terminates: the selection effect force-fetches stale keys,
+        // and fetch completion clears both gates.
+        enterDiffWaiting()
+        window.setTimeout(() => { suppressScrollCaptureRef.current = false }, 200)
+        return
+      }
+      const currentSignature =
+        entry?.signature && currentFileState && !currentFileState.isBinary
+          ? buildDiffSignature(
+            currentFileState.originalContent ?? '',
+            currentFileState.draftContent ?? currentFileState.modifiedContent ?? ''
+          )
+          : null
+      decision = resolveDiffRestoreDecision({
+        entry,
+        isDeletedFile: file.status === 'D',
+        currentSignature
+      })
+      if (decision.action === 'restore-scroll') {
+        const modifiedEditor = editor.getModifiedEditor()
+        modifiedEditor.setScrollTop(decision.scrollTop)
+        const appliedScrollTop = modifiedEditor.getScrollTop()
+        if (Math.abs(appliedScrollTop - decision.scrollTop) > 2) {
+          // Fresh remount: Monaco has not measured the diff layout yet, so
+          // the target offset was CLAMPED (observed: saved 34262 → 0). Park
+          // the goal; onDidContentSizeChange re-applies it once honorable.
+          pendingViewportGoalRef.current = {
+            fileKey,
+            kind: 'scroll',
+            scrollTop: decision.scrollTop,
+            appliedScrollTop,
+            at: Date.now()
           }
-
-          // Apply saved scroll position
-          if (entry.scrollTop > 0) {
-            const modifiedEditor = editor.getModifiedEditor()
-            modifiedEditor.setScrollTop(entry.scrollTop)
-            restoredAnchorRef.current[fileKey] = {
-              line: entry.anchor?.line ?? null,
-              scrollTop: entry.scrollTop
-            }
-            scrollApplied = true
-          } else if (entry.anchor?.line) {
-            const modifiedEditor = editor.getModifiedEditor()
-            const targetLine = clampEditorLine(modifiedEditor, entry.anchor.line)
-            if (targetLine !== null) {
-              modifiedEditor.revealLineNearTop(targetLine)
-              restoredAnchorRef.current[fileKey] = {
-                line: targetLine,
-                scrollTop: 0
-              }
-              scrollApplied = true
-            } else {
-              diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey }
-            }
-          }
-
-          diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey }
-          setDiffRestoreNotice(null)
+          emitViewportGoalTransition('parked', pendingViewportGoalRef.current)
         }
+        restoredAnchorRef.current[fileKey] = {
+          line: entry?.anchor?.line ?? null,
+          scrollTop: decision.scrollTop
+        }
+        scrollApplied = true
+      } else if (decision.action === 'restore-anchor') {
+        const modifiedEditor = editor.getModifiedEditor()
+        const targetLine = clampEditorLine(modifiedEditor, decision.line)
+        if (targetLine !== null) {
+          modifiedEditor.revealLineNearTop(targetLine)
+          restoredAnchorRef.current[fileKey] = {
+            line: targetLine,
+            scrollTop: 0
+          }
+          scrollApplied = true
+        }
+      }
+      if (entry) {
+        diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey }
+        setDiffRestoreNotice(null)
       }
     }
 
+    let revealTargetLine: number | null = null
     if (!scrollApplied) {
-      // No saved position: jump to first change
+      // Reveal the first change — the VS Code textDiffEditor fallback, and
+      // (via resolveDiffRestoreDecision) the content-changed override: a
+      // saved position for content the user has NOT seen is meaningless, so
+      // the cycle lands on the first hunk instead of silently keeping an
+      // old scroll offset (2026-07-18 warm-reopen staleness bundle).
       const changes = editor.getLineChanges()
       if (changes && changes.length > 0) {
         const firstChange = changes[0]
         const targetLine = firstChange.modifiedStartLineNumber || firstChange.originalStartLineNumber || 1
-        revealLineNearTopSafe(editor.getModifiedEditor(), targetLine)
+        const modifiedEditor = editor.getModifiedEditor()
+        revealLineNearTopSafe(modifiedEditor, targetLine)
+        revealTargetLine = targetLine
+        if (fileKey) {
+          const appliedScrollTop = modifiedEditor.getScrollTop()
+          const lineTop = modifiedEditor.getTopForLineNumber(targetLine)
+          const delta = lineTop - appliedScrollTop
+          if (!(delta >= 0 && delta <= modifiedEditor.getLayoutInfo().height * 0.6)) {
+            // Height-lagged reveal (unmeasured remount clamps the scroll,
+            // observed: reveal 600 → landed ~189). Park the goal for the
+            // onDidContentSizeChange self-heal.
+            pendingViewportGoalRef.current = {
+              fileKey,
+              kind: 'reveal-line',
+              line: targetLine,
+              appliedScrollTop,
+              at: Date.now()
+            }
+            emitViewportGoalTransition('parked', pendingViewportGoalRef.current)
+          }
+        }
+      } else if (fileKey && decision?.action === 'reveal-first-change') {
+        // Monaco has not computed the diff yet (fresh model swap): park a
+        // one-shot reveal for the next onDidUpdateDiff of this fileKey.
+        pendingFirstChangeRevealRef.current = { fileKey, reason: decision.reason }
       }
     }
+
+    const decisionRecord: DiffRestoreDecisionRecord = {
+      action: decision?.action ?? 'reveal-first-change',
+      reason: decision
+        ? (decision.action === 'reveal-first-change' ? decision.reason : null)
+        : 'no-entry',
+      trigger: lastRevealTriggerRef.current,
+      fileKey,
+      at: Date.now(),
+      revealTargetLine
+    }
+    lastRestoreDecisionRef.current = decisionRecord
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_RESTORE_DECISION, {
+      cwd: activeCwd ?? '',
+      terminalId,
+      action: decisionRecord.action,
+      reason: decisionRecord.reason,
+      trigger: decisionRecord.trigger,
+      revealTargetLine: decisionRecord.revealTargetLine,
+      filename: file?.filename
+    })
 
     // Transition to idle — CSS fade-in reveals content
     cancelDiffRevealTimeout()
@@ -5180,7 +5485,7 @@ export function GitDiffViewer({
     window.setTimeout(() => {
       suppressScrollCaptureRef.current = false
     }, 200)
-  }, [diffRevealPhase, cancelDiffRevealTimeout, findMemoryEntry, getFileKey, getMemoryStore, t])
+  }, [diffRevealPhase, activeCwd, cancelDiffRevealTimeout, emitViewportGoalTransition, enterDiffWaiting, findMemoryEntry, getFileKey, getMemoryStore, terminalId])
 
   useEffect(() => {
     return () => {
@@ -6059,6 +6364,7 @@ export function GitDiffViewer({
       },
       getIsDraftDirty: () => isDraftDirtyRef.current,
       getRestoreNotice: () => diffRestoreNotice,
+      getLastRestoreDecision: () => lastRestoreDecisionRef.current,
       getScrollTop: () => diffEditorRef.current?.getModifiedEditor().getScrollTop() ?? 0,
       getScrollMetrics: () => {
         const editor = diffEditorRef.current

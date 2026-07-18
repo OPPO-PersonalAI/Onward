@@ -152,6 +152,15 @@ export interface GitDiffDebugApi {
   setSelectedDraftContent?: (content: string) => boolean
   getIsDraftDirty?: () => boolean
   getRestoreNotice: () => { type: 'missing' | 'changed'; message: string; fileName?: string } | null
+  /** Autotest: last restore-vs-reveal decision of the render-then-reveal cycle (GDS-52/53). */
+  getLastRestoreDecision?: () => {
+    action: 'restore-scroll' | 'restore-anchor' | 'reveal-first-change'
+    reason: string | null
+    trigger: 'diff-computed' | 'model-bound' | 'warm-ready' | 'timeout' | 'deferred-diff-computed'
+    fileKey: string | null
+    at: number
+    revealTargetLine: number | null
+  } | null
   getScrollTop: () => number
   getScrollMetrics: () => {
     scrollTop: number

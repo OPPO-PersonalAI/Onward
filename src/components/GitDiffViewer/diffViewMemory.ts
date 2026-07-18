@@ -155,6 +155,42 @@ export function shouldRestoreGitDiffSnapshotScroll(
   return !previousSignature || previousSignature === currentSignature
 }
 
+// Restore-vs-reveal decision for the render-then-reveal cycle (the
+// `restoring-scroll` phase). Mirrors VS Code's textDiffEditor precedence —
+// restored view state wins, `revealFirstDiff()` is the fallback — with one
+// deliberate extension: a saved position belongs to the content the user last
+// SAW (`entry.signature`); when the current content no longer matches it, the
+// stale position is meaningless and the cycle must land on the first change
+// instead (the seam VS Code exposes as an explicit open-option override).
+export type DiffRestoreDecision =
+  | { action: 'restore-scroll'; scrollTop: number }
+  | { action: 'restore-anchor'; line: number }
+  | { action: 'reveal-first-change'; reason: 'no-entry' | 'deleted-file' | 'content-changed' | 'no-saved-position' }
+
+export function resolveDiffRestoreDecision(input: {
+  entry: Pick<DiffViewMemoryEntry, 'scrollTop' | 'anchor' | 'signature'> | null
+  isDeletedFile: boolean
+  /** Signature of the content currently loaded; null = unknown (binary / still loading). */
+  currentSignature: string | null
+}): DiffRestoreDecision {
+  const { entry, isDeletedFile, currentSignature } = input
+  if (!entry) return { action: 'reveal-first-change', reason: 'no-entry' }
+  if (isDeletedFile) return { action: 'reveal-first-change', reason: 'deleted-file' }
+  if (
+    entry.signature &&
+    currentSignature !== null &&
+    entry.signature !== currentSignature
+  ) {
+    return { action: 'reveal-first-change', reason: 'content-changed' }
+  }
+  if (entry.scrollTop > 0) return { action: 'restore-scroll', scrollTop: entry.scrollTop }
+  const anchorLine = entry.anchor?.line
+  if (typeof anchorLine === 'number' && anchorLine > 0) {
+    return { action: 'restore-anchor', line: anchorLine }
+  }
+  return { action: 'reveal-first-change', reason: 'no-saved-position' }
+}
+
 export function resolveGitDiffSnapshotScrollTop(
   scrollTop: number | null | undefined,
   scrollHeight: number,
