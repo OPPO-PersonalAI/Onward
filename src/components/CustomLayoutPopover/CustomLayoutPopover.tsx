@@ -9,6 +9,7 @@ import { useI18n } from '../../i18n/useI18n'
 import type { CustomLayoutPreset, LayoutMode } from '../../types/prompt'
 import { CustomLayoutEditor } from '../CustomLayoutEditor/CustomLayoutEditor'
 import { CustomLayoutThumbnail } from './CustomLayoutThumbnail'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './CustomLayoutPopover.css'
 
 interface CustomLayoutPopoverProps {
@@ -96,6 +97,7 @@ export function CustomLayoutPopover({
   // downsize gate sees the right count before AppState commits.
   const handleSaveCreate = useCallback((payload: { name: string; cells: CustomLayoutPreset['cells'] }) => {
     const id = onCreatePreset(payload)
+    trackFeatureUse('custom-layout')
     onApplyPreset(id, payload.cells.length)
     onClose()
   }, [onApplyPreset, onClose, onCreatePreset])
@@ -139,6 +141,7 @@ export function CustomLayoutPopover({
                     type="button"
                     className="custom-layout-popover-item-main"
                     onClick={() => {
+                      trackFeatureUse('custom-layout')
                       onApplyPreset(preset.id)
                       onClose()
                     }}

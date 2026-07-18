@@ -11,6 +11,7 @@ import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { computeMenuPosition, computeSubmenuLayout, shouldDismissMenuOnScroll } from '../../utils/popup-position'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './PromptEditorContextMenu.css'
 
 const PINNED_PRIMARY_LIMIT = 10
@@ -117,12 +118,15 @@ export function PromptEditorContextMenu({
   const hasContent = snapshot.value.trim().length > 0
 
   // Emit a single perf marker on open so usage frequency is observable.
+  // This effect runs once on mount, and the menu only mounts when it opens,
+  // so it is the correct place for the feature-use counter (fires once per open).
   useEffect(() => {
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_CTX_MENU_OPEN, {
       hasSelection,
       pinnedCount: pinnedPrompts.length,
       taskCount: terminals.length
     })
+    trackFeatureUse('prompt-editor-menu')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

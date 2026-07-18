@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import type {
   ProjectSqliteExecuteResult,
   SqliteColumnInfo,
@@ -75,6 +76,10 @@ function toTestIdSegment(value: string): string {
 
 export function SqliteViewer({ rootPath, filePath, onNotifyGitChange }: SqliteViewerProps) {
   const { t } = useI18n()
+
+  // Product telemetry: count once per SQLite viewer open (mount), never per re-render.
+  useEffect(() => { trackFeatureUse('sqlite-viewer') }, [])
+
   const [tables, setTables] = useState<SqliteTableInfo[]>([])
   const [activeTable, setActiveTable] = useState<string | null>(null)
   const [columns, setColumns] = useState<SqliteColumnInfo[]>([])

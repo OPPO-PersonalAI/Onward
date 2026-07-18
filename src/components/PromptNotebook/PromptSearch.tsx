@@ -5,6 +5,7 @@
 
 import { useCallback, useRef, memo } from 'react'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 
 interface PromptSearchProps {
   value: string
@@ -17,8 +18,14 @@ export const PromptSearch = memo(function PromptSearch({ value, onChange, saveMe
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    onChange(e.target.value)
-  }, [onChange])
+    const next = e.target.value
+    // Count once per search session: fire only on the empty → non-empty
+    // transition, not on every keystroke while a query is being refined.
+    if (value === '' && next !== '') {
+      trackFeatureUse('prompt-search')
+    }
+    onChange(next)
+  }, [value, onChange])
 
   const handleClear = useCallback(() => {
     onChange('')

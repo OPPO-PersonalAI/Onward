@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Onward 数据指标体系重构设计 — 事件分类法 + 指标层 + 分析 Skill</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b;
+    --text: #d7dce3; --text-dim: #8b93a1;
+    --accent: #4f9cf9; --green: #34d399; --amber: #fbbf24; --red: #f87171; --purple: #a78bfa;
+    --border: #2a2f3a; --code-bg: #12141a;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 15px; line-height: 1.7; }
+  nav#toc { position: fixed; top: 0; left: 0; width: 270px; height: 100vh; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--border); padding: 24px 12px; font-size: 13px; }
+  nav#toc h2 { font-size: 14px; color: var(--text-dim); margin: 0 0 12px 8px; letter-spacing: 1px; }
+  nav#toc a { display: block; color: var(--text-dim); text-decoration: none; padding: 5px 10px;
+    border-radius: 6px; margin-bottom: 2px; }
+  nav#toc a:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--text); }
+  nav#toc a.active { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); font-weight: 600; }
+  nav#toc a.lvl2 { padding-left: 24px; font-size: 12px; }
+  main { margin-left: 270px; max-width: 1020px; padding: 40px 48px 80px; }
+  @media (max-width: 900px) { nav#toc { display: none; } main { margin-left: 0; padding: 24px; } }
+  h1 { font-size: 26px; border-bottom: 2px solid var(--accent); padding-bottom: 12px; }
+  h2 { font-size: 21px; margin-top: 48px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 17px; margin-top: 28px; color: var(--accent); }
+  code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; color: #9fd0ff; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 22px; margin: 18px 0; }
+  .card h3 { margin-top: 0; }
+  .callout { border-left: 4px solid var(--amber); background: rgba(251,191,36,0.08);
+    border-radius: 0 8px 8px 0; padding: 12px 18px; margin: 16px 0; }
+  .callout.info { border-left-color: var(--accent); background: rgba(79,156,249,0.08); }
+  .callout.danger { border-left-color: var(--red); background: rgba(248,113,113,0.08); }
+  .callout.ok { border-left-color: var(--green); background: rgba(52,211,153,0.08); }
+  .pill { display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 12px;
+    font-weight: 600; margin-right: 6px; vertical-align: middle; }
+  .pill.green { background: rgba(52,211,153,0.15); color: var(--green); border: 1px solid var(--green); }
+  .pill.amber { background: rgba(251,191,36,0.15); color: var(--amber); border: 1px solid var(--amber); }
+  .pill.red { background: rgba(248,113,113,0.15); color: var(--red); border: 1px solid var(--red); }
+  .pill.blue { background: rgba(79,156,249,0.15); color: var(--accent); border: 1px solid var(--accent); }
+  .pill.purple { background: rgba(167,139,250,0.15); color: var(--purple); border: 1px solid var(--purple); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  svg text { font-family: -apple-system, "PingFang SC", sans-serif; }
+  .meta { margin-top: 64px; border-top: 1px dashed var(--border); padding-top: 20px;
+    font-size: 12.5px; color: var(--text-dim); }
+  .meta table { font-size: 12.5px; }
+  ul li { margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#sec-problem">1. 现状与问题</a>
+  <a href="#sec-principles">2. 设计原则</a>
+  <a href="#sec-taxonomy">3. 事件分类法（三层）</a>
+  <a href="#sec-tier1" class="lvl2">3.1 第一层：每日聚合骨架</a>
+  <a href="#sec-tier2" class="lvl2">3.2 第二层：离散高信号事件</a>
+  <a href="#sec-tier3" class="lvl2">3.3 第三层：本地 perf-trace</a>
+  <a href="#sec-indicators">4. 派生指标体系（七组）</a>
+  <a href="#sec-funnel">5. 激活漏斗与 North Star</a>
+  <a href="#sec-budget">6. 事件量预算测算</a>
+  <a href="#sec-consent">7. 同意模型选项</a>
+  <a href="#sec-skill">8. 分析 Skill 设计</a>
+  <a href="#sec-phases">9. 实施分期</a>
+  <a href="#sec-questions">10. 待拍板问题</a>
+  <a href="#sec-meta">11. 文档元数据</a>
+</nav>
+
+<main>
+<h1>Onward 数据指标体系重构设计</h1>
+<p><span class="pill red">状态：待用户拍板</span><span class="pill blue">类型：策略级决策文档</span></p>
+<p>现有埋点是一月份按当时的产品形态设计的。半年过去，产品面扩大了数倍而埋点没有跟上。本文档基于两路调研——① Onward 当下完整功能面盘点，② VS Code / JetBrains FUS / Zed / Warp 的遥测分类法与标准产品分析框架（HEART、留存队列、无崩溃率）——设计一套面向"以数据驱动改进产品"的新指标体系，以及配套的分析 Skill。<strong>关键取舍列在 § 10，由用户拍板后实施。</strong></p>
+
+<h2 id="sec-problem">1. 现状与问题</h2>
+<div class="callout danger">
+<strong>核心结论：现有埋点约 15 个信号，其中只有约 11 个进入上传的每日汇总；而今天的产品有 90+ 个用户可触达的交互面。</strong>覆盖率不足，且已有数据存在结构性缺陷。
+</div>
+<table>
+<tr><th>问题</th><th>细节</th><th>后果</th></tr>
+<tr><td>子页面内部零覆盖</td><td>Git Diff / Git History / Project Editor 只记"打开"；内部约 45 种交互（暂存/丢弃、hunk 操作、大纲跳转、全局搜索、阅读模式、图片/PDF/EPUB 对比、SQLite 查看器）全部无埋点</td><td>无法回答"用户打开 Diff 之后做了什么、哪些功能白做了"</td></tr>
+<tr><td>整块功能零覆盖</td><td>标签页全生命周期、布局预设/自定义布局、定时任务（Schedule）、Prompt 历史管理、设置页全部控件、反馈/诊断包/更新日志、Coding Agent 与内嵌浏览器内部</td><td>采用率、功能价值判断全靠猜</td></tr>
+<tr><td>聚合器丢事件</td><td><code>update/*</code> 五个事件与 <code>error/gpuProcessCrash</code> 只进本地原始流，<strong>不进每日汇总</strong></td><td>日报回答不了"更新失败率、GPU 崩溃量"</td></tr>
+<tr><td>埋点与产品脱节</td><td>一月的 claudeCode/codex 拆分早已合并为 <code>codeAgent</code> 统一入口，埋点语义未跟进</td><td>历史数据口径漂移</td></tr>
+<tr><td>崩溃指标无分母</td><td>只有裸计数，无会话归因</td><td>算不出行业标准的无崩溃会话率/用户率，无法和 99.5% 基准对标</td></tr>
+<tr><td>无激活/采用信号</td><td>没有任何"首次使用"事件</td><td>激活漏斗、功能采用曲线、留存归因全部缺失</td></tr>
+<tr><td>恢复路径不可见</td><td>WebGL 回退、watcher 降级、渲染进程无响应恢复等只在本地 perf-trace</td><td>用户侧"体验降级但没崩溃"的灰色地带在云端完全不可见</td></tr>
+</table>
+
+<h2 id="sec-principles">2. 设计原则</h2>
+<div class="grid2">
+<div class="card"><h3>① 混合制而非全原始</h3><p>预算 = 1M 事件/月 ÷ 1k 日活 ≈ <strong>33 条/用户/天</strong>。高频计数走客户端按日聚合（VS Code / JetBrains 路线），只给低频高信号时刻发离散事件（Zed 的攒批思路）。热路径（每条命令、每次轮询）永不发原始事件。</p></div>
+<div class="card"><h3>② 名字 + 属性包，不搞强类型枚举</h3><p>Zed 从强类型事件枚举迁移到了"事件名 + 属性包"——僵硬分类法跟不上产品演进。我们用<strong>中央注册表</strong>（类比 <code>perf-trace-names.ts</code>）管名字与属性白名单，事件本体保持灵活。</p></div>
+<div class="card"><h3>③ 白名单校验 + 数值取整</h3><p>学 JetBrains FUS：枚举型属性只允许预定义值，不合法就替换成占位符；聚合数值适当取整，防止极端值去匿名化。绝不采集代码内容、路径、命令行。</p></div>
+<div class="card"><h3>④ 匿名事件 + 稳定 distinct_id</h3><p>全部事件带 <code>$process_person_profile:false</code>（便宜 55-80%，且够算 DAU/留存）。distinct_id = 现有随机 instanceId，同意撤回即换新——隐私姿态不变。</p></div>
+</div>
+<div class="callout info"><strong>命名约定</strong>：沿用现有 <code>&lt;域&gt;/&lt;对象&gt;.&lt;动词&gt;</code> 风格并向后兼容（<code>session/start</code>、<code>prompt/use</code> 不改名）。新事件形如 <code>feature/first-use</code>、<code>error/crash</code>、<code>update/check</code>。PostHog 接受任意字符串，注册表内部一致性优先于照搬 PostHog 官方的空格命名。</div>
+
+<h2 id="sec-taxonomy">3. 事件分类法（三层）</h2>
+
+<svg viewBox="0 0 940 250" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="三层事件分类法">
+  <defs><marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#8b93a1"/></marker></defs>
+  <rect x="10" y="15" width="290" height="210" rx="10" fill="#171a21" stroke="#34d399"/>
+  <text x="155" y="42" fill="#34d399" font-size="14" text-anchor="middle" font-weight="bold">第一层 · 每日聚合骨架</text>
+  <text x="155" y="64" fill="#8b93a1" font-size="11" text-anchor="middle">1 条 daily/summary / 安装 / 天</text>
+  <text x="30" y="90" fill="#d7dce3" font-size="12">· 会话/时长/工作台规模（现有）</text>
+  <text x="30" y="112" fill="#d7dce3" font-size="12">· 功能使用计数 ~35 个（大扩展）</text>
+  <text x="30" y="134" fill="#d7dce3" font-size="12">· 稳定性计数（崩溃/降级/恢复）</text>
+  <text x="30" y="156" fill="#d7dce3" font-size="12">· 更新生命周期计数（修缺陷）</text>
+  <text x="30" y="185" fill="#8b93a1" font-size="11">承接：高频、只需要"多少次"的信号</text>
+  <rect x="330" y="15" width="290" height="210" rx="10" fill="#171a21" stroke="#4f9cf9"/>
+  <text x="475" y="42" fill="#4f9cf9" font-size="14" text-anchor="middle" font-weight="bold">第二层 · 离散高信号事件</text>
+  <text x="475" y="64" fill="#8b93a1" font-size="11" text-anchor="middle">经 outbox 攒批，心跳时 ack 上传</text>
+  <text x="350" y="90" fill="#d7dce3" font-size="12">· session/start·end（会话归因）</text>
+  <text x="350" y="112" fill="#d7dce3" font-size="12">· feature/first-use（每功能一生一次）</text>
+  <text x="350" y="134" fill="#d7dce3" font-size="12">· error/crash + error/recovered</text>
+  <text x="350" y="156" fill="#d7dce3" font-size="12">· update/*（5 个生命周期事件）</text>
+  <text x="350" y="185" fill="#8b93a1" font-size="11">承接：低频、需要"何时/顺序"的信号</text>
+  <rect x="650" y="15" width="280" height="210" rx="10" fill="#171a21" stroke="#a78bfa"/>
+  <text x="790" y="42" fill="#a78bfa" font-size="14" text-anchor="middle" font-weight="bold">第三层 · 本地 perf-trace</text>
+  <text x="790" y="64" fill="#8b93a1" font-size="11" text-anchor="middle">不上云，永远本地（现有系统）</text>
+  <text x="670" y="90" fill="#d7dce3" font-size="12">· 逐操作延迟 / IPC 热路径</text>
+  <text x="670" y="112" fill="#d7dce3" font-size="12">· watcher / GL 恢复细节</text>
+  <text x="670" y="134" fill="#d7dce3" font-size="12">· 诊断包随反馈手动提交</text>
+  <text x="670" y="163" fill="#8b93a1" font-size="11">健康计数以"次数"形态汇入第一层，</text>
+  <text x="670" y="181" fill="#8b93a1" font-size="11">细节留在本地</text>
+  <line x1="650" y1="120" x2="620" y2="120" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#ar)"/>
+</svg>
+
+<h3 id="sec-tier1">3.1 第一层：每日聚合骨架（daily/summary 扩展）</h3>
+<p>保留现有骨架与 outbox-ack 上传语义，DailyStats 计数器从 19 个扩到约 55 个，按域分组：</p>
+<table>
+<tr><th>域</th><th>计数器（新增以 ★ 标注）</th><th>回答的问题</th></tr>
+<tr><td><code>session</code></td><td>count、durations(p50/p95/min/max/avg)、totalActiveMs（现有）</td><td>用了多久、多频繁</td></tr>
+<tr><td><code>workspace</code></td><td>tab/terminal/layout 快照统计（现有）+ ★tabCreated、★tabClosed、★layoutPresetApplied、★customLayoutApplied、★downsizeConfirmed</td><td>工作台规模与布局习惯</td></tr>
+<tr><td><code>prompt</code></td><td>send/execute/sendAndExecute（现有）+ ★pinned、★colorTagged、★historySearch、★historyReuse、★editorCtxMenu、★scheduleCreated、★scheduleRun</td><td>Prompt 工作流深度、定时任务是否有人用</td></tr>
+<tr><td><code>subpage.gitdiff</code></td><td>★open、★stageFile、★discardFile、★partialStage、★hunkAction、★modeToggle、★imageDiff、★pdfDiff、★epubDiff</td><td>Diff 是"看"还是"改"，富媒体对比值不值</td></tr>
+<tr><td><code>subpage.githistory</code></td><td>★open、★rangeSelect、★fileDiffView</td><td>History 的使用深度</td></tr>
+<tr><td><code>subpage.editor</code></td><td>★open、★fileOpen、★outlineJump、★globalSearch、★quickOpen、★readerToggle、★mdPreview、★pdfRead、★epubRead、★htmlPreview、★sqliteView、★mermaidRender</td><td>编辑器与各阅读器的真实采用</td></tr>
+<tr><td><code>tools</code></td><td>codeAgentLaunch、browserOpen（语义沿用现有 dropdown 计数）+ ★agentConfigSaved、★browserAutoRefreshUsed</td><td>Agent/浏览器工作流</td></tr>
+<tr><td><code>shell.misc</code></td><td>★terminalRename、★autoFollowToggled、★titleFromBranch、★sendPinnedFromCtxMenu、★shortcutFired（总数）</td><td>终端周边小功能的存活</td></tr>
+<tr><td><code>meta</code></td><td>★settingsOpened、★settingChanged（总数）、★feedbackSubmitted、★diagBundleExported、★changelogOpened</td><td>设置/反馈面利用率</td></tr>
+<tr><td><code>stability</code></td><td>rendererCrashCount（现有）+ ★gpuCrashCount（修缺陷）、★unresponsiveCount、★webglFallbackCount、★watcherDegradedCount、★gitOpFailureCount</td><td>崩溃 + 灰色降级量</td></tr>
+<tr><td><code>update</code></td><td>★check、★downloaded、★installStart、★installComplete、★error（修"聚合器丢事件"缺陷）</td><td>更新漏斗成功率</td></tr>
+</table>
+<div class="callout"><strong>白名单纪律：</strong>所有计数器是"次数"，不带任何自由文本；shortcutFired 只计总数不记是哪个键；settingChanged 只计次数不记改了什么值。数值在上传前按 JetBrains 惯例做分档取整（如 activeMs 取整到分钟）。</div>
+
+<h3 id="sec-tier2">3.2 第二层：离散高信号事件（经 outbox 攒批 + ack 上传）</h3>
+<table>
+<tr><th>事件</th><th>属性（全白名单）</th><th>用途</th><th>预估量/用户/天</th></tr>
+<tr><td><code>session/start</code></td><td>（公共属性即可）</td><td>会话计数分母、活跃判定</td><td>1–5</td></tr>
+<tr><td><code>session/end</code></td><td>durationMs（取整到 10s）、crashFree: bool</td><td><strong>无崩溃会话率</strong>的分子分母</td><td>1–5</td></tr>
+<tr><td><code>feature/first-use</code></td><td>feature: 约 30 个预定义 ID 之一</td><td>采用漏斗、time-to-first-use；<strong>每功能每安装一生只发一次</strong></td><td>&lt;1（摊薄后）</td></tr>
+<tr><td><code>error/crash</code></td><td>kind: renderer | gpu</td><td>无崩溃用户率（7/30 天窗口）</td><td>≈0</td></tr>
+<tr><td><code>error/recovered</code></td><td>kind: unresponsive | webgl-fallback | watcher-degraded（每 kind 每日去重）</td><td>灰色降级的用户面暴露量</td><td>≈0</td></tr>
+<tr><td><code>update/check·downloaded·installStart·installComplete·error</code></td><td>phase 相关（现有属性）</td><td>更新漏斗逐步归因</td><td>1–3</td></tr>
+<tr><td><code>consent/granted·revoked</code></td><td>（无属性）</td><td>同意率本身也是指标</td><td>≈0</td></tr>
+</table>
+<p>上传机制<strong>直接复用刚建好的 outbox 确认送达语义</strong>：离散事件照常写入 JSONL，心跳时与积压一起批量上传，flush ack 后删除。不新增任何传输通道。</p>
+
+<h3 id="sec-tier3">3.3 第三层：本地 perf-trace（不变）</h3>
+<p>逐操作延迟、watcher/GL 恢复细节、IPC 热路径继续只进本地 trace；第一层的 stability 计数是它们在云端的"影子"。用户报 bug 附诊断包时才能看到细节——这条既有边界不动。</p>
+
+<h2 id="sec-indicators">4. 派生指标体系（七组）</h2>
+<p>指标全部由上述事件在查询侧派生（PostHog Insights / 分析 Skill 的 HogQL），客户端不需要为任何指标单独发事件。</p>
+<table>
+<tr><th>#</th><th>指标组</th><th>指标与口径</th><th>数据来源</th></tr>
+<tr><td>1</td><td><strong>规模</strong></td><td>DAU / WAU / MAU（当日有任意事件的 distinct instanceId）；新增安装（首次出现的 instanceId）；版本/平台/架构分布</td><td>任意事件 + 公共属性</td></tr>
+<tr><td>2</td><td><strong>粘性 & 留存</strong></td><td>DAU/MAU、WAU/MAU（开发工具以周节奏为准）；D1/D7/D30 安装队列留存；人均活跃天数</td><td>第二层 session/start + 第一层日报</td></tr>
+<tr><td>3</td><td><strong>时长 & 强度</strong></td><td>会话时长 p50/p95（看分布不看均值）；人均日活跃时长；人均日会话数；tab/终端/布局规模分布</td><td>第一层 session 域</td></tr>
+<tr><td>4</td><td><strong>功能采用</strong>（HEART-Adoption）</td><td>采用率（活跃用户中用过 X 的 %）、广度（人均触达的不同功能数）、深度（采用者的人均次数）、time-to-first-use（安装 → 首用天数）</td><td>feature/first-use + 第一层功能计数</td></tr>
+<tr><td>5</td><td><strong>激活漏斗</strong>（HEART-Task Success）</td><td>安装 → 首次发送 Prompt → 首次启动 Coding Agent → 首次打开子页面 → D7 回访；各步转化率</td><td>feature/first-use 序列</td></tr>
+<tr><td>6</td><td><strong>稳定性</strong></td><td>无崩溃会话率（crashFree 会话 ÷ 总会话）；无崩溃用户率（7/30 天窗口）；按版本对比；灰色降级触达率（recovered 用户 ÷ 活跃）；对标 99.5% 行业基准线</td><td>session/end + error/*</td></tr>
+<tr><td>7</td><td><strong>更新健康</strong></td><td>更新漏斗 check→downloaded→installComplete 转化率；错误率；版本收敛速度（新版本 N 日覆盖率）</td><td>update/* + 公共属性 appVersion</td></tr>
+</table>
+
+<h2 id="sec-funnel">5. 激活漏斗与 North Star</h2>
+<svg viewBox="0 0 940 210" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="激活漏斗">
+  <defs><marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#8b93a1"/></marker></defs>
+  <rect x="10" y="60" width="150" height="70" rx="10" fill="#1e222b" stroke="#4f9cf9"/>
+  <text x="85" y="90" fill="#d7dce3" font-size="13" text-anchor="middle">安装首启</text>
+  <text x="85" y="112" fill="#8b93a1" font-size="11" text-anchor="middle">session/start 首见</text>
+  <rect x="205" y="60" width="150" height="70" rx="10" fill="#1e222b" stroke="#4f9cf9"/>
+  <text x="280" y="90" fill="#d7dce3" font-size="13" text-anchor="middle">首次发送 Prompt</text>
+  <text x="280" y="112" fill="#8b93a1" font-size="11" text-anchor="middle">first-use: prompt-send</text>
+  <rect x="400" y="45" width="170" height="100" rx="10" fill="#132018" stroke="#34d399" stroke-width="2"/>
+  <text x="485" y="78" fill="#34d399" font-size="13" text-anchor="middle" font-weight="bold">首次启动 Coding Agent</text>
+  <text x="485" y="100" fill="#8b93a1" font-size="11" text-anchor="middle">first-use: code-agent</text>
+  <text x="485" y="126" fill="#34d399" font-size="11" text-anchor="middle">← 候选 aha 时刻</text>
+  <rect x="615" y="60" width="140" height="70" rx="10" fill="#1e222b" stroke="#4f9cf9"/>
+  <text x="685" y="90" fill="#d7dce3" font-size="13" text-anchor="middle">首次打开子页面</text>
+  <text x="685" y="112" fill="#8b93a1" font-size="11" text-anchor="middle">git-diff / editor / history</text>
+  <rect x="800" y="60" width="130" height="70" rx="10" fill="#1e222b" stroke="#a78bfa"/>
+  <text x="865" y="90" fill="#a78bfa" font-size="13" text-anchor="middle">D7 回访</text>
+  <text x="865" y="112" fill="#8b93a1" font-size="11" text-anchor="middle">留存队列</text>
+  <line x1="160" y1="95" x2="200" y2="95" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <line x1="355" y1="95" x2="395" y2="95" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <line x1="570" y1="95" x2="610" y2="95" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <line x1="755" y1="95" x2="795" y2="95" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#ar2)"/>
+</svg>
+<div class="card"><h3>North Star 候选（§10 拍板）</h3>
+<ul>
+<li><strong>候选 A（推荐）：每周活跃 Agent 用户数</strong>——当周至少启动过一次 Coding Agent 的安装数。Onward 的核心价值主张是"agent workbench"，这个动作最贴近交付的价值；同类先例：Snyk "Weekly Fixing Orgs"。</li>
+<li><strong>候选 B：周人均 Prompt 执行数</strong>——衡量强度而非广度，适合作为二号指标而非 North Star。</li>
+<li><strong>候选 C：WAU</strong>——最简单，但只测"打开"不测价值，容易虚高。</li>
+</ul></div>
+
+<h2 id="sec-budget">6. 事件量预算测算</h2>
+<table>
+<tr><th>项</th><th>量 / 用户 / 天</th><th>说明</th></tr>
+<tr><td>第一层 daily/summary</td><td>1</td><td>不随功能计数器数量增长（都是同一条事件的属性）</td></tr>
+<tr><td>session/start + end</td><td>2–10</td><td>按人均 1–5 会话</td></tr>
+<tr><td>update/*</td><td>1–3</td><td>每小时 check 但去重后仅计入日报；离散事件只发状态变化</td></tr>
+<tr><td>feature/first-use</td><td>&lt;1</td><td>30 个 ID × 一生一次，摊到日均可忽略</td></tr>
+<tr><td>error/*、consent/*</td><td>≈0</td><td>希望如此</td></tr>
+<tr><td><strong>合计</strong></td><td><strong>≈5–15</strong></td><td>预算 33 的一半以下，1k 日活 ≈ 15–45 万/月，留有 2 倍余量</td></tr>
+</table>
+
+<h2 id="sec-consent">7. 同意模型选项</h2>
+<div class="grid2">
+<div class="card"><h3>选项 1：维持单开关（现状）</h3><p>同意 = 全部（匿名）遥测；拒绝 = 零上传。实现零成本，心智最简单。缺点：拒绝用量的用户连崩溃信号也不给，稳定性样本变小。</p></div>
+<div class="card"><h3>选项 2：VS Code 式分级（off ⊂ 崩溃 ⊂ 全部）</h3><p>拒绝用量但接受崩溃上报的用户仍贡献稳定性数据。代价：设置 UI、i18n、存储迁移、事件分级路由，约一天的实现量；首启弹窗也要改成三选。</p></div>
+</div>
+
+<h2 id="sec-skill">8. 分析 Skill 设计（ow_metrics_report）</h2>
+<table>
+<tr><th>方面</th><th>设计</th></tr>
+<tr><td>形态</td><td><code>.claude/skills/ow_metrics_report/SKILL.md</code>（正文简体中文）+ <code>scripts/</code> 下的拉取/分析脚本（Node，跨平台）</td></tr>
+<tr><td>参数</td><td><code>--pull</code>：用只读 Key 全量抓取 → 存带时间戳快照（已定案）；<code>--range 7d|30d|90d</code>：报告时间窗；缺省不带 <code>--pull</code> 时用最新本地快照离线出报告</td></tr>
+<tr><td>Key 管理</td><td>只读 Personal API Key（Query Read、限定 Onward 项目）存于 <code>ONWARD_POSTHOG_API_KEY</code> 环境变量或 <code>~/.config/onward/posthog-api-key</code>；首次 <code>--pull</code> 未发现 Key 时给出创建引导；<strong>永不进仓库/命令行参数/报告文件</strong></td></tr>
+<tr><td>数据布局</td><td><code>traces/metrics/snapshots/&lt;UTC 时间戳&gt;.json</code>（HogQL 查询结果集合）+ <code>traces/metrics/reports/&lt;时间戳&gt;.html</code>。<code>traces/</code> 已 gitignore——<strong>使用数据不进开源仓库</strong>；报告是自包含 HTML，发给任何人都能直接打开</td></tr>
+<tr><td>报告内容</td><td>§4 七组指标各一节：当前值 + 环比（与上一快照差值 ▲▼）+ 历史趋势表（逐快照一行，纯 HTML/CSS 渲染，暗色 + 左侧 ToC + 无动画跳转，全部遵守仓库 HTML 规范）；结尾自动生成"数据要点"清单（如"功能 X 采用率连续两期下降"）</td></tr>
+<tr><td>历史追踪</td><td>快照序列即历史。报告的趋势表逐期累加（append-only），支持任意两期对比；快照 JSON 保留原始查询结果，口径升级后可以离线重算旧指标</td></tr>
+<tr><td>过渡期</td><td>新旧埋点并存期间，Skill 对旧口径（8 个 dropdown 计数）与新口径分别标注，避免曲线错读</td></tr>
+</table>
+
+<h2 id="sec-phases">9. 实施分期</h2>
+<table>
+<tr><th>期</th><th>内容</th><th>规模</th></tr>
+<tr><td><strong>P1 核心</strong></td><td>事件注册表（telemetry-event-names.ts + 属性白名单校验）；第二层离散事件（session end 带 crashFree、feature/first-use、error/*、update/* 入聚合修缺陷）；聚合器扩到 stability + update 域；North Star 与激活漏斗即可算</td><td>≈1 天</td></tr>
+<tr><td><strong>P2 功能面</strong></td><td>第一层功能计数器全量铺开（subpage 三域 + prompt 扩展 + tools + meta 域，~35 个计数器逐点位埋设）</td><td>≈1–2 天</td></tr>
+<tr><td><strong>P3 Skill</strong></td><td>ow_metrics_report skill + 拉取/分析脚本 + 报告模板；用已回填的历史数据首跑验证</td><td>≈1 天</td></tr>
+<tr><td>（可选）P4</td><td>分级同意模型（若 §7 选项 2 被采纳）</td><td>≈1 天</td></tr>
+</table>
+<p>每期都按仓库 SOP 走：单测 + autotest 成对交付、trace 事件登记、回归验证。</p>
+
+<h2 id="sec-questions">10. 待拍板问题</h2>
+<ol>
+<li><strong>事件分层</strong>：按"聚合骨架 + 离散高信号"的混合制走？（替代方案：全离散如 Zed/Warp——量预算撑得住但余量小；或维持纯聚合——省事但漏斗/留存精度差）</li>
+<li><strong>North Star</strong>：候选 A"每周活跃 Agent 用户"？</li>
+<li><strong>同意模型</strong>：维持单开关，还是上 VS Code 式分级？</li>
+<li><strong>实施范围</strong>：P1→P2→P3 顺序推进，还是先 P1+P3（先让指标和报告跑起来，功能面计数器后补）？</li>
+</ol>
+
+<h2 id="sec-meta">11. 文档元数据</h2>
+<div class="meta">
+<table>
+<tr><th>生成分支</th><td>20260717-feat-apm</td></tr>
+<tr><th>应用版本 / commit</th><td>2.0.1 / b503e11（工作区含未提交的 PostHog 迁移 + outbox 改动）</td></tr>
+<tr><th>文档版本</th><td>v1.2</td></tr>
+<tr><th>调研来源</th><td>功能面盘点（repo 内 Explore agent，2026-07-17）；同类产品与框架调研（VS Code telemetry docs、JetBrains FUS、zed.dev/docs/telemetry、Warp privacy docs、PostHog best practices、Sentry/Crashlytics 无崩溃率定义、HEART/GSM——引用 URL 见调研记录）</td></tr>
+</table>
+<h3 style="color:var(--text-dim); font-size:14px;">更新历史（只增不改）</h3>
+<table>
+<tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+<tr><td>v1.0</td><td>2026-07-17</td><td>20260717-feat-apm</td><td>首版：现状缺陷盘点、三层事件分类法、七组派生指标、激活漏斗与 North Star 候选、预算测算、同意模型选项、分析 Skill 设计、实施分期与待拍板问题</td></tr>
+<tr><td>v1.1</td><td>2026-07-18</td><td>20260717-feat-apm</td><td>拍板并落地 P1+P3：混合制分层、North Star = 每周活跃 Agent 用户、维持单开关同意。P1：事件注册表 + 枚举白名单、feature/first-use（每安装一次，P1 六项由既有事件推导）、session/end 附 crashFree + 时长取整、Tier-2 实时通道（复用 outbox ack 语义，error/recovered 与 update/error 按日去重）、聚合器补 stability/update 域并修 codeAgent 丢计数缺陷、灰色降级三处埋点（unresponsive / webgl-fallback / watcher-degraded）。P3：ow_metrics_report skill + 拉取/模型/报告三脚本 + MMD-01..12 单测；首份真实报告已生成。P2（35 个功能面计数器）待办</td></tr>
+<tr><td>v1.2</td><td>2026-07-18</td><td>20260717-feat-apm</td><td>P2 全量落地：`feature/use` 通用计数事件（白名单 47 个 ID + 聚合器 featureUse 映射 + fu_* 展平，新增点位只需注册 ID + 一行调用）；54 个调用点覆盖工作台/Prompt/子页面/阅读器/工具/终端/设置全功能面（动作处理器埋点，渲染路径用 ref 守卫保证每文件一次，热路径明确排除）；首用推导扩展至 25 个 P2 特性；技术债清零——run-telemetry `.ps1` Windows 平价 runner、报告 `--range` 参数实装、指标模型 fu_* 通用提取（MMD-13/14）；调用点与注册表双向审计零漂移</td></tr>
+</table>
+</div>
+</main>
+
+<script>
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('nav#toc a'));
+    var sections = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+    function onScroll() {
+      var pos = window.scrollY + 100; var active = 0;
+      for (var i = 0; i < sections.length; i++) { if (sections[i] && sections[i].offsetTop <= pos) active = i; }
+      links.forEach(function (a, i) { a.classList.toggle('active', i === active); });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+</body>
+</html>

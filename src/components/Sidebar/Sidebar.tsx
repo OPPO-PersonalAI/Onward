@@ -11,6 +11,7 @@ import { CustomLayoutPopover } from '../CustomLayoutPopover/CustomLayoutPopover'
 import { terminalSessionManager } from '../../terminal/terminal-session-manager'
 import { perfTraceTask } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './Sidebar.css'
 
 const isPresetActive = (mode: LayoutMode, count: PresetCount): boolean =>
@@ -232,7 +233,11 @@ export function Sidebar({
       {/* Change Log button */}
       <button
         className={`sidebar-btn ${isChangeLogOpen ? 'active' : ''}`}
-        onClick={onChangeLogToggle}
+        onClick={() => {
+          // Product telemetry: count only the open action, not the close toggle.
+          if (!isChangeLogOpen) trackFeatureUse('changelog')
+          onChangeLogToggle()
+        }}
         title={t('sidebar.changeLog')}
         data-testid="sidebar-change-log-button"
       >

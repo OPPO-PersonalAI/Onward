@@ -8,6 +8,7 @@ import type { CodingAgentConfigInput, CodingAgentHistoryEntry, EnvVarEntry } fro
 import { useI18n } from '../../i18n/useI18n'
 import type { TranslationKey, TranslationParams } from '../../i18n/core'
 import { useModalEscape } from '../../hooks/useModalEscape'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './CodingAgentModal.css'
 
 interface CodingAgentModalProps {
@@ -199,6 +200,8 @@ export function CodingAgentModal({ onLaunch, onCancel }: CodingAgentModalProps) 
       } else {
         state = await window.electronAPI.codingAgentConfig.save(payload)
       }
+      // Product telemetry: an agent config was saved/created.
+      trackFeatureUse('agent-config-save')
       setHistory(state.history)
       setLastUsedId(state.lastUsedId)
       // Switch to select mode, select the saved entry

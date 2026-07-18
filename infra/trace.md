@@ -406,6 +406,29 @@ details plus trace events for trend analysis.
 | `MAIN_APP_STATE_SAVE` | `main:app-state-save` | `X` (has `durationMs`) | `app-state-storage.ts` save completion |
 | `MAIN_APP_STATE_SAVE_ERROR` | `main:app-state-save-error` | `i` | same, error path |
 
+#### Telemetry upload pipeline (PostHog backend since 2026-07-17)
+
+Backend-neutral names: the events describe pipeline stages, not the vendor.
+All emitted by `electron/main/telemetry/telemetry-service.ts`; consent-gated,
+so none of these fire when telemetry consent is declined.
+
+| Constant | Name | Phase | Emitted at |
+|---|---|---|---|
+| `MAIN_TELEMETRY_UPLOAD_CLIENT_STARTED` | `main:telemetry.upload-client-started` | `i` | `startUploadClient()` success — payload `host` |
+| `MAIN_TELEMETRY_UPLOAD_CLIENT_START_FAILED` | `main:telemetry.upload-client-start-failed` | `i` | `startUploadClient()` catch arm — payload `error` (sliced 256) |
+| `MAIN_TELEMETRY_UPLOAD_CLIENT_STOPPED` | `main:telemetry.upload-client-stopped` | `i` | `stopUploadClient()` (`reason: 'stop'`, consent-off) and `shutdown()` (`reason: 'shutdown'`, app quit) |
+| `MAIN_TELEMETRY_UPLOAD_CLIENT_NOT_CONFIGURED` | `main:telemetry.upload-client-not-configured` | `i` | `startUploadClient()` fallback when the PostHog key is empty / `disabled` — uploads off, local pipeline active |
+| `MAIN_TELEMETRY_DAILY_SUMMARY_UPLOADED` | `main:telemetry.daily-summary-uploaded` | `i` | `uploadSummaryWithAck()` after the flush acknowledgement — payload `date`, `sessionCount` |
+| `MAIN_TELEMETRY_DAILY_SUMMARY_UPLOAD_FAILED` | `main:telemetry.daily-summary-upload-failed` | `i` | `uploadSummaryWithAck()` flush rejection — no state change, retried next heartbeat — payload `date`, `error` (sliced 256) |
+| `MAIN_TELEMETRY_DAILY_SUMMARY_LOCAL_ONLY` | `main:telemetry.daily-summary-local-only` | `i` | `uploadSummaryWithAck()` with no client — summary stays local and pending |
+| `MAIN_TELEMETRY_IMMEDIATE_EVENT_SENT` | `main:telemetry.immediate-event-sent` | `i` | RETIRED 2026-07-18 — `trackImmediate()` was removed with the metric redesign (the ack-gated Tier-2 live lane replaced it); constant kept per the never-rename rule |
+| `MAIN_TELEMETRY_UPLOAD_ERROR` | `main:telemetry.upload-error` | `i` | PostHog client `error` listener — payload `error` (sliced 256) |
+| `MAIN_TELEMETRY_OUTBOX_DAY_CLEARED` | `main:telemetry.outbox-day-cleared` | `i` | `removeUploadedDayFromOutbox()` after an acked daily summary — payload `date`, `removed` |
+| `MAIN_TELEMETRY_OUTBOX_REMEDIATION_UPLOADED` | `main:telemetry.outbox-remediation-uploaded` | `i` | `removeAckedLines()` after an acked upload + outbox rewrite — payload `lane: 'backlog' \| 'live'`, `uploaded`, `removed` (the live lane carries Tier-2 discrete events: session start/end, first-use, crash, update, consent) |
+| `MAIN_TELEMETRY_OUTBOX_REMEDIATION_FAILED` | `main:telemetry.outbox-remediation-failed` | `i` | `uploadBacklog()` / `uploadLiveEvents()` flush rejection — lines retained, retried next heartbeat — payload `lane`, `count`, `error` (sliced 256) |
+| `MAIN_TELEMETRY_OUTBOX_TRIMMED` | `main:telemetry.outbox-trimmed` | `i` | `enforceOutboxBudget()` when the 20 MB cap trims oldest records — payload `droppedLines`, `bytes` |
+| `MAIN_TELEMETRY_SHUTDOWN_LIVE_PUSH` | `main:telemetry.shutdown-live-push` | `i` | `shutdown()` best-effort push of today's pending Tier-2 events at quit (no deletion; deterministic UUIDs make the later ack-gated re-send idempotent) — payload `count` |
+
 #### IPC hot paths
 
 | Constant | Name | Phase | Call site |

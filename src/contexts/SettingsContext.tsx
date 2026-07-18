@@ -15,6 +15,7 @@ import type { ThemeSettings } from '../types/theme'
 import { DEFAULT_THEME_SETTINGS } from '../constants/themes'
 import { applyTheme, resolveThemeColors } from '../utils/theme-applier'
 import { DEFAULT_LOCALE, type AppLocale } from '../i18n/core'
+import { trackFeatureUse } from '../telemetry/track-feature-use'
 
 /**
  * Save anti-shake time (milliseconds)
@@ -218,6 +219,7 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
 
   // Update a single shortcut
   const updateShortcut = useCallback((key: keyof ShortcutConfig, value: string | null) => {
+    trackFeatureUse('setting-change')
     updateSettings(prev => ({
       ...prev,
       shortcuts: {
@@ -240,6 +242,7 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
 
   // Update theme settings
   const updateTheme = useCallback((theme: ThemeSettings) => {
+    trackFeatureUse('setting-change')
     updateSettings(prev => ({
       ...prev,
       theme
@@ -261,6 +264,7 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
 
   // Update terminal style
   const updateTerminalStyle = useCallback((terminalId: string, style: Partial<TerminalStyleConfig>) => {
+    trackFeatureUse('setting-change')
     updateSettings(prev => ({
       ...prev,
       terminalStyles: {
@@ -298,6 +302,7 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
   }, [updateSettings])
 
   const applyStyleGlobally = useCallback((field: keyof GlobalTerminalStyle, value: string | number | null) => {
+    trackFeatureUse('setting-change')
     updateSettings(prev => {
       const globalTerminalStyle = {
         ...(prev.globalTerminalStyle ?? createDefaultGlobalTerminalStyle()),
@@ -340,6 +345,7 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
   }, [updateSettings])
 
   const updateLanguage = useCallback((language: AppLocale) => {
+    trackFeatureUse('setting-change')
     updateSettings(prev => ({
       ...prev,
       language
@@ -358,6 +364,7 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
   }, [updateSettings])
 
   const updatePerformanceDiagnosticsEnabled = useCallback((enabled: boolean) => {
+    trackFeatureUse('setting-change')
     updateSettings(prev => ({
       ...prev,
       performanceDiagnosticsEnabled: enabled

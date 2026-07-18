@@ -691,6 +691,9 @@ function createWindow(displayName: string): void {
     mainWindow.webContents.on('unresponsive', () => {
       log('[Window] renderer unresponsive')
       performanceTrace.record(PERF_TRACE_EVENT.MAIN_RENDERER_UNRESPONSIVE)
+      // Stability telemetry: gray-degradation exposure (live lane dedupes
+      // to one discrete event per kind per day; aggregate counts them all)
+      getTelemetryService().track('error/recovered', { kind: 'unresponsive' })
     })
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
       log('[Renderer]', { level, message, line, sourceId })
@@ -838,9 +841,17 @@ app.whenReady().then(async () => {
       // Autotest mode: enable telemetry with a fresh instanceId so events flow immediately
       const { randomUUID } = require('crypto')
       getSettingsStorage().setTelemetryConsent(true, randomUUID())
-      // Clear the local log file for a clean test run
-      const logPath = join(app.getPath('userData'), 'telemetry-events.jsonl')
-      try { require('fs').writeFileSync(logPath, '', 'utf-8') } catch {}
+      if (process.env.ONWARD_AUTOTEST_TELEMETRY_KEEP_OUTBOX === '1') {
+        // Outbox-remediation autotests seed telemetry-events.jsonl BEFORE
+        // launch; wiping it here would delete pending records without an
+        // upload acknowledgement — the exact anti-pattern the outbox
+        // semantics forbid — and blind the remediation assertions.
+        console.log('[Telemetry] Keeping seeded outbox (ONWARD_AUTOTEST_TELEMETRY_KEEP_OUTBOX=1)')
+      } else {
+        // Clear the local log file for a clean test run
+        const logPath = join(app.getPath('userData'), 'telemetry-events.jsonl')
+        try { require('fs').writeFileSync(logPath, '', 'utf-8') } catch {}
+      }
       console.log('[Telemetry] Consent set to true for autotest (ONWARD_TELEMETRY_RESET_CONSENT=1)')
     } else {
       // Manual debug mode: reset to null so the consent dialog appears

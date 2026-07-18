@@ -9,6 +9,7 @@ import type { Prompt } from '../types/electron.d.ts'
 import type { TerminalBatchResult } from '../types/prompt'
 import { computeNextExecution } from '../utils/schedule'
 import { useI18n } from '../i18n/useI18n'
+import { trackFeatureUse } from '../telemetry/track-feature-use'
 /** Maximum polling interval (60 seconds) */
 const MAX_POLL_INTERVAL = 60 * 1000
 
@@ -137,6 +138,8 @@ export function useScheduleEngine({
       return
     }
 
+    // Scheduled prompt actually fires here (prompt + target terminals verified above).
+    trackFeatureUse('schedule-run')
     try {
       const result = await onSendAndExecuteRef.current(existingTerminalIds, prompt.content)
       if (result.failedIds.length > 0 || result.sentOnlyIds.length > 0) {

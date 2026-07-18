@@ -5,6 +5,7 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef } from 'react'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { redispatchPdfHostKey } from '../../utils/pdfHostKey'
 import type { OutlineItem } from './Outline/types'
 import { OutlineSymbolKind } from './Outline/types'
@@ -119,6 +120,9 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
   const stateReadyRef = useRef(false)
   const lastPageRef = useRef<number>(0)
   const { t } = useI18n()
+
+  // Product telemetry: count once per PDF reader open (mount), never per re-render.
+  useEffect(() => { trackFeatureUse('pdf-reader') }, [])
 
   const setIframeRef = useCallback((node: HTMLIFrameElement | null) => {
     if (iframeRef.current === node) return

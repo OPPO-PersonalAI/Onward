@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type SyntheticEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type SyntheticEvent } from 'react'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './GitImagePreview.css'
 
 export type ImageDisplayMode = 'original' | 'fit'
@@ -89,6 +90,9 @@ export function GitImagePreview({
   const [onionOpacity, setOnionOpacity] = useState(50)
   const swipeContainerRef = useRef<HTMLDivElement | null>(null)
   const swipeDraggingRef = useRef(false)
+
+  // Product telemetry: count once per image-diff view open (mount), never per re-render.
+  useEffect(() => { trackFeatureUse('image-diff') }, [])
 
   const handleImageLoad = useCallback((key: string, event: SyntheticEvent<HTMLImageElement>) => {
     const image = event.currentTarget

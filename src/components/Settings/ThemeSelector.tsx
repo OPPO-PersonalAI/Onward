@@ -10,6 +10,7 @@ import { ColorPickerAdvanced } from './ColorPickerAdvanced'
 import type { ThemeSettings, PresetThemeId } from '../../types/theme'
 import type { TranslationKey } from '../../i18n/core'
 import { useI18n } from '../../i18n/useI18n'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import './ThemeSelector.css'
 
 export function ThemeSelector() {
@@ -47,6 +48,8 @@ export function ThemeSelector() {
         presetId: currentTheme.presetId,
         custom: { accent }
       })
+      // Product telemetry: user applied a custom accent (entered custom theme mode).
+      trackFeatureUse('theme-custom')
     }
   }, [isCustomMode, currentTheme, updateTheme])
 

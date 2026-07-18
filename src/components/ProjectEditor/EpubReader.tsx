@@ -5,6 +5,7 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import ePub from 'epubjs'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import type { Book, NavItem, Rendition } from 'epubjs'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTraceDiagnostic } from '../../utils/perf-trace'
@@ -178,6 +179,10 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
   ref
 ) {
   const { t } = useI18n()
+
+  // Product telemetry: count once per EPUB reader open (mount), never per re-render.
+  useEffect(() => { trackFeatureUse('epub-reader') }, [])
+
   const containerRef = useRef<HTMLDivElement | null>(null)
   const bookRef = useRef<Book | null>(null)
   const renditionRef = useRef<Rendition | null>(null)

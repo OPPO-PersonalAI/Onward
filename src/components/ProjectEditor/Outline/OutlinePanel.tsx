@@ -5,6 +5,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../../../i18n/useI18n'
+import { trackFeatureUse } from '../../../telemetry/track-feature-use'
 import type { OutlineItem } from './types'
 import { OutlineSymbolKind } from './types'
 import { countSymbols } from './outlineParser'
@@ -508,6 +509,8 @@ function OutlinePanelImpl({
 
   const handleItemClick = useCallback(
     (item: OutlineItem) => {
+      // Product telemetry: count each outline heading/symbol jump click.
+      trackFeatureUse('outline')
       if (item.target && onItemNavigate) {
         onItemNavigate(item)
         return

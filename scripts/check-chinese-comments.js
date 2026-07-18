@@ -66,6 +66,12 @@ function isAllowlistedPath(relPath) {
   // language for the audience. This also covers docs/html/ — the canonical
   // output dir for user-requested HTML interpretation docs (see CLAUDE.md).
   if (relPath.startsWith('docs/')) return true
+  // The metrics report renderer embeds the reader-facing Chinese report
+  // template (the generated HTML is the same document category as
+  // docs/html/, it just lives in gitignored traces/metrics/). Code comments
+  // in this file remain English per the repo rule; only the template
+  // literals carry Chinese copy.
+  if (relPath === 'scripts/metrics/build-metrics-report.mjs') return true
   return false
 }
 

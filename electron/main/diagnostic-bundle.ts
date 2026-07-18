@@ -521,8 +521,8 @@ function renderSystemInfo(ctx: SystemInfoContext): string {
   } else {
     for (const [key, value] of onwardEnv) {
       // Redact obvious secrets even though we are pinky-promise local —
-      // the bundle may be shared, and ONWARD_TELEMETRY_CONNECTION_STRING
-      // can carry an instrumentation key.
+      // the bundle may be shared, and ONWARD_TELEMETRY_POSTHOG_KEY
+      // can carry an ingestion key.
       const redacted = isLikelySecretEnv(key) ? '[redacted]' : value
       lines.push(`${key}=${redacted}`)
     }

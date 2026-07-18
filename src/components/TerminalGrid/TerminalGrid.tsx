@@ -35,6 +35,7 @@ import { perfMonitor } from '../../utils/perf-monitor'
 import { perfTrace, perfTraceTask } from '../../utils/perf-trace'
 import { computeMenuPosition, computeSubmenuLayout } from '../../utils/popup-position'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { resolveGitDiffInitialCwd } from '../../utils/git-diff-cwd-resolution'
 import { useI18n } from '../../i18n/useI18n'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from '../../utils/terminal-command'
@@ -1107,6 +1108,8 @@ export const TerminalGrid = memo(function TerminalGrid({
       bytes: prompt.content.length,
       pinnedCount: orderedPinnedPrompts.length
     }, terminalId)
+    // Product telemetry: user sent a pinned prompt from the terminal context menu.
+    trackFeatureUse('send-pinned-prompt')
     onSendAndExecutePinnedPrompt(terminalId, prompt)
     closeTermCtxMenu()
     terminalSessionManager.focus(terminalId)

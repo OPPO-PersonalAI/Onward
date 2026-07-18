@@ -4,6 +4,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { trackFeatureUse } from '../../../telemetry/track-feature-use'
 import { rendererWorkScheduler } from '../../../utils/renderer-work-scheduler'
 import { perfTrace } from '../../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../../utils/perf-trace-names'
@@ -91,6 +92,8 @@ export function useGlobalSearch({ rootPath, isActive }: UseGlobalSearchParams) {
 
     clearResults()
     setIsSearching(true)
+    // Product telemetry: count each executed (debounced) global search, not per keystroke.
+    trackFeatureUse('global-search')
     const searchId = `search-client-${Date.now()}-${Math.random().toString(36).slice(2)}`
     activeSearchIdRef.current = searchId
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SEARCH_GLOBAL, {
