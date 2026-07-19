@@ -354,8 +354,8 @@
   flex: 1;
   overflow: auto;
   padding: 6px 0;
-  /* Slightly larger than legacy 14px so file names and Seti icons read more clearly */
-  font-size: 15px;
+  /* Share the editor font scale with the Outline panel so both sidebars stay visually consistent */
+  font-size: var(--project-editor-font-size, 14px);
 }
 
 .project-editor-tree-root {

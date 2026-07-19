@@ -164,6 +164,32 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
     if (!expanded || cancelled()) return results
   }
 
+  // Outline rows and the file tree must render at the same font size: both inherit
+  // --project-editor-font-size from the ProjectEditor modal root, so the two sidebars
+  // stay visually consistent and move together when the editor font-size setting changes.
+  const sidebarFontMatched = await waitFor(
+    'pmn-sidebar-font-size-parity',
+    () => {
+      const tree = document.querySelector<HTMLElement>('.project-editor-tree')
+      const outlineItem = document.querySelector<HTMLElement>('.outline-panel-item')
+      if (!tree || !outlineItem) return false
+      return getComputedStyle(tree).fontSize === getComputedStyle(outlineItem).fontSize
+    },
+    3000,
+    80
+  )
+  const treeEl = document.querySelector<HTMLElement>('.project-editor-tree')
+  const outlineItemEl = document.querySelector<HTMLElement>('.outline-panel-item')
+  record('PMN-03e-sidebar-font-size-parity', sidebarFontMatched, {
+    treeFontSize: treeEl ? getComputedStyle(treeEl).fontSize : null,
+    outlineItemFontSize: outlineItemEl ? getComputedStyle(outlineItemEl).fontSize : null,
+    modalVariable: (() => {
+      const modal = document.querySelector<HTMLElement>('.project-editor-modal')
+      return modal ? getComputedStyle(modal).getPropertyValue('--project-editor-font-size').trim() : null
+    })()
+  })
+  if (!sidebarFontMatched || cancelled()) return results
+
   const highlightFixture = await window.electronAPI.project.readFile(ctx.rootPath, HIGHLIGHT_FIXTURE_PATH)
   record('PMN-04-highlight-fixture-exists', highlightFixture.success, {
     path: HIGHLIGHT_FIXTURE_PATH,
