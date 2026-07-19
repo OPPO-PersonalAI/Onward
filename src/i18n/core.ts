@@ -754,6 +754,8 @@ const en = {
   'outlinePanel.empty.selectFile': 'Select a file',
   'outlinePanel.empty.noMatch': 'No matching symbols',
   'outlinePanel.empty.noSymbols': 'No symbols detected',
+  'outlinePanel.truncated': 'First {{kept}} of {{total}}',
+  'outlinePanel.truncated.tooltip': 'Large outline: showing the first {{kept}} of {{total}} symbols (shallower levels first)',
 
   'sqliteViewer.actions': 'Actions',
   'sqliteViewer.primaryKey': 'Primary key',
@@ -2193,6 +2195,8 @@ const zhCN: LocaleTranslations = {
   'outlinePanel.empty.selectFile': '请选择文件',
   'outlinePanel.empty.noMatch': '无匹配符号',
   'outlinePanel.empty.noSymbols': '未检测到符号',
+  'outlinePanel.truncated': '前 {{kept}} 项 / 共 {{total}} 项',
+  'outlinePanel.truncated.tooltip': '大纲过大：仅显示前 {{kept}} 项（共 {{total}} 项，优先保留较浅层级）',
 
   'sqliteViewer.actions': '操作',
   'sqliteViewer.primaryKey': '主键',

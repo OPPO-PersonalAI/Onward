@@ -13,6 +13,7 @@ import { TerminalTitleMenu } from '../TerminalTitleMenu'
 import { GitDiffViewer } from '../GitDiffViewer'
 import { GitHistoryViewer } from '../GitHistoryViewer'
 import { ProjectEditor } from '../ProjectEditor'
+import { SubpageSubtreeFreeze } from './SubpageSubtreeFreeze'
 import { SubpagePanelShell, type SubpagePanelShellState } from '../SubpageSwitcher'
 import { CodingAgentModal } from '../CodingAgentModal'
 import type { CodingAgentConfigInput, GitStateMirrorSnapshot, GitStateMirrorDelta, TerminalGitStatus } from '../../types/electron'
@@ -3167,42 +3168,48 @@ export const TerminalGrid = memo(function TerminalGrid({
             />
           )}
           <div className={`terminal-grid-subpage-body ${isSubpageSwitching ? 'is-switching' : ''}`}>
-            <GitDiffViewer
-              isOpen={gitDiffOpen}
-              onClose={handleCloseGitDiff}
-              terminalId={gitDiffTerminalId || ''}
-              cwd={gitDiffCwd}
-              cwdPending={gitDiffCwdPending}
-              openRequestedAt={gitDiffOpenRequestedAt}
-              cwdReadyAt={gitDiffCwdReadyAt}
-              displayMode="panel"
-              panelShellMode="external"
-              onPanelShellStateChange={handleDiffPanelShellStateChange}
-              taskTitle={terminals.find(t => t.id === gitDiffTerminalId)?.title}
-              navigationTarget={gitDiffNavigationTarget}
-            />
-            <GitHistoryViewer
-              isOpen={gitHistoryOpen}
-              onClose={handleCloseGitHistory}
-              terminalId={gitHistoryTerminalId || ''}
-              cwd={gitHistoryCwd}
-              displayMode="panel"
-              panelShellMode="external"
-              onPanelShellStateChange={handleHistoryPanelShellStateChange}
-              taskTitle={terminals.find(t => t.id === gitHistoryTerminalId)?.title}
-            />
-            <ProjectEditor
-              isOpen={projectEditorOpenInGrid}
-              terminalId={projectEditorOpenInGrid ? projectEditorTerminalId : null}
-              cwd={projectEditorOpenInGrid ? projectEditorCwd : null}
-              openRequest={projectEditorOpenRequest}
-              onClose={onCloseProjectEditor ?? (() => {})}
-              onDirtyChange={onProjectEditorDirtyChange}
-              displayMode="panel"
-              panelShellMode="external"
-              onPanelShellStateChange={handleEditorPanelShellStateChange}
-              taskTitle={terminals.find(t => t.id === projectEditorTerminalId)?.title}
-            />
+            <SubpageSubtreeFreeze panel="diff" frozen={!gitDiffOpen}>
+              <GitDiffViewer
+                isOpen={gitDiffOpen}
+                onClose={handleCloseGitDiff}
+                terminalId={gitDiffTerminalId || ''}
+                cwd={gitDiffCwd}
+                cwdPending={gitDiffCwdPending}
+                openRequestedAt={gitDiffOpenRequestedAt}
+                cwdReadyAt={gitDiffCwdReadyAt}
+                displayMode="panel"
+                panelShellMode="external"
+                onPanelShellStateChange={handleDiffPanelShellStateChange}
+                taskTitle={terminals.find(t => t.id === gitDiffTerminalId)?.title}
+                navigationTarget={gitDiffNavigationTarget}
+              />
+            </SubpageSubtreeFreeze>
+            <SubpageSubtreeFreeze panel="history" frozen={!gitHistoryOpen}>
+              <GitHistoryViewer
+                isOpen={gitHistoryOpen}
+                onClose={handleCloseGitHistory}
+                terminalId={gitHistoryTerminalId || ''}
+                cwd={gitHistoryCwd}
+                displayMode="panel"
+                panelShellMode="external"
+                onPanelShellStateChange={handleHistoryPanelShellStateChange}
+                taskTitle={terminals.find(t => t.id === gitHistoryTerminalId)?.title}
+              />
+            </SubpageSubtreeFreeze>
+            <SubpageSubtreeFreeze panel="editor" frozen={!projectEditorOpenInGrid}>
+              <ProjectEditor
+                isOpen={projectEditorOpenInGrid}
+                terminalId={projectEditorOpenInGrid ? projectEditorTerminalId : null}
+                cwd={projectEditorOpenInGrid ? projectEditorCwd : null}
+                openRequest={projectEditorOpenRequest}
+                onClose={onCloseProjectEditor ?? (() => {})}
+                onDirtyChange={onProjectEditorDirtyChange}
+                displayMode="panel"
+                panelShellMode="external"
+                onPanelShellStateChange={handleEditorPanelShellStateChange}
+                taskTitle={terminals.find(t => t.id === projectEditorTerminalId)?.title}
+              />
+            </SubpageSubtreeFreeze>
           </div>
         </div>
       )}

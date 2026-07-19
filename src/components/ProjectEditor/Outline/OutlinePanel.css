@@ -145,6 +145,51 @@
   padding: 4px 0;
 }
 
+/* Windowed rendering for pathological outlines: fixed 26px rows (mirrored in
+ * outlineVirtualization.ts OUTLINE_VIRTUAL_ROW_HEIGHT), absolutely positioned
+ * inside a full-height spacer so the scrollbar reflects the whole list. */
+.outline-panel-tree.virtualized {
+  padding: 0;
+}
+
+.outline-panel-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.outline-panel-virtual-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 26px;
+}
+
+.outline-panel-virtual-row .outline-panel-item {
+  align-items: center;
+  height: 26px;
+  box-sizing: border-box;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.outline-panel-virtual-row .outline-panel-item-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
+}
+
+.outline-panel-truncated {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background-color: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: default;
+}
+
 .outline-panel-tree::-webkit-scrollbar {
   width: 8px;
 }

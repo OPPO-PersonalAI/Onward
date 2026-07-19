@@ -3,12 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../../../i18n/useI18n'
 import type { OutlineItem } from './types'
 import { OutlineSymbolKind } from './types'
 import { countSymbols } from './outlineParser'
 import { alignElementCenter } from '../utils/scrollCenter'
+import type { OutlineTruncation } from './outlineTruncation'
+import {
+  OUTLINE_VIRTUALIZE_THRESHOLD,
+  OUTLINE_VIRTUAL_ROW_HEIGHT,
+  computeOutlineWindow,
+  centerScrollTopForIndex,
+  flattenVisibleOutline,
+  outlineItemKey
+} from './outlineVirtualization'
+import { perfTrace } from '../../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../../utils/perf-trace-names'
 import './OutlinePanel.css'
 
 export type OutlineTarget = 'editor' | 'preview'
@@ -31,6 +42,8 @@ interface OutlinePanelProps {
   /** Override for non-text readers (PDF / EPUB). When set, takes precedence
    * over the default editor cursor jump for items that carry a `target`. */
   onItemNavigate?: (item: OutlineItem) => void
+  /** Parse-time cap info; when truncated, the header shows a kept/total hint. */
+  truncation?: OutlineTruncation
 }
 
 const FILTER_THRESHOLD = 8
@@ -101,6 +114,18 @@ function getIconInfo(kind: OutlineSymbolKind): { label: string; className: strin
   }
 }
 
+function matchesByTarget(a: OutlineItem, b: OutlineItem): boolean {
+  if (!a.target || !b.target) return false
+  if (a.target.kind !== b.target.kind) return false
+  if (a.target.kind === 'pdf-page' && b.target.kind === 'pdf-page') {
+    return a.target.page === b.target.page
+  }
+  if (a.target.kind === 'epub-href' && b.target.kind === 'epub-href') {
+    return a.target.href === b.target.href
+  }
+  return false
+}
+
 function matchesFilter(item: OutlineItem, query: string): boolean {
   if (item.name.toLowerCase().includes(query)) return true
   return item.children.some((child) => matchesFilter(child, query))
@@ -147,7 +172,7 @@ function buildSlugMap(allHeadings: OutlineItem[]): Map<OutlineItem, string> {
   return map
 }
 
-export function OutlinePanel({
+function OutlinePanelImpl({
   symbols,
   activeItem,
   isLoading,
@@ -163,6 +188,7 @@ export function OutlinePanel({
   onScrollCapture,
   initialScrollTop,
   onItemNavigate,
+  truncation,
 }: OutlinePanelProps) {
   const { t } = useI18n()
   const [filter, setFilter] = useState('')
@@ -190,6 +216,53 @@ export function OutlinePanel({
     () => filterItems(symbols, normalizedFilter),
     [symbols, normalizedFilter]
   )
+
+  // Windowed rendering for pathological outlines (e.g. Monaco's HTML symbol
+  // provider emits one symbol per DOM element — 40k+ for a large HTML file).
+  // Small outlines keep the fully-materialised recursive DOM path untouched.
+  const flatRows = useMemo(
+    () => flattenVisibleOutline(filteredSymbols, collapsed),
+    [filteredSymbols, collapsed]
+  )
+  const isVirtualized = flatRows.length > OUTLINE_VIRTUALIZE_THRESHOLD
+  const [virtualScrollTop, setVirtualScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
+  const isVirtualizedRef = useRef(isVirtualized)
+  isVirtualizedRef.current = isVirtualized
+
+  useEffect(() => {
+    if (!isVirtualized) return
+    const tree = treeRef.current
+    if (!tree) return
+    setVirtualScrollTop(tree.scrollTop)
+    setViewportHeight(tree.clientHeight)
+    const handleVirtualScroll = () => setVirtualScrollTop(tree.scrollTop)
+    const resizeObserver = new ResizeObserver(() => setViewportHeight(tree.clientHeight))
+    tree.addEventListener('scroll', handleVirtualScroll, { passive: true })
+    resizeObserver.observe(tree)
+    return () => {
+      tree.removeEventListener('scroll', handleVirtualScroll)
+      resizeObserver.disconnect()
+    }
+  }, [isVirtualized, filePath])
+
+  const lastVirtualizedModeRef = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (flatRows.length === 0) return
+    if (lastVirtualizedModeRef.current === isVirtualized) return
+    // The common small-outline case never virtualizes; only mode FLIPS (and
+    // the first genuinely-virtualized mount) are diagnostic signal.
+    if (lastVirtualizedModeRef.current === null && !isVirtualized) {
+      lastVirtualizedModeRef.current = false
+      return
+    }
+    lastVirtualizedModeRef.current = isVirtualized
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_OUTLINE_VIRTUALIZATION, {
+      ph: 'i',
+      rowCount: flatRows.length,
+      virtualized: isVirtualized
+    })
+  }, [isVirtualized, flatRows.length])
 
   const slugMap = useMemo(() => {
     if (!isMarkdown) return new Map<OutlineItem, string>()
@@ -223,6 +296,24 @@ export function OutlinePanel({
     return activeItem
   }, [activeItem, effectiveOutlineTarget, isMarkdown, previewActiveSlug, reverseSlugMap])
 
+  const isActiveOutlineItem = useCallback((item: OutlineItem): boolean => {
+    if (effectiveActiveItem === null) return false
+    if (item.target) return matchesByTarget(effectiveActiveItem, item)
+    return (
+      effectiveActiveItem.startLine === item.startLine &&
+      effectiveActiveItem.name === item.name
+    )
+  }, [effectiveActiveItem])
+
+  const activeFlatIndex = useMemo(() => {
+    if (!isVirtualized || effectiveActiveItem === null) return -1
+    return flatRows.findIndex((row) => isActiveOutlineItem(row.item))
+  }, [isVirtualized, effectiveActiveItem, flatRows, isActiveOutlineItem])
+  const activeFlatIndexRef = useRef(activeFlatIndex)
+  activeFlatIndexRef.current = activeFlatIndex
+  const flatRowCountRef = useRef(flatRows.length)
+  flatRowCountRef.current = flatRows.length
+
   // Reset filter on file switch
   useEffect(() => {
     setFilter('')
@@ -245,14 +336,26 @@ export function OutlinePanel({
     diag.effectFires += 1
     diag.lastTriggerName = effectiveActiveItem?.name ?? null
     const initial = initialScrollTargetRef.current
-    if (!initialScrollAppliedRef.current && typeof initial === 'number' && initial > 0) {
+    // A pending initial-scroll restore must win over active-item centering.
+    // The snapshot ref alone is not enough: the saved scrollTop can arrive
+    // LATE (the parent's scope key resolves asynchronously, so the first
+    // post-switch renders read a map miss). Consulting the live prop closes
+    // that window — otherwise the smooth centering animation drags the tree
+    // to the first active item and its intermediate frames get captured as
+    // the file's scroll memory, destroying the saved position.
+    const pendingInitialFromProp = typeof initialScrollTop === 'number' && initialScrollTop > 0
+    if (
+      !initialScrollAppliedRef.current &&
+      ((typeof initial === 'number' && initial > 0) || pendingInitialFromProp)
+    ) {
       diag.skippedInitial += 1
       diag.lastSkipReason = 'initial'
       return
     }
     const tree = treeRef.current
     const active = activeRef.current
-    if (!tree || !active) {
+    const virtualized = isVirtualizedRef.current
+    if (!tree || (!virtualized && !active) || (virtualized && activeFlatIndexRef.current < 0)) {
       diag.skippedNoActive += 1
       diag.lastSkipReason = 'no-active-ref'
       return
@@ -271,7 +374,16 @@ export function OutlinePanel({
     programmaticScrollUntilRef.current = now + PROGRAMMATIC_SCROLL_SETTLE_MS
     diag.scrolled += 1
     diag.lastSkipReason = null
-    alignElementCenter(tree, active, { behavior: 'smooth' })
+    if (virtualized) {
+      // The active row may be outside the rendered window; center it by row
+      // index math instead of via the (possibly unmounted) DOM node.
+      tree.scrollTo({
+        top: centerScrollTopForIndex(activeFlatIndexRef.current, tree.clientHeight, flatRowCountRef.current),
+        behavior: 'smooth'
+      })
+      return
+    }
+    alignElementCenter(tree, active!, { behavior: 'smooth' })
   }, [effectiveActiveItem])
 
   useEffect(() => {
@@ -319,11 +431,30 @@ export function OutlinePanel({
     if (typeof snapshot !== 'number') return
     if (!treeRef.current || symbols.length === 0) return
     let frameId = 0
+    let timerId = 0
     let attempts = 0
+    let done = false
     const targetScrollTop = Math.max(0, snapshot)
     const maxAttempts = 300
 
-    const applyInitialScroll = () => {
+    // Occlusion-proof retry: rAF is throttled to ~1Hz (or paused entirely)
+    // while the window is occluded / on a hidden Space, which starved this
+    // loop for minutes and made saved positions appear "lost". Race each rAF
+    // against a timer so the restore still progresses without frames.
+    const scheduleNextAttempt = () => {
+      frameId = requestAnimationFrame(applyInitialScroll)
+      timerId = window.setTimeout(applyInitialScroll, 120)
+    }
+    const cancelScheduled = () => {
+      if (frameId) cancelAnimationFrame(frameId)
+      if (timerId) window.clearTimeout(timerId)
+      frameId = 0
+      timerId = 0
+    }
+
+    function applyInitialScroll() {
+      if (done) return
+      cancelScheduled()
       const tree = treeRef.current
       if (!tree) return
 
@@ -331,7 +462,7 @@ export function OutlinePanel({
       if (targetScrollTop > 0 && maxScrollTop <= 0) {
         attempts += 1
         if (attempts < maxAttempts) {
-          frameId = requestAnimationFrame(applyInitialScroll)
+          scheduleNextAttempt()
         }
         return
       }
@@ -343,6 +474,7 @@ export function OutlinePanel({
       const isApplied = Math.abs(tree.scrollTop - clampedTarget) <= 2
 
       if (isApplied || attempts >= maxAttempts) {
+        done = true
         initialScrollAppliedRef.current = true
         onScrollCapture?.(tree.scrollTop)
         suppressActiveRevealUntilRef.current = performance.now() + INITIAL_SCROLL_ACTIVE_REVEAL_SUPPRESS_MS
@@ -350,14 +482,13 @@ export function OutlinePanel({
       }
 
       attempts += 1
-      frameId = requestAnimationFrame(applyInitialScroll)
+      scheduleNextAttempt()
     }
 
-    frameId = requestAnimationFrame(applyInitialScroll)
+    scheduleNextAttempt()
     return () => {
-      if (frameId) {
-        cancelAnimationFrame(frameId)
-      }
+      done = true
+      cancelScheduled()
     }
   }, [filePath, initialScrollTop, onScrollCapture, symbols.length])
 
@@ -429,69 +560,58 @@ export function OutlinePanel({
     [filter, editor]
   )
 
-  const renderItem = useCallback(
-    (item: OutlineItem, parentKey: string, _index: number) => {
-      const targetKey = item.target
-        ? item.target.kind === 'pdf-page'
-          ? `pdf:${item.target.page}`
-          : `epub:${item.target.href}`
-        : `ln:${item.startLine}`
-      const key = `${parentKey}/${item.name}:${targetKey}`
-      const hasChildren = item.children.length > 0
-      const isCollapsed = collapsed.has(key)
-      const matchesByTarget = (a: OutlineItem, b: OutlineItem): boolean => {
-        if (!a.target || !b.target) return false
-        if (a.target.kind !== b.target.kind) return false
-        if (a.target.kind === 'pdf-page' && b.target.kind === 'pdf-page') {
-          return a.target.page === b.target.page
-        }
-        if (a.target.kind === 'epub-href' && b.target.kind === 'epub-href') {
-          return a.target.href === b.target.href
-        }
-        return false
-      }
-      const isActive =
-        effectiveActiveItem !== null &&
-        (item.target
-          ? matchesByTarget(effectiveActiveItem, item)
-          : effectiveActiveItem.startLine === item.startLine &&
-            effectiveActiveItem.name === item.name)
+  const renderRowInner = useCallback(
+    (item: OutlineItem, key: string, hasChildren: boolean, isCollapsed: boolean) => {
+      const isActive = isActiveOutlineItem(item)
       const icon = getIconInfo(item.kind)
       const indent = item.depth * 16
 
       return (
-        <div key={key}>
-          <div
-            ref={isActive ? activeRef : undefined}
-            className={`outline-panel-item ${isActive ? 'active' : ''}`}
-            style={{ paddingLeft: 10 + indent }}
-            onClick={() => handleItemClick(item)}
-          >
-            {hasChildren ? (
-              <span
-                className={`outline-panel-item-toggle ${isCollapsed ? 'collapsed' : ''}`}
-                onClick={(e) => toggleCollapse(key, e)}
-              >
-                ▾
-              </span>
-            ) : (
-              <span className="outline-panel-item-spacer" />
-            )}
-            <span className={`outline-panel-item-icon ${icon.className}`}>
-              {icon.label}
+        <div
+          ref={isActive ? activeRef : undefined}
+          className={`outline-panel-item ${isActive ? 'active' : ''}`}
+          style={{ paddingLeft: 10 + indent }}
+          onClick={() => handleItemClick(item)}
+        >
+          {hasChildren ? (
+            <span
+              className={`outline-panel-item-toggle ${isCollapsed ? 'collapsed' : ''}`}
+              onClick={(e) => toggleCollapse(key, e)}
+            >
+              ▾
             </span>
-            <span className="outline-panel-item-name">{item.name}</span>
-            {item.detail && (
-              <span className="outline-panel-item-detail">{item.detail}</span>
-            )}
-          </div>
+          ) : (
+            <span className="outline-panel-item-spacer" />
+          )}
+          <span className={`outline-panel-item-icon ${icon.className}`}>
+            {icon.label}
+          </span>
+          <span className="outline-panel-item-name">{item.name}</span>
+          {item.detail && (
+            <span className="outline-panel-item-detail">{item.detail}</span>
+          )}
+        </div>
+      )
+    },
+    [isActiveOutlineItem, handleItemClick, toggleCollapse]
+  )
+
+  const renderItem = useCallback(
+    (item: OutlineItem, parentKey: string, _index: number) => {
+      const key = outlineItemKey(item, parentKey)
+      const hasChildren = item.children.length > 0
+      const isCollapsed = collapsed.has(key)
+
+      return (
+        <div key={key}>
+          {renderRowInner(item, key, hasChildren, isCollapsed)}
           {hasChildren && !isCollapsed && (
             item.children.map((child, i) => renderItem(child, key, i))
           )}
         </div>
       )
     },
-    [collapsed, effectiveActiveItem, handleItemClick, toggleCollapse]
+    [collapsed, renderRowInner]
   )
 
   if (!filePath) {
@@ -510,6 +630,20 @@ export function OutlinePanel({
       <div className="outline-panel-header">
         <span className="outline-panel-title">{t('outlinePanel.title')}</span>
         {isLoading && <span className="outline-panel-loading">{t('outlinePanel.loading')}</span>}
+        {truncation?.truncated && (
+          <span
+            className="outline-panel-truncated"
+            title={t('outlinePanel.truncated.tooltip', {
+              kept: String(truncation.keptCount),
+              total: String(truncation.totalCount)
+            })}
+          >
+            {t('outlinePanel.truncated', {
+              kept: String(truncation.keptCount),
+              total: String(truncation.totalCount)
+            })}
+          </span>
+        )}
       </div>
       {isMarkdown && onOutlineTargetChange && (
         <div className="outline-panel-target-bar">
@@ -549,11 +683,35 @@ export function OutlinePanel({
           />
         </div>
       )}
-      <div className="outline-panel-tree" ref={treeRef}>
+      <div className={`outline-panel-tree${isVirtualized ? ' virtualized' : ''}`} ref={treeRef}>
         {!isLoading && filteredSymbols.length === 0 ? (
           <div className="outline-panel-empty">
             {normalizedFilter ? t('outlinePanel.empty.noMatch') : t('outlinePanel.empty.noSymbols')}
           </div>
+        ) : isVirtualized ? (
+          (() => {
+            const rowWindow = computeOutlineWindow(
+              virtualScrollTop,
+              viewportHeight || 600,
+              flatRows.length
+            )
+            return (
+              <div
+                className="outline-panel-virtual-spacer"
+                style={{ height: rowWindow.totalHeight }}
+              >
+                {flatRows.slice(rowWindow.startIndex, rowWindow.endIndex).map((row, i) => (
+                  <div
+                    key={row.key}
+                    className="outline-panel-virtual-row"
+                    style={{ top: (rowWindow.startIndex + i) * OUTLINE_VIRTUAL_ROW_HEIGHT }}
+                  >
+                    {renderRowInner(row.item, row.key, row.hasChildren, row.isCollapsed)}
+                  </div>
+                ))}
+              </div>
+            )
+          })()
         ) : (
           filteredSymbols.map((item, i) => renderItem(item, '', i))
         )}
@@ -561,3 +719,5 @@ export function OutlinePanel({
     </div>
   )
 }
+
+export const OutlinePanel = memo(OutlinePanelImpl)

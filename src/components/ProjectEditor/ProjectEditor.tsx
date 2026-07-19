@@ -2458,7 +2458,7 @@ export function ProjectEditor({
     outlineShowInSplitRef.current = outlineShowInSplit
   }, [outlineShowInSplit])
 
-  const { symbols: outlineSymbols, activeItem: outlineActiveItem, isLoading: outlineLoading } =
+  const { symbols: outlineSymbols, activeItem: outlineActiveItem, isLoading: outlineLoading, truncation: outlineTruncation } =
     useOutlineSymbols({
       editor: editorRef.current,
       filePath: activeFilePath,
@@ -7862,12 +7862,25 @@ export function ProjectEditor({
     const key = getFileScrollKey(lastEditorScopeRef.current, activeFilePathRef.current)
     const previousScrollTop = key ? outlineScrollTopRef.current.get(key) : undefined
     const pendingRestore = pendingOutlineDomRestoreRef.current
-    if (!shouldCaptureOutlineScrollTop({
+    const captureAllowed = shouldCaptureOutlineScrollTop({
       captureKey: key,
       pendingRestoreKey: pendingRestore?.key ?? null,
       previousScrollTop,
       nextScrollTop: scrollTop
-    })) {
+    })
+    // Autotest-only race diagnostic: a saved position collapsing towards zero
+    // is the poison signature of the outline scroll-memory race (a stale
+    // clamp scroll captured under the freshly-switched file's key).
+    if (window.electronAPI?.debug?.autotest && (previousScrollTop ?? 0) > 100 && scrollTop < 100) {
+      window.electronAPI.debug.log('[OutlineScrollCapture] drastic-drop', {
+        key: key ? key.slice(-72) : null,
+        previousScrollTop,
+        nextScrollTop: scrollTop,
+        pendingRestoreKey: pendingRestore?.key ? pendingRestore.key.slice(-72) : null,
+        captureAllowed
+      })
+    }
+    if (!captureAllowed) {
       return
     }
     if (key) outlineScrollTopRef.current.set(key, scrollTop)
@@ -11543,6 +11556,7 @@ export function ProjectEditor({
                             })()}
                             onScrollCapture={handleOutlineScrollCapture}
                             onOutlineTargetChange={setOutlineTargetPreference}
+                            truncation={outlineTruncation}
                           />
                         ) : (
                           <OutlinePanel
@@ -11556,6 +11570,7 @@ export function ProjectEditor({
                               return key ? outlineScrollTopRef.current.get(key) : undefined
                             })()}
                             onScrollCapture={handleOutlineScrollCapture}
+                            truncation={outlineTruncation}
                           />
                         )}
                       </div>

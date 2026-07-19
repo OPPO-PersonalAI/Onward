@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react'
+import React, { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import type {
   SettingsState,
   ShortcutConfig,
@@ -364,7 +364,12 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     }))
   }, [updateSettings])
 
-  const value: SettingsContextValue = {
+  // Memoized: this context is consumed app-wide (every useI18n caller). A
+  // literal object here would change identity on every provider render and
+  // force all consumers to re-render past React.memo / element-identity
+  // bailouts — exactly the churn the subpage soft-close freeze relies on
+  // avoiding. All function members are useCallback-stable.
+  const value: SettingsContextValue = useMemo(() => ({
     settings,
     isLoaded,
     updateShortcut,
@@ -383,7 +388,26 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     getAutoFollowGitBranchForTaskName,
     setAutoFollowGitBranchForTaskName,
     updatePerformanceDiagnosticsEnabled
-  }
+  }), [
+    settings,
+    isLoaded,
+    updateShortcut,
+    getShortcut,
+    updateTerminalStyle,
+    getTerminalStyle,
+    deleteTerminalStyle,
+    applyStyleGlobally,
+    onShortcutActionCallback,
+    getSettingsPanelWidth,
+    setSettingsPanelWidth,
+    updateGitDiffFontSize,
+    getGitDiffFontSize,
+    updateTheme,
+    updateLanguage,
+    getAutoFollowGitBranchForTaskName,
+    setAutoFollowGitBranchForTaskName,
+    updatePerformanceDiagnosticsEnabled
+  ])
 
   return (
     <SettingsContext.Provider value={value}>

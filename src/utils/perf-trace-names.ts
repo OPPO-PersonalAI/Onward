@@ -961,7 +961,24 @@ export const PERF_TRACE_EVENT = {
   // document (ph=i). Payload: { surface: 'project-editor' | 'git-epub-compare',
   // key, metaKey, ctrlKey }. Breadcrumb for "ESC doesn't leave the EPUB
   // reader" reports: shows whether the forwarding fired at all.
-  RENDERER_EPUB_HOST_KEY_FORWARDED: 'renderer:epub.host-key-forwarded'
+  RENDERER_EPUB_HOST_KEY_FORWARDED: 'renderer:epub.host-key-forwarded',
+
+  // ───────── 2026-07-19 subpage enter/exit CPU storm fix (outline + freeze) ─────────
+  // Renderer: the parsed outline exceeded OUTLINE_SYMBOL_CAP and was
+  // depth-truncated before entering React state (ph=i). Payload:
+  // { totalCount, keptCount, cap, filePath(sliced) }. Breadcrumb for "outline
+  // is missing deep symbols" reports and for sizing pathological documents.
+  RENDERER_PROJECT_EDITOR_OUTLINE_TRUNCATED: 'renderer:project-editor.outline-truncated',
+  // Renderer: the outline row count crossed OUTLINE_VIRTUALIZE_THRESHOLD and
+  // the panel switched to fixed-row windowed rendering (ph=i, deduped per
+  // mount+mode). Payload: { rowCount, virtualized }. Proves in a user trace
+  // whether a giant outline was windowed or fully materialised.
+  RENDERER_PROJECT_EDITOR_OUTLINE_VIRTUALIZATION: 'renderer:project-editor.outline-virtualization-mode',
+  // Renderer: a soft-closed subpage panel's React subtree entered/left the
+  // frozen state (element-identity bailout while hidden) (ph=i). Payload:
+  // { panel: 'editor' | 'diff' | 'history', frozen }. Breadcrumb for "hidden
+  // panel kept re-rendering" and for stale-props regressions after reopen.
+  RENDERER_TERMINAL_GRID_SUBPAGE_FREEZE: 'renderer:terminal-grid.subpage-subtree-freeze'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

@@ -7,8 +7,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { OutlineItem } from './types'
 import { parseOutlineSymbols } from './outlineParser'
 import { resolveOutlineParseSource } from './outlineParseSource'
+import { truncateOutlineSymbols, type OutlineTruncation } from './outlineTruncation'
+import { perfTrace } from '../../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../../utils/perf-trace-names'
 
 const DEBOUNCE_MS = 400
+
+const EMPTY_TRUNCATION: OutlineTruncation = { totalCount: 0, keptCount: 0, truncated: false }
 
 export interface UseOutlineSymbolsOptions {
   editor: import('monaco-editor').editor.IStandaloneCodeEditor | null
@@ -22,6 +27,7 @@ export interface UseOutlineSymbolsResult {
   symbols: OutlineItem[]
   activeItem: OutlineItem | null
   isLoading: boolean
+  truncation: OutlineTruncation
 }
 
 function findDeepestContaining(items: OutlineItem[], line: number): OutlineItem | null {
@@ -60,6 +66,7 @@ export function useOutlineSymbols({
   const [symbols, setSymbols] = useState<OutlineItem[]>([])
   const [activeItem, setActiveItem] = useState<OutlineItem | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [truncation, setTruncation] = useState<OutlineTruncation>(EMPTY_TRUNCATION)
 
   const tokenRef = useRef(0)
   const timerRef = useRef<number | null>(null)
@@ -71,6 +78,7 @@ export function useOutlineSymbols({
     if (!isVisible || !filePath) {
       setSymbols([])
       symbolsRef.current = []
+      setTruncation(EMPTY_TRUNCATION)
       setIsLoading(false)
       return
     }
@@ -101,6 +109,7 @@ export function useOutlineSymbols({
         if (currentToken !== tokenRef.current) return
         setSymbols([])
         symbolsRef.current = []
+        setTruncation(EMPTY_TRUNCATION)
         setIsLoading(true)
         return
       }
@@ -111,8 +120,27 @@ export function useOutlineSymbols({
         source.model as import('monaco-editor').editor.ITextModel | null
       ).then((result) => {
         if (currentToken !== tokenRef.current) return
-        setSymbols(result)
-        symbolsRef.current = result
+        const capped = truncateOutlineSymbols(result)
+        if (capped.truncated) {
+          perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_OUTLINE_TRUNCATED, {
+            ph: 'i',
+            totalCount: capped.totalCount,
+            keptCount: capped.keptCount,
+            filePath: filePath.slice(-128)
+          })
+        }
+        setSymbols(capped.items)
+        symbolsRef.current = capped.items
+        // Preserve identity when values are unchanged: a fresh object per
+        // debounced reparse would re-render every truncation consumer on
+        // every keystroke settle even though nothing changed.
+        setTruncation((previous) =>
+          previous.totalCount === capped.totalCount &&
+          previous.keptCount === capped.keptCount &&
+          previous.truncated === capped.truncated
+            ? previous
+            : { totalCount: capped.totalCount, keptCount: capped.keptCount, truncated: capped.truncated }
+        )
         setIsLoading(false)
       })
     }, delay)
@@ -158,6 +186,7 @@ export function useOutlineSymbols({
     setSymbols([])
     symbolsRef.current = []
     setActiveItem(null)
+    setTruncation(EMPTY_TRUNCATION)
   }, [filePath])
 
   useEffect(() => {
@@ -211,5 +240,5 @@ export function useOutlineSymbols({
     return () => disposable.dispose()
   }, [editor, isVisible, symbols])
 
-  return { symbols, activeItem, isLoading }
+  return { symbols, activeItem, isLoading, truncation }
 }

@@ -226,6 +226,9 @@ SCRIPTS: List[str] = [
     "test/autotest/run-subpage-navigation-html-diff-autotest.sh",
     "test/autotest/run-subpage-navigation-html-history-autotest.sh",
     "test/autotest/run-subpage-navigation-pdf-autotest.sh",
+    # Subpage enter/exit CPU storm gate (2026-07-19): huge-HTML outline cap +
+    # windowed outline DOM + renderer CPU decay after editor / git-diff exit.
+    "test/autotest/run-subpage-outline-cpu-autotest.sh",
     "test/autotest/run-subpage-viewstate-restore-autotest.sh",
     "test/autotest/run-telemetry-autotest.sh",
     "test/autotest/run-terminal-architecture-baseline-autotest.sh",
