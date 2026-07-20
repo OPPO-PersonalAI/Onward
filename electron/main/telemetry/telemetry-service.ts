@@ -244,9 +244,21 @@ class TelemetryService {
     // especially) so they arrive without waiting for the next launch.
     // Nothing is deleted here — the next heartbeat's ack-gated live lane
     // re-sends with the same deterministic UUIDs and PostHog deduplicates.
-    if (this.client && this.localLogPath) {
+    // Skipped entirely while the threadpool watchdog reports a stall: the
+    // readFile below rides the libuv threadpool and would never settle
+    // (.catch only covers rejection, not a never-settling promise), wedging
+    // shutdown past its queue ceiling until the quit hard floor forces
+    // app.exit(0) and the rest of the graceful teardown is lost. The race
+    // covers the stall-just-began window the watchdog has not flagged yet.
+    if (this.client && this.localLogPath && !isThreadpoolStalled()) {
       try {
-        const raw = await readFile(this.localLogPath, 'utf-8').catch(() => '')
+        const raw = await Promise.race([
+          readFile(this.localLogPath, 'utf-8').catch(() => ''),
+          new Promise<string>((resolve) => {
+            const timer = setTimeout(() => resolve(''), SHUTDOWN_QUEUE_TIMEOUT_MS)
+            timer.unref()
+          })
+        ])
         if (raw) {
           const selection = selectOutboxUpload(
             raw,
