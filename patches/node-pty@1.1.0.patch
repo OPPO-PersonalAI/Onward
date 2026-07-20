@@ -25,6 +25,90 @@ index 8c4fca9022a6d6f015bca87f61625cde2278f428..46633b2b1df9d1384ca6c9a476dd5cfd
  process.exit(0);
  //# sourceMappingURL=conpty_console_list_agent.js.map
 \ No newline at end of file
+diff --git a/lib/unixTerminal.js b/lib/unixTerminal.js
+index 1ec12f796a822c78fba9ad7f6448c3987e325c23..e09bd338c653dfbc03040b07ee9f3ec253f7f8a7 100644
+--- a/lib/unixTerminal.js
++++ b/lib/unixTerminal.js
+@@ -304,42 +304,53 @@ var CustomWriteStream = /** @class */ (function () {
+     CustomWriteStream.prototype._processWriteQueue = function () {
+         var _this = this;
+         this._writeImmediate = undefined;
+-        if (this._writeQueue.length === 0) {
+-            return;
+-        }
+-        var task = this._writeQueue[0];
+-        // Write to the underlying file descriptor and handle it directly, rather
+-        // than using the `net.Socket`/`tty.WriteStream` wrappers which swallow and
+-        // mask errors like EAGAIN and can cause the thread to block indefinitely.
+-        fs.write(this._fd, task.buffer, task.offset, function (err, written) {
+-            if (err) {
+-                if ('code' in err && err.code === 'EAGAIN') {
+-                    // `setImmediate` is used to yield to the event loop and re-attempt
+-                    // the write later.
+-                    _this._writeImmediate = setImmediate(function () { return _this._processWriteQueue(); });
++        // Onward patch (infra-failure resilience): flush the queue with
++        // synchronous writes on the non-blocking pty fd instead of callback
++        // fs.write. fs.write routes through the libuv threadpool; a stalled
++        // threadpool (observed in production after a macOS display-sleep /
++        // remote-desktop disconnect boundary) strands every queued keystroke
++        // forever while the API keeps reporting success. fs.writeSync on an
++        // O_NONBLOCK fd never blocks the thread: it either writes immediately
++        // or throws EAGAIN, which is handled exactly like the async version
++        // did (yield via setImmediate, retry). A per-flush byte budget keeps
++        // large pastes from monopolizing the event loop.
++        // Upstream context on why the tty/net stream wrappers are avoided:
++        // https://github.com/microsoft/node-pty/issues/833 (PR #831).
++        var budget = 65536;
++        while (this._writeQueue.length > 0 && budget > 0) {
++            var task = this._writeQueue[0];
++            var written = void 0;
++            try {
++                written = fs.writeSync(this._fd, task.buffer, task.offset);
++            }
++            catch (err) {
++                if (err && err.code === 'EAGAIN') {
++                    // Kernel pty buffer full: yield to the event loop, retry.
++                    globalThis.__onwardPtyEagainCount = (globalThis.__onwardPtyEagainCount || 0) + 1;
++                    this._writeImmediate = setImmediate(function () { return _this._processWriteQueue(); });
+                 }
+                 else {
+                     // Stop processing immediately on unexpected error and log
+-                    _this._writeQueue.length = 0;
++                    this._writeQueue.length = 0;
++                    globalThis.__onwardPtyWriteErrorCount = (globalThis.__onwardPtyWriteErrorCount || 0) + 1;
+                     console.error('Unhandled pty write error', err);
+                 }
+                 return;
+             }
++            budget -= written;
+             task.offset += written;
+             if (task.offset >= task.buffer.byteLength) {
+-                _this._writeQueue.shift();
++                this._writeQueue.shift();
+             }
+-            // Since there is more room in the kernel buffer, we can continue to write
+-            // until we hit EAGAIN or exhaust the queue.
+-            //
+-            // Note that old versions of bash, like v3.2 which ships in macOS, appears
+-            // to have a bug in its readline implementation that causes data
+-            // corruption when writes to the pty happens too quickly. Instead of
+-            // trying to workaround that we just accept it so that large pastes are as
+-            // fast as possible.
+-            // Context: https://github.com/microsoft/node-pty/issues/833
+-            _this._processWriteQueue();
+-        });
++            else if (written === 0) {
++                // Defensive: no forward progress without EAGAIN — break to the
++                // trailing reschedule instead of spinning.
++                break;
++            }
++        }
++        if (this._writeQueue.length > 0 && this._writeImmediate === undefined) {
++            this._writeImmediate = setImmediate(function () { return _this._processWriteQueue(); });
++        }
+     };
+     return CustomWriteStream;
+ }());
 diff --git a/lib/windowsPtyAgent.js b/lib/windowsPtyAgent.js
 index a358ffb177357e177661033c1b092f9c9d0e5f5a..acf665d227257ca163f6f85ce164ae017fd3c523 100644
 --- a/lib/windowsPtyAgent.js
@@ -42,3 +126,86 @@ index a358ffb177357e177661033c1b092f9c9d0e5f5a..acf665d227257ca163f6f85ce164ae01
          return new Promise(function (resolve) {
              var agent = child_process_1.fork(path.join(__dirname, 'conpty_console_list_agent'), [_this._innerPid.toString()]);
              agent.on('message', function (message) {
+diff --git a/src/unixTerminal.ts b/src/unixTerminal.ts
+index 98733dc0cd752b554bd94e45904ca341ad141bba..0fea235d6bd879936e0efe67db496b23c4b72964 100644
+--- a/src/unixTerminal.ts
++++ b/src/unixTerminal.ts
+@@ -345,44 +345,52 @@ class CustomWriteStream implements IDisposable {
+   private _processWriteQueue(): void {
+     this._writeImmediate = undefined;
+ 
+-    if (this._writeQueue.length === 0) {
+-      return;
+-    }
+-
+-    const task = this._writeQueue[0];
+-
+-    // Write to the underlying file descriptor and handle it directly, rather
+-    // than using the `net.Socket`/`tty.WriteStream` wrappers which swallow and
+-    // mask errors like EAGAIN and can cause the thread to block indefinitely.
+-    fs.write(this._fd, task.buffer, task.offset, (err, written) => {
+-      if (err) {
+-        if ('code' in err && err.code === 'EAGAIN') {
+-          // `setImmediate` is used to yield to the event loop and re-attempt
+-          // the write later.
++    // Onward patch (infra-failure resilience): flush the queue with
++    // synchronous writes on the non-blocking pty fd instead of callback
++    // fs.write. fs.write routes through the libuv threadpool; a stalled
++    // threadpool (observed in production after a macOS display-sleep /
++    // remote-desktop disconnect boundary) strands every queued keystroke
++    // forever while the API keeps reporting success. fs.writeSync on an
++    // O_NONBLOCK fd never blocks the thread: it either writes immediately
++    // or throws EAGAIN, which is handled exactly like the async version
++    // did (yield via setImmediate, retry). A per-flush byte budget keeps
++    // large pastes from monopolizing the event loop.
++    // Upstream context on why the tty/net stream wrappers are avoided:
++    // https://github.com/microsoft/node-pty/issues/833 (PR #831).
++    let budget = 65536;
++    while (this._writeQueue.length > 0 && budget > 0) {
++      const task = this._writeQueue[0];
++      let written: number;
++      try {
++        written = fs.writeSync(this._fd, task.buffer, task.offset);
++      } catch (err) {
++        if (err && (err as NodeJS.ErrnoException).code === 'EAGAIN') {
++          // Kernel pty buffer full: yield to the event loop, retry.
++          const g = globalThis as { __onwardPtyEagainCount?: number };
++          g.__onwardPtyEagainCount = (g.__onwardPtyEagainCount || 0) + 1;
+           this._writeImmediate = setImmediate(() => this._processWriteQueue());
+         } else {
+           // Stop processing immediately on unexpected error and log
+           this._writeQueue.length = 0;
++          const g = globalThis as { __onwardPtyWriteErrorCount?: number };
++          g.__onwardPtyWriteErrorCount = (g.__onwardPtyWriteErrorCount || 0) + 1;
+           console.error('Unhandled pty write error', err);
+         }
+         return;
+       }
+ 
++      budget -= written;
+       task.offset += written;
+       if (task.offset >= task.buffer.byteLength) {
+         this._writeQueue.shift();
++      } else if (written === 0) {
++        // Defensive: no forward progress without EAGAIN — break to the
++        // trailing reschedule instead of spinning.
++        break;
+       }
+-
+-      // Since there is more room in the kernel buffer, we can continue to write
+-      // until we hit EAGAIN or exhaust the queue.
+-      //
+-      // Note that old versions of bash, like v3.2 which ships in macOS, appears
+-      // to have a bug in its readline implementation that causes data
+-      // corruption when writes to the pty happens too quickly. Instead of
+-      // trying to workaround that we just accept it so that large pastes are as
+-      // fast as possible.
+-      // Context: https://github.com/microsoft/node-pty/issues/833
+-      this._processWriteQueue();
+-    });
++    }
++    if (this._writeQueue.length > 0 && this._writeImmediate === undefined) {
++      this._writeImmediate = setImmediate(() => this._processWriteQueue());
++    }
+   }
+ }

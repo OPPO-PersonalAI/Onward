@@ -26,7 +26,7 @@ patchedDependencies:
     hash: 8232d573c37832131107416944343857fab24d7b6575b157238b25deb8fa5721
     path: patches/@xterm__addon-webgl@0.18.0.patch
   node-pty@1.1.0:
-    hash: 00dde9e6e41deddd30007d6400459577c24c180302367b32a8ce8123707e3095
+    hash: bfbe15fbf2d997c78dd171f260da54e143ee945b1820679b39d0561c24bf83fb
     path: patches/node-pty@1.1.0.patch
 
 importers:
@@ -92,7 +92,7 @@ importers:
         version: 0.55.1
       node-pty:
         specifier: ^1.0.0
-        version: 1.1.0(patch_hash=00dde9e6e41deddd30007d6400459577c24c180302367b32a8ce8123707e3095)
+        version: 1.1.0(patch_hash=bfbe15fbf2d997c78dd171f260da54e143ee945b1820679b39d0561c24bf83fb)
       panzoom:
         specifier: ^9.4.4
         version: 9.4.4
@@ -6404,7 +6404,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  node-pty@1.1.0(patch_hash=00dde9e6e41deddd30007d6400459577c24c180302367b32a8ce8123707e3095):
+  node-pty@1.1.0(patch_hash=bfbe15fbf2d997c78dd171f260da54e143ee945b1820679b39d0561c24bf83fb):
     dependencies:
       node-addon-api: 7.1.1
 

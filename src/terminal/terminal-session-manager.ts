@@ -1701,6 +1701,26 @@ export function ensureGpuCrashRecoverySubscription(): void {
   })
 }
 
+// Visibility-watchdog recovery subscription (same idempotent pattern as the
+// GPU one above). The main process pushes this after detecting "window
+// visible but renderer stuck hidden" and applying an occlusion nudge —
+// Chromium's own visibilitychange never fired on that path (2026-07-20
+// incident: visibilityState stayed 'hidden' for 10 h with the window
+// frontmost), so surfaces are resumed as if `visibilitychange -> visible`
+// had been delivered.
+let visibilityRecoverySubscribed = false
+export function ensureVisibilityRecoverySubscription(): void {
+  if (visibilityRecoverySubscribed) return
+  visibilityRecoverySubscribed = true
+  window.electronAPI?.system?.onVisibilityRecoveryPush?.((info) => {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_VISIBILITY_RECOVERY_PUSH_RECEIVED, {
+      nudge: info?.nudge ?? 'unknown',
+      visibilityState: document.visibilityState
+    })
+    terminalSessionManager.notifyHostSurfaceEvent('document-visible')
+  })
+}
+
 // Expose for E2E testing via CDP (Chrome DevTools Protocol)
 ;(window as any).__terminalSessionManager = terminalSessionManager
 

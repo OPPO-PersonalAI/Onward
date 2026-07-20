@@ -82,6 +82,7 @@ import { testFeedbackUi } from './test-feedback-ui'
 import { testFeedbackPersistenceSeed, testFeedbackPersistenceVerify } from './test-feedback-persistence'
 import { testTerminalRenameRestartSurvivalSeed, testTerminalRenameRestartSurvivalVerify } from './test-terminal-rename-restart-survival'
 import { testTelemetry } from './test-telemetry'
+import { testInfraWatchdog } from './test-infra-watchdog'
 import { testPerformanceTrace } from './test-performance-trace'
 import { testSubpageViewstateRestore } from './test-subpage-viewstate-restore'
 import { testQuickFileUnit } from './test-quick-file-unit'
@@ -448,6 +449,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testTelemetry(ctx)
       collectSuiteResults('Telemetry', results)
       await sleep(400)
+    }
+
+    if (!ctx.cancelled() && shouldRun('infra-watchdog')) {
+      log('phase0.882:begin')
+      const results = await testInfraWatchdog(ctx)
+      collectSuiteResults('InfraWatchdog', results)
+      await sleep(300)
     }
 
     if (!ctx.cancelled() && shouldRun('performance-trace')) {

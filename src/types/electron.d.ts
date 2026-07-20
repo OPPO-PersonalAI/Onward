@@ -1078,6 +1078,11 @@ export interface SystemAPI {
   onGpuProcessGone: (
     callback: (info: { reason: string; exitCode: number; simulated: boolean }) => void
   ) => () => void
+  onThreadpoolHealthChanged: (
+    callback: (info: { status: 'ok' | 'suspect' | 'stalled'; stalledSince: number | null; recoveries: number }) => void
+  ) => () => void
+  onVisibilityRecoveryPush: (callback: (info: { nudge: string }) => void) => () => void
+  relaunchApp: () => Promise<{ success: boolean; error?: string }>
 }
 
 export interface DebugAPI {
@@ -1130,6 +1135,12 @@ export interface DebugAPI {
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
+  simulateThreadpoolStall: (stalled: boolean) => Promise<{ success: boolean; stalled?: boolean; error?: string }>
+  getInfraHealth: () => Promise<{
+    threadpool: { status: 'ok' | 'suspect' | 'stalled'; stalledSince: number | null; recoveries: number }
+    visibility: { status: 'ok' | 'nudging' | 'gave-up'; recoveries: number }
+    ptyWriteMode: 'sync' | 'conpty'
+  }>
   shellReset: () => Promise<void>
   shellGetLastOpenedPath: () => Promise<string | null>
   shellGetLastRevealedPath: () => Promise<string | null>

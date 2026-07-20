@@ -52,6 +52,9 @@ import { startSessionHeartbeat, stopSessionHeartbeat, getSessionDurationMs } fro
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 import { broadcastGpuProcessGone } from './gpu-crash-recovery'
+import { startThreadpoolWatchdog, stopThreadpoolWatchdog } from './threadpool-watchdog'
+import { raceQuitSequenceAgainstFloor } from './quit-hard-floor'
+import { startVisibilityWatchdog, stopVisibilityWatchdog } from './visibility-watchdog'
 import { performanceTrace } from './performance-trace'
 import { traceStore, runRotationStressForAutotest } from './trace-store'
 import { runBoundedDebugQuit } from './debug-quit-lifecycle'
@@ -220,6 +223,35 @@ function flushPerformanceTrace(reason: string): void {
   }
 }
 
+// Hard ceiling for the production quit/restart teardown sequences. During the
+// 2026-07-20 threadpool-stall incident the quit chain wedged forever inside
+// `await telemetryService.shutdown()` (its writeQueue head was a stuck async
+// appendFile) — the app could not even exit. Every production quit path now
+// races its teardown against this floor and force-exits when it trips,
+// mirroring the 8 s floor the DEBUG quit path always had.
+const QUIT_HARD_FLOOR_MS = 10_000
+
+async function runQuitSequenceWithHardFloor(reason: string, sequence: () => Promise<void>): Promise<void> {
+  const outcome = await raceQuitSequenceAgainstFloor(sequence, QUIT_HARD_FLOOR_MS)
+  if (outcome === 'timeout') {
+    try {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_QUIT_HARD_FLOOR_TRIGGERED, {
+        reason,
+        floorMs: QUIT_HARD_FLOOR_MS
+      })
+    } catch {
+      /* trace store may be torn down; exit anyway */
+    }
+    try {
+      flushPerformanceTrace(`${reason}:hard-floor`)
+    } catch {
+      /* best-effort */
+    }
+    console.warn(`[Quit] teardown exceeded ${QUIT_HARD_FLOOR_MS}ms (${reason}); forcing app.exit(0)`)
+    app.exit(0)
+  }
+}
+
 // Synchronous, crash-survivable quit-phase breadcrumb. Unlike perfTrace (buffered
 // and FLUSHED only at the end of teardown — so it is lost when an earlier teardown
 // step crashes), a console.log is captured line-by-line in the autotest runner log
@@ -285,28 +317,32 @@ export async function requestQuit(): Promise<void> {
   if (await confirmQuit()) {
     isQuitting = true
     installUpdateOnQuit = false
-    await flushRendererState()
-    persistWindowState()
-    await shutdownTelemetry()
-    await persistTerminalCwdSnapshot()
-    await flushAppStateStorage()
-    const shutdownResult = await ptyManager.shutdownAll()
-    if (shutdownResult.timedOut > 0) {
-      console.warn(
-        `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
-      )
-    }
-    // Dispose native subsystems FIRST (window still alive), THEN destroy windows,
-    // THEN quit — see destroyAllWindowsForQuit's header for why this order matters.
-    logQuitPhase('quit:cleanup-start')
-    gitAutofetchManager.dispose()
-    await cleanupIpcHandlers()
-    logQuitPhase('quit:cleanup-done')
-    destroyAllWindowsForQuit('quit')
-    logQuitPhase('quit:windows-destroyed')
-    flushPerformanceTrace('quit')
-    logQuitPhase('quit:before-app-quit')
-    app.quit()
+    await runQuitSequenceWithHardFloor('quit', async () => {
+      stopThreadpoolWatchdog()
+      stopVisibilityWatchdog()
+      await flushRendererState()
+      persistWindowState()
+      await shutdownTelemetry()
+      await persistTerminalCwdSnapshot()
+      await flushAppStateStorage()
+      const shutdownResult = await ptyManager.shutdownAll()
+      if (shutdownResult.timedOut > 0) {
+        console.warn(
+          `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
+        )
+      }
+      // Dispose native subsystems FIRST (window still alive), THEN destroy windows,
+      // THEN quit — see destroyAllWindowsForQuit's header for why this order matters.
+      logQuitPhase('quit:cleanup-start')
+      gitAutofetchManager.dispose()
+      await cleanupIpcHandlers()
+      logQuitPhase('quit:cleanup-done')
+      destroyAllWindowsForQuit('quit')
+      logQuitPhase('quit:windows-destroyed')
+      flushPerformanceTrace('quit')
+      logQuitPhase('quit:before-app-quit')
+      app.quit()
+    })
   }
 }
 
@@ -323,26 +359,78 @@ export async function requestRestartToApplyUpdate(): Promise<{ success: boolean;
   isQuitting = true
   installUpdateOnQuit = true
 
-  await flushRendererState()
-  persistWindowState()
-  await shutdownTelemetry()
-  await persistTerminalCwdSnapshot()
-  await flushAppStateStorage()
-  const shutdownResult = await ptyManager.shutdownAll()
-  if (shutdownResult.timedOut > 0) {
-    console.warn(
-      `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
-    )
-  }
+  await runQuitSequenceWithHardFloor('restart-to-update', async () => {
+    stopThreadpoolWatchdog()
+    stopVisibilityWatchdog()
+    await flushRendererState()
+    persistWindowState()
+    await shutdownTelemetry()
+    await persistTerminalCwdSnapshot()
+    await flushAppStateStorage()
+    const shutdownResult = await ptyManager.shutdownAll()
+    if (shutdownResult.timedOut > 0) {
+      console.warn(
+        `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
+      )
+    }
 
-  logQuitPhase('restart-to-update:cleanup-start')
-  await cleanupIpcHandlers()
-  logQuitPhase('restart-to-update:cleanup-done')
-  destroyAllWindowsForQuit('restart-to-update')
-  logQuitPhase('restart-to-update:windows-destroyed')
-  flushPerformanceTrace('restart-to-update')
-  logQuitPhase('restart-to-update:before-app-quit')
-  app.quit()
+    logQuitPhase('restart-to-update:cleanup-start')
+    await cleanupIpcHandlers()
+    logQuitPhase('restart-to-update:cleanup-done')
+    destroyAllWindowsForQuit('restart-to-update')
+    logQuitPhase('restart-to-update:windows-destroyed')
+    flushPerformanceTrace('restart-to-update')
+    logQuitPhase('restart-to-update:before-app-quit')
+    app.quit()
+  })
+  return { success: true }
+}
+
+/**
+ * Graceful quit + relaunch for infrastructure-failure recovery (threadpool
+ * watchdog banner). No confirmation dialog: the user explicitly clicked
+ * "Restart app" on the degradation banner. The whole teardown runs under
+ * the same hard floor as the other quit paths — with a stalled threadpool
+ * the flush steps are expected to hit their individual timeouts, and the
+ * floor guarantees the relaunch still happens.
+ */
+export async function requestRelaunchForRecovery(): Promise<{ success: boolean; error?: string }> {
+  if (isQuitting) {
+    return { success: false, error: 'Application is already quitting.' }
+  }
+  isQuitting = true
+  installUpdateOnQuit = false
+
+  // Arm the relaunch BEFORE teardown starts: app.relaunch() only schedules
+  // a respawn for whenever the process exits, so arming it first covers
+  // both exit routes — the normal app.quit() at the end of the sequence
+  // AND the hard-floor's app.exit(0) (which fires inside the race, before
+  // any code after the await would run).
+  app.relaunch()
+
+  await runQuitSequenceWithHardFloor('relaunch-for-recovery', async () => {
+    stopThreadpoolWatchdog()
+    stopVisibilityWatchdog()
+    await flushRendererState()
+    persistWindowState()
+    await shutdownTelemetry()
+    await persistTerminalCwdSnapshot()
+    await flushAppStateStorage()
+    const shutdownResult = await ptyManager.shutdownAll()
+    if (shutdownResult.timedOut > 0) {
+      console.warn(
+        `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
+      )
+    }
+    logQuitPhase('relaunch-for-recovery:cleanup-start')
+    gitAutofetchManager.dispose()
+    await cleanupIpcHandlers()
+    logQuitPhase('relaunch-for-recovery:cleanup-done')
+    destroyAllWindowsForQuit('relaunch-for-recovery')
+    logQuitPhase('relaunch-for-recovery:windows-destroyed')
+    flushPerformanceTrace('relaunch-for-recovery')
+    app.quit()
+  })
   return { success: true }
 }
 
@@ -737,6 +825,7 @@ function createWindow(displayName: string): void {
     },
     onRestartToApplyUpdate: requestRestartToApplyUpdate,
     onGracefulQuitForDebug: requestQuitForDebug,
+    onRelaunchForRecovery: requestRelaunchForRecovery,
     getApiPort
   })
 
@@ -898,6 +987,14 @@ app.whenReady().then(async () => {
   if (mainWindow) {
     startSessionHeartbeat(mainWindow)
   }
+
+  // Infrastructure watchdogs (2026-07-20 incident class): the libuv
+  // threadpool can lose its condvar wakeup at a display-sleep boundary
+  // (async fs/dns/zlib/crypto dead until restart) and the renderer's
+  // visibilityState can strand at 'hidden' while the window is frontmost.
+  // Neither failure is observable by the existing event-loop monitor.
+  startThreadpoolWatchdog()
+  startVisibilityWatchdog(() => mainWindow)
 
   // Initialize system tray
   if (mainWindow) {

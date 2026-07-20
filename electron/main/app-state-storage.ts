@@ -4,8 +4,8 @@
  */
 
 import { app } from 'electron'
-import { join } from 'path'
-import { readFileSync, existsSync, renameSync } from 'fs'
+import { dirname, join } from 'path'
+import { readFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'fs'
 import { appStateWorkerClient } from './app-state-worker-client'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
@@ -872,7 +872,14 @@ class AppStateStorage {
           elapsedMs: Date.now() - startedAt,
           error: String(error)
         })
-        return false
+        // Worker save failed — most importantly on the 30 s request timeout
+        // that a stalled libuv threadpool causes (worker threads share the
+        // process-global pool, so the worker's async writeFile is just as
+        // dead as the main thread's). Before this fallback, that path
+        // silently LOST the state delta. Synchronous write on the main
+        // thread bypasses the pool entirely; tmp + rename keeps the file
+        // atomic against a crash mid-write.
+        return this.persistSyncFallback(snapshot, version, String(error))
       })
       .finally(() => {
         if (this.pendingPersist === promise) {
@@ -885,6 +892,30 @@ class AppStateStorage {
       })
     this.pendingPersist = promise
     return promise
+  }
+
+  private persistSyncFallback(snapshot: unknown, version: number, workerError: string): boolean {
+    try {
+      const data = JSON.stringify(snapshot, null, 2)
+      const tmpPath = `${this.storagePath}.tmp-${process.pid}`
+      mkdirSync(dirname(this.storagePath), { recursive: true })
+      writeFileSync(tmpPath, data, 'utf-8')
+      renameSync(tmpPath, this.storagePath)
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_STATE_SYNC_FALLBACK, {
+        version,
+        bytes: Buffer.byteLength(data, 'utf-8'),
+        workerError: workerError.slice(0, 256)
+      })
+      return true
+    } catch (error) {
+      console.error('App state sync fallback failed:', error)
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_STATE_SAVE_ERROR, {
+        version,
+        phase: 'sync-fallback',
+        error: String(error)
+      })
+      return false
+    }
   }
 
   /**

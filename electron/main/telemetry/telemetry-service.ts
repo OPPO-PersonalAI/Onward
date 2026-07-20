@@ -40,6 +40,12 @@ import {
   TELEMETRY_POSTHOG_CONFIGURED,
   TELEMETRY_POSTHOG_HOST
 } from './telemetry-constants'
+import { isThreadpoolStalled } from '../threadpool-watchdog'
+
+/** Per-append ceiling: past this the chain head is abandoned, not awaited. */
+const LOCAL_APPEND_TIMEOUT_MS = 10_000
+/** Ceiling on `await writeQueue` during shutdown. */
+const SHUTDOWN_QUEUE_TIMEOUT_MS = 3_000
 
 type PostHogClient = import('posthog-node').PostHog
 // posthog-node v5 accepts `timestamp` and `uuid` on capture at runtime
@@ -82,6 +88,7 @@ class TelemetryService {
   private sessionHadCrash = false
   /** Lazily loaded set of feature IDs whose first-use event already fired. */
   private firstUseFired: Set<string> | null = null
+  private droppedLocalWrites = 0
 
   initialize(): void {
     if (this.initialized) return
@@ -222,8 +229,16 @@ class TelemetryService {
       this.captureToBackend('daily/summary', summary)
     }
 
-    // Wait for local writes (session/end must have landed in the outbox)
-    await this.writeQueue
+    // Wait for local writes (session/end must have landed in the outbox) —
+    // bounded: with a stalled threadpool the queue head never settles, and
+    // quit must not hang behind it.
+    await Promise.race([
+      this.writeQueue,
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, SHUTDOWN_QUEUE_TIMEOUT_MS)
+        timer.unref()
+      })
+    ])
 
     // Best-effort push of today's pending Tier-2 events (session/end
     // especially) so they arrive without waiting for the next launch.
@@ -617,6 +632,18 @@ class TelemetryService {
 
   private writeLocal(name: string, properties?: Record<string, string>): void {
     if (!this.localLogPath || !this.instanceId) return
+    // 2026-07-20 incident hardening: the serial writeQueue used to chain an
+    // unbounded `appendFile` — with the libuv threadpool stalled, the chain
+    // head never settled and every later telemetry write queued forever
+    // (and quit hung behind `await writeQueue`). The queue now (a) drops
+    // writes outright while the watchdog reports the pool stalled, and
+    // (b) abandons any single append that exceeds LOCAL_APPEND_TIMEOUT_MS.
+    // An abandoned append may still land later if the pool revives; a rare
+    // out-of-order debug-log line is acceptable, an unbounded chain is not.
+    if (isThreadpoolStalled()) {
+      this.noteDroppedLocalWrite('threadpool-stalled')
+      return
+    }
     const entry = {
       timestamp: new Date().toISOString(),
       name,
@@ -626,11 +653,51 @@ class TelemetryService {
     const line = JSON.stringify(entry) + '\n'
     const logPath = this.localLogPath
     this.writeQueue = this.writeQueue
-      .then(async () => {
+      .then(() => this.appendWithTimeout(logPath, line))
+      .catch(() => {})
+  }
+
+  /**
+   * One outbox write (append + budget enforcement) under a hard ceiling.
+   * BOTH steps use async fs and therefore both die with a stalled libuv
+   * threadpool — guarding only the append would still let the trim step
+   * wedge the serial queue head forever. An abandoned write may still land
+   * later if the pool revives; a rare out-of-order outbox line is
+   * acceptable, an unbounded chain is not.
+   */
+  private appendWithTimeout(logPath: string, line: string): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false
+      const settle = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        this.noteDroppedLocalWrite('append-timeout')
+        resolve()
+      }, LOCAL_APPEND_TIMEOUT_MS)
+      timer.unref()
+      void (async () => {
         await appendFile(logPath, line, 'utf-8')
         await this.enforceOutboxBudget(logPath, line)
+      })().then(settle, settle)
+    })
+  }
+
+  private noteDroppedLocalWrite(reason: string): void {
+    this.droppedLocalWrites += 1
+    // First drop announces the degradation; afterwards only every 100th, so
+    // the trace is informative without becoming per-event noise.
+    if (this.droppedLocalWrites === 1 || this.droppedLocalWrites % 100 === 0) {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_TELEMETRY_WRITE_QUEUE_DEGRADED, {
+        reason,
+        droppedLocalWrites: this.droppedLocalWrites
       })
-      .catch(() => {})
+    }
   }
 
   /**

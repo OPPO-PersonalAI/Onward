@@ -12,6 +12,8 @@ import { getAppInfo } from './app-info'
 import { getTerminalBuffer, sendPromptViaBridge } from './ipc-handlers'
 import { getUpdateService } from './update-service'
 import { performanceTrace } from './performance-trace'
+import { getThreadpoolHealthSnapshot } from './threadpool-watchdog'
+import { getVisibilityHealthSnapshot } from './visibility-watchdog'
 
 interface ApiServerOptions {
   onRestartToApplyUpdate?: () => Promise<{ success: boolean; error?: string }>
@@ -102,6 +104,8 @@ export async function startApiServer(mainWindow: BrowserWindow, options: ApiServ
         // GET /api/health
         if (method === 'GET' && pathname === '/api/health') {
           const appInfo = getAppInfo()
+          const threadpool = getThreadpoolHealthSnapshot()
+          const visibility = getVisibilityHealthSnapshot()
           sendJson(res, 200, {
             status: 'ok',
             pid: process.pid,
@@ -110,7 +114,16 @@ export async function startApiServer(mainWindow: BrowserWindow, options: ApiServ
             version: appInfo.version,
             buildChannel: appInfo.buildChannel,
             releaseChannel: appInfo.releaseChannel,
-            releaseOs: appInfo.releaseOs
+            releaseOs: appInfo.releaseOs,
+            // Infrastructure watchdogs (2026-07-20 incident class). External
+            // tools and autotests read these to detect a degraded instance:
+            // threadpool 'stalled' = async fs/dns/zlib/crypto dead until
+            // restart; ptyWriteMode 'sync' = patched threadpool-free posix
+            // keystroke delivery is active.
+            threadpool: threadpool.status,
+            threadpoolStalledSince: threadpool.stalledSince,
+            visibility: visibility.status,
+            ptyWriteMode: process.platform === 'win32' ? 'conpty' : 'sync'
           })
           return
         }

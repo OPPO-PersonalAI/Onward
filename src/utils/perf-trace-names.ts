@@ -39,6 +39,24 @@ export const PERF_TRACE_EVENT = {
   MAIN_EVENT_LOOP_STALL: 'main:event-loop-stall',
   MAIN_EVENT_LOOP_METRICS_RESET: 'main:event-loop-metrics-reset',
 
+  // ───────── Main process — infrastructure watchdogs ─────────
+  // libuv-threadpool watchdog (2026-07-20 incident: workers lost their
+  // condvar wakeup after a display-sleep boundary; async fs/dns/zlib/crypto
+  // silently dead while the event loop stayed healthy).
+  MAIN_THREADPOOL_WATCHDOG_STALL_DETECTED: 'main:threadpool-watchdog.stall-detected',
+  MAIN_THREADPOOL_WATCHDOG_RECOVERED: 'main:threadpool-watchdog.recovered',
+  MAIN_PTY_WRITE_EAGAIN_REQUEUE: 'main:pty.write-eagain-requeue',
+  MAIN_PTY_WRITE_SYNC_ERROR: 'main:pty.write-sync-error',
+  MAIN_TELEMETRY_WRITE_QUEUE_DEGRADED: 'main:telemetry.write-queue-degraded',
+  MAIN_DIAGNOSTIC_BUNDLE_SYNC_FALLBACK: 'main:diagnostic-bundle.sync-fallback-used',
+  MAIN_APP_STATE_SYNC_FALLBACK: 'main:app-state.sync-fallback-used',
+  MAIN_QUIT_HARD_FLOOR_TRIGGERED: 'main:quit.hard-floor-triggered',
+  // Renderer-visibility watchdog (window frontmost but renderer stuck
+  // `hidden`: no rAF, no paint; recovery push mirrors the GPU-crash path).
+  MAIN_VISIBILITY_WATCHDOG_MISMATCH: 'main:visibility-watchdog.mismatch-detected',
+  MAIN_VISIBILITY_WATCHDOG_NUDGE: 'main:visibility-watchdog.nudge-applied',
+  MAIN_VISIBILITY_WATCHDOG_RECOVERED: 'main:visibility-watchdog.recovered',
+
   // ───────── Main process — Git subsystem ─────────
   MAIN_GIT_RUNTIME_SUMMARY: 'main:git-runtime-summary',
   MAIN_GIT_RUNTIME_SUMMARY_ERROR: 'main:git-runtime-summary-error',
@@ -928,6 +946,7 @@ export const PERF_TRACE_EVENT = {
   // Breadcrumb for "terminals white after switching back" reports — proves
   // the occlusion was observed and nothing was torn down.
   RENDERER_XTERM_RENDERER_DOCUMENT_HIDDEN_KEEPALIVE: 'renderer:xterm.renderer.document-hidden-keepalive',
+  RENDERER_VISIBILITY_RECOVERY_PUSH_RECEIVED: 'renderer:visibility.recovery-push-received',
   // Renderer: one host-surface restore batch over all visible panes
   // (ph=X, durationMs in payload). Payload: { reason, sessionCount,
   // refreshedCount, recreatedCount, deferredCount, durationMs }. Quantifies

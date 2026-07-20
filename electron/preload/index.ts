@@ -1268,6 +1268,12 @@ export interface DebugAPI {
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
+  simulateThreadpoolStall: (stalled: boolean) => Promise<{ success: boolean; stalled?: boolean; error?: string }>
+  getInfraHealth: () => Promise<{
+    threadpool: { status: 'ok' | 'suspect' | 'stalled'; stalledSince: number | null; recoveries: number }
+    visibility: { status: 'ok' | 'nudging' | 'gave-up'; recoveries: number }
+    ptyWriteMode: 'sync' | 'conpty'
+  }>
   shellReset: () => Promise<void>
   shellGetLastOpenedPath: () => Promise<string | null>
   shellGetLastRevealedPath: () => Promise<string | null>
@@ -2320,6 +2326,16 @@ const debugAPI: DebugAPI = {
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => {
     return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_SET_MOCK_ISSUES, issues)
   },
+  simulateThreadpoolStall: (stalled: boolean) => {
+    return ipcRenderer.invoke(IPC.DEBUG_SIMULATE_THREADPOOL_STALL, stalled) as Promise<{ success: boolean; stalled?: boolean; error?: string }>
+  },
+  getInfraHealth: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_GET_INFRA_HEALTH) as Promise<{
+      threadpool: { status: 'ok' | 'suspect' | 'stalled'; stalledSince: number | null; recoveries: number }
+      visibility: { status: 'ok' | 'nudging' | 'gave-up'; recoveries: number }
+      ptyWriteMode: 'sync' | 'conpty'
+    }>
+  },
   feedbackGetLastOpenedUrl: () => {
     return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL)
   },
@@ -2584,7 +2600,57 @@ export interface SystemAPI {
   onGpuProcessGone: (
     callback: (info: { reason: string; exitCode: number; simulated: boolean }) => void
   ) => () => void
+  /**
+   * libuv-threadpool health transitions (watchdog broadcast). `stalled`
+   * means every async fs/dns/zlib/crypto callback in the main process is
+   * dead until restart; the UI should suggest a restart. Returns an
+   * unsubscribe function.
+   */
+  onThreadpoolHealthChanged: (
+    callback: (info: { status: 'ok' | 'suspect' | 'stalled'; stalledSince: number | null; recoveries: number }) => void
+  ) => () => void
+  /**
+   * Visibility recovery push (main-side watchdog detected "window visible
+   * but renderer stuck hidden" and applied a nudge). Consumers resume
+   * rendering surfaces as if `visibilitychange -> visible` had fired.
+   */
+  onVisibilityRecoveryPush: (callback: (info: { nudge: string }) => void) => () => void
+  /**
+   * Graceful quit + relaunch, offered by the threadpool-degradation banner.
+   * The user must explicitly trigger it — a restart kills every running
+   * shell, so the app never restarts itself.
+   */
+  relaunchApp: () => Promise<{ success: boolean; error?: string }>
 }
+
+// Visibility-watchdog probe responder. Lives in the preload (not app code)
+// so it keeps answering even if the app bundle is wedged. The main process
+// sends a probe; we report document.visibilityState plus whether rAF
+// actually ticks (2 frames within 250 ms). A hidden-stuck renderer answers
+// { visibilityState: 'hidden', rafAlive: false } — the mismatch signal.
+ipcRenderer.on(IPC.SYSTEM_VISIBILITY_PROBE, (_event, probeId: string) => {
+  let settled = false
+  let frames = 0
+  const reply = (rafAlive: boolean) => {
+    if (settled) return
+    settled = true
+    ipcRenderer.send(IPC.SYSTEM_VISIBILITY_PROBE_RESULT, probeId, {
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      rafAlive
+    })
+  }
+  const tick = () => {
+    frames += 1
+    if (frames >= 2) {
+      reply(true)
+      return
+    }
+    requestAnimationFrame(tick)
+  }
+  requestAnimationFrame(tick)
+  setTimeout(() => reply(false), 250)
+})
 
 const systemAPI: SystemAPI = {
   onGpuProcessGone: (callback) => {
@@ -2596,6 +2662,26 @@ const systemAPI: SystemAPI = {
     }
     ipcRenderer.on(IPC.SYSTEM_GPU_PROCESS_GONE, listener)
     return () => ipcRenderer.removeListener(IPC.SYSTEM_GPU_PROCESS_GONE, listener)
+  },
+  onThreadpoolHealthChanged: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      info: { status: 'ok' | 'suspect' | 'stalled'; stalledSince: number | null; recoveries: number }
+    ) => {
+      callback(info)
+    }
+    ipcRenderer.on(IPC.SYSTEM_THREADPOOL_HEALTH, listener)
+    return () => ipcRenderer.removeListener(IPC.SYSTEM_THREADPOOL_HEALTH, listener)
+  },
+  onVisibilityRecoveryPush: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, info: { nudge: string }) => {
+      callback(info)
+    }
+    ipcRenderer.on(IPC.SYSTEM_VISIBILITY_RECOVERY_PUSH, listener)
+    return () => ipcRenderer.removeListener(IPC.SYSTEM_VISIBILITY_RECOVERY_PUSH, listener)
+  },
+  relaunchApp: () => {
+    return ipcRenderer.invoke(IPC.SYSTEM_RELAUNCH_APP) as Promise<{ success: boolean; error?: string }>
   }
 }
 

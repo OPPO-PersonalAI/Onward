@@ -14,6 +14,8 @@ import { getCommandPresetStorage, CommandPreset } from './command-preset-storage
 import { getCodingAgentConfigStorage, CodingAgentConfigInput } from './coding-agent-config-storage'
 import { getCodingAgentRuntimeInfo } from './coding-agent-runtime'
 import { getAppStateStorage, AppState } from './app-state-storage'
+import { isThreadpoolStalled, simulateThreadpoolStallForAutotest, getThreadpoolHealthSnapshot } from './threadpool-watchdog'
+import { getVisibilityHealthSnapshot } from './visibility-watchdog'
 import { readCurrentChangelog } from './changelog'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { getTelemetryConsent, setTelemetryConsent } from './telemetry/telemetry-consent'
@@ -400,6 +402,7 @@ interface RegisterIpcHandlersOptions {
   onSettingsChanged?: (settings: SettingsState) => void
   onRestartToApplyUpdate?: () => Promise<{ success: boolean; error?: string }>
   onGracefulQuitForDebug?: () => Promise<{ success: boolean; error?: string }>
+  onRelaunchForRecovery?: () => Promise<{ success: boolean; error?: string }>
   getApiPort?: () => number
 }
 
@@ -813,6 +816,37 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       simulated: true
     })
     return { success: true, notified }
+  })
+  // Autotest-only: force the threadpool-watchdog degraded state so the
+  // downstream wiring (renderer toast, telemetry drop path, diagnostic
+  // sync fallback, /api/health) can be exercised on every platform. The
+  // genuine stall is only reproducible on POSIX (fifo-blocked worker with
+  // UV_THREADPOOL_SIZE=1); Windows CI drives this hook instead.
+  // User-initiated graceful relaunch from the threadpool-degradation banner.
+  // Not autotest-gated: this is the production recovery path.
+  ipcMain.handle(IPC.SYSTEM_RELAUNCH_APP, async () => {
+    if (!options.onRelaunchForRecovery) {
+      return { success: false, error: 'Relaunch is not available.' }
+    }
+    return options.onRelaunchForRecovery()
+  })
+  ipcMain.handle(IPC.DEBUG_SIMULATE_THREADPOOL_STALL, (_, stalled: boolean) => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:simulate-threadpool-stall requires ONWARD_AUTOTEST=1' }
+    }
+    simulateThreadpoolStallForAutotest(Boolean(stalled))
+    return { success: true, stalled: Boolean(stalled) }
+  })
+  // Read-only infra-health snapshot — the same source /api/health
+  // serializes. Exists because the renderer cannot fetch the local HTTP
+  // endpoint (file:// origin, CORS deliberately NOT enabled on the api
+  // server) and the autotest layer must assert these transitions.
+  ipcMain.handle(IPC.DEBUG_GET_INFRA_HEALTH, () => {
+    return {
+      threadpool: getThreadpoolHealthSnapshot(),
+      visibility: getVisibilityHealthSnapshot(),
+      ptyWriteMode: process.platform === 'win32' ? 'conpty' : 'sync'
+    }
   })
   ipcMain.handle(IPC.DEBUG_FOCUS_WINDOW, () => {
     if (mainWindow.isDestroyed()) return false
@@ -1622,8 +1656,22 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
             electronVersion: process.versions.electron
           },
           timestamp: isoTs,
-          expectedMarker
+          expectedMarker,
+          // With a stalled libuv threadpool the yazl/zlib zip path deadlocks
+          // forever (2026-07-20 incident: "generate log" hung during the
+          // exact failure it should have captured) — go straight to the
+          // synchronous directory delivery. In zip mode the bundle also
+          // self-downgrades on archive timeout.
+          archiveMode: isThreadpoolStalled() ? 'sync-directory' : 'zip'
         })
+
+        if (bundle.archiveMode === 'sync-directory') {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_DIAGNOSTIC_BUNDLE_SYNC_FALLBACK, {
+            requestedByStalledPool: isThreadpoolStalled(),
+            success: bundle.success,
+            bytes: bundle.bytes ?? 0
+          })
+        }
 
         return bundle
       } catch (error) {
@@ -2868,6 +2916,9 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.TELEMETRY_SET_CONSENT)
   ipcMain.removeHandler(IPC.DEBUG_GET_APP_METRICS)
   ipcMain.removeHandler(IPC.DEBUG_SIMULATE_GPU_PROCESS_GONE)
+  ipcMain.removeHandler(IPC.DEBUG_SIMULATE_THREADPOOL_STALL)
+  ipcMain.removeHandler(IPC.SYSTEM_RELAUNCH_APP)
+  ipcMain.removeHandler(IPC.DEBUG_GET_INFRA_HEALTH)
   ipcMain.removeHandler(IPC.DEBUG_FOCUS_WINDOW)
   ipcMain.removeHandler(IPC.DEBUG_GET_GIT_RUNTIME_METRICS)
   ipcMain.removeHandler(IPC.DEBUG_GET_MAIN_WORK_METRICS)

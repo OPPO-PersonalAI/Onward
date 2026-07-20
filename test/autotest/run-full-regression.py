@@ -179,6 +179,11 @@ SCRIPTS: List[str] = [
     "test/autotest/run-global-search-autotest.sh",
     "test/autotest/run-image-diff-autotest.sh",
     "test/autotest/run-image-history-diff-autotest.sh",
+    # Infrastructure watchdogs (2026-07-20 threadpool lost-wakeup incident):
+    # simulated stall -> /api/health flip + degradation banner + recovery,
+    # visibility-watchdog probe transport. Real-stall harness lives at the
+    # unit layer (threadpool-stall-probe.test.mts, POSIX fifo).
+    "test/autotest/run-infra-watchdog-autotest.sh",
     "test/autotest/run-markdown-latex-preview-autotest.sh",
     # Split by CPU phase (idle / post-scroll / editor): the whole 4-phase suite's
     # settle+sampling overran the 300s budget (class-2). Shared body stays in

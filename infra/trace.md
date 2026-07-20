@@ -205,6 +205,22 @@ append new names, never rename existing ones.
 | `MAIN_GITWATCH_SUMMARY` | `main:gitwatch-summary` | `i` (t) | `git-watch-manager.ts` 1 s roll-up |
 | `MAIN_TERMINAL_DATA_IPC_SUMMARY` | `main:terminal-data-ipc-summary` | `i` (t) | `ipc-handlers.ts` terminal IPC counter sampler |
 
+#### Infrastructure watchdogs (2026-07-20 incident class)
+
+| Constant | Name | Phase | Emitted at |
+|---|---|---|---|
+| `MAIN_THREADPOOL_WATCHDOG_STALL_DETECTED` | `main:threadpool-watchdog.stall-detected` | `i` | `threadpool-watchdog.ts` — 2 consecutive 5 s timeouts of the 15 s 1-byte `zlib.gzip` probe (extra probe after powerMonitor resume/unlock). Tagged `probeReason`, `consecutiveFailures`, `firstFailureAt`, `simulated`. Trace store is fully synchronous, so this lands on disk while async fs is dead. |
+| `MAIN_THREADPOOL_WATCHDOG_RECOVERED` | `main:threadpool-watchdog.recovered` | `i` | Same — probe success after a declared stall (theoretical late wakeup). |
+| `MAIN_PTY_WRITE_EAGAIN_REQUEUE` | `main:pty.write-eagain-requeue` | `i` | `threadpool-watchdog.ts::flushPtyCounters` — aggregates the patched node-pty `CustomWriteStream` EAGAIN counter at probe cadence (never per keystroke). Tagged `total`, `delta`. |
+| `MAIN_PTY_WRITE_SYNC_ERROR` | `main:pty.write-sync-error` | `i` | Same aggregation for unexpected `fs.writeSync` errors in the patched pty write path. |
+| `MAIN_TELEMETRY_WRITE_QUEUE_DEGRADED` | `main:telemetry.write-queue-degraded` | `i` | `telemetry-service.ts::noteDroppedLocalWrite` — first dropped local write, then every 100th. Tagged `reason: 'threadpool-stalled' \| 'append-timeout'`, `droppedLocalWrites`. |
+| `MAIN_DIAGNOSTIC_BUNDLE_SYNC_FALLBACK` | `main:diagnostic-bundle.sync-fallback-used` | `i` | `ipc-handlers.ts` FEEDBACK_EXPORT handler — bundle delivered as sync directory (stalled pool requested it, or the zip step hit its 15 s timeout). Tagged `requestedByStalledPool`, `success`, `bytes`. |
+| `MAIN_APP_STATE_SYNC_FALLBACK` | `main:app-state.sync-fallback-used` | `i` | `app-state-storage.ts::persistSyncFallback` — worker save failed/timed out; main-thread `writeFileSync` (tmp+rename) preserved the state delta. Tagged `version`, `bytes`, `workerError`. |
+| `MAIN_QUIT_HARD_FLOOR_TRIGGERED` | `main:quit.hard-floor-triggered` | `i` | `index.ts::runQuitSequenceWithHardFloor` — production quit/restart teardown exceeded 10 s; `app.exit(0)` forced. Tagged `reason`, `floorMs`. |
+| `MAIN_VISIBILITY_WATCHDOG_MISMATCH` | `main:visibility-watchdog.mismatch-detected` | `i` | `visibility-watchdog.ts` — window visible per main but renderer probe says hidden / rAF dead, 2 consecutive checks (30 s interval + power/display-event triggers). Tagged `reason`, `probe`, `consecutiveMismatches`. |
+| `MAIN_VISIBILITY_WATCHDOG_NUDGE` | `main:visibility-watchdog.nudge-applied` | `i` | Same — `level` 1 = backgroundThrottling toggle, `level` 2 = hide+show(Inactive); `kind: 'gave-up'` marks a failed full ladder entering 5 min cooldown. |
+| `MAIN_VISIBILITY_WATCHDOG_RECOVERED` | `main:visibility-watchdog.recovered` | `i` | Same — verdict flipped back to healthy; also broadcasts `SYSTEM_VISIBILITY_RECOVERY_PUSH` to renderers. Tagged `reason`, `recoveries`, `recoveredFrom`. |
+
 #### Git Diff cache & freshness (Bug 1 / Bug 2)
 
 | Constant | Name | Phase | Emitted at |
@@ -642,6 +658,7 @@ white-flash regression).
 | `RENDERER_XTERM_RENDERER_FAILURE` | `renderer:xterm.renderer.failure` | `i` | Same file, WebGL attach failures and cooldown accounting |
 | `RENDERER_XTERM_RENDERER_DOCUMENT_HIDDEN_KEEPALIVE` | `renderer:xterm.renderer.document-hidden-keepalive` | `i` | `terminal-session-manager.ts::noteDocumentHiddenKeepAlive()` — occlusion observed, contexts kept; payload `{ webglSessions, visibleSessions }` |
 | `RENDERER_XTERM_RENDERER_SURFACE_RESTORE_BATCH` | `renderer:xterm.renderer.surface-restore-batch` | `X` (`durationMs` in payload) | `terminal-session-manager.ts::restoreVisibleRendererSurfaces()` — one restore batch over all visible panes; payload `{ reason, sessionCount, refreshedCount, recreatedCount, deferredCount, durationMs }` |
+| `RENDERER_VISIBILITY_RECOVERY_PUSH_RECEIVED` | `renderer:visibility.recovery-push-received` | `i` | `terminal-session-manager.ts::ensureVisibilityRecoverySubscription()` — main-side visibility watchdog pushed a recovery; surfaces resume via `notifyHostSurfaceEvent('document-visible')`. Payload `{ nudge, visibilityState }` |
 
 `RENDERER_XTERM_RENDERER_CONTEXT_RESTORED` stays registered-but-unemitted:
 the keep-alive design has no `webglcontextrestored`-driven path (loss →

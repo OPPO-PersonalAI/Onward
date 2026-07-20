@@ -17,8 +17,8 @@
 
 import { ZipFile } from 'yazl'
 import yauzl from 'yauzl'
-import { copyFileSync, createWriteStream, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { inflateRawSync } from 'zlib'
@@ -70,6 +70,20 @@ export interface CreateDiagnosticBundleOptions {
    * IPC handler refuses to forward this field unless `ONWARD_AUTOTEST=1`.
    */
   expectedMarker?: DiagnosticBundleExpectedMarker
+  /**
+   * Archive strategy. 'zip' (default) streams through yazl — which rides
+   * the libuv threadpool (zlib + createWriteStream) and therefore
+   * deadlocks forever when the pool is stalled (2026-07-20 incident: the
+   * "generate log" feature hung at exactly the moment it was needed).
+   * 'sync-directory' delivers the same content as a plain directory using
+   * only synchronous fs — immune to the stall. Callers pass
+   * 'sync-directory' when the threadpool watchdog reports the pool dead;
+   * 'zip' mode also self-downgrades to the sync directory when the
+   * archive step exceeds `archiveTimeoutMs`.
+   */
+  archiveMode?: 'zip' | 'sync-directory'
+  /** Ceiling for the zip streaming step before self-downgrading. Default 15 s. */
+  archiveTimeoutMs?: number
 }
 
 export interface DiagnosticBundleVerificationCheck {
@@ -96,6 +110,12 @@ export interface DiagnosticBundleResult {
   /** Size of the produced ZIP in bytes; useful for renderer-side toast. */
   bytes?: number
   error?: string
+  /**
+   * How the bundle was actually delivered. 'sync-directory' means the
+   * threadpool-immune fallback ran (requested, or the zip step timed out)
+   * and `path` points at a directory, not a .zip.
+   */
+  archiveMode?: 'zip' | 'sync-directory'
   /** Manifest of what landed inside the ZIP — used by tests + telemetry. */
   manifest?: {
     chunkCount: number
@@ -296,26 +316,54 @@ export async function createDiagnosticBundle(
     }
   }
 
-  // Stream everything into the ZIP.
+  const archiveInput: StreamArchiveInput = {
+    outputPath: opts.outputPath,
+    readmeContent,
+    systemInfoContent,
+    agentGuideContent,
+    stagedStateFiles,
+    traceChunks,
+    traceLatestPointer
+  }
+
+  // Archive step. 'zip' rides the libuv threadpool (yazl zlib +
+  // createWriteStream) and therefore self-downgrades to the synchronous
+  // directory writer on timeout; 'sync-directory' skips the pool entirely.
+  let archiveMode: 'zip' | 'sync-directory' = opts.archiveMode ?? 'zip'
   let producedBytes = 0
-  try {
-    await streamArchive({
-      outputPath: opts.outputPath,
-      readmeContent,
-      systemInfoContent,
-      agentGuideContent,
-      stagedStateFiles,
-      traceChunks,
-      traceLatestPointer
-    })
+  if (archiveMode === 'zip') {
     try {
-      producedBytes = statSync(opts.outputPath).size
+      await streamArchiveWithTimeout(archiveInput, opts.archiveTimeoutMs ?? DEFAULT_ARCHIVE_TIMEOUT_MS)
+      try {
+        producedBytes = statSync(opts.outputPath).size
+      } catch {
+        producedBytes = 0
+      }
     } catch {
-      producedBytes = 0
+      // Timeout or stream error: fall through to the threadpool-immune
+      // sync-directory delivery instead of failing log generation at the
+      // exact moment it is most needed.
+      archiveMode = 'sync-directory'
     }
-  } catch (error) {
+  }
+
+  if (archiveMode === 'sync-directory') {
+    const fallback = writeBundleDirectorySync(archiveInput)
     cleanupStaging(stagingDir)
-    return { success: false, error: `archive-failed: ${String(error)}` }
+    return {
+      success: fallback.verification.ok,
+      path: fallback.path,
+      bytes: fallback.bytes,
+      archiveMode,
+      error: fallback.verification.ok ? undefined : 'sync-fallback-verification-failed',
+      manifest: {
+        chunkCount: traceChunks.length,
+        chunkBytes: chunkBytesTotal,
+        stateFiles: stagedStateFiles.map((entry) => entry.entry),
+        missingFiles
+      },
+      verification: fallback.verification
+    }
   }
 
   cleanupStaging(stagingDir)
@@ -359,8 +407,91 @@ export async function createDiagnosticBundle(
     success: true,
     path: opts.outputPath,
     bytes: producedBytes,
+    archiveMode: 'zip',
     manifest,
     verification
+  }
+}
+
+const DEFAULT_ARCHIVE_TIMEOUT_MS = 15_000
+
+function streamArchiveWithTimeout(input: StreamArchiveInput, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error(`archive-timeout-${timeoutMs}ms`))
+    }, timeoutMs)
+    timer.unref()
+    streamArchive(input).then(
+      () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve()
+      },
+      (err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+/**
+ * Threadpool-immune bundle delivery: write the exact same content the ZIP
+ * would have carried as a plain directory tree, using only synchronous fs.
+ * Verification is a sync existence + byte-length sweep (the zip path's
+ * yauzl-based byte-equivalence check also rides the threadpool and is
+ * unavailable in this mode).
+ */
+function writeBundleDirectorySync(input: StreamArchiveInput): {
+  path: string
+  bytes: number
+  verification: DiagnosticBundleVerification
+} {
+  const dirPath = input.outputPath.replace(/\.zip$/i, '') + '-bundle'
+  const checks: DiagnosticBundleVerificationCheck[] = []
+  let totalBytes = 0
+
+  const writeEntry = (entry: string, data: Buffer): void => {
+    const target = join(dirPath, entry)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, data)
+    const actual = statSync(target).size
+    totalBytes += actual
+    checks.push({
+      name: `sync-entry:${entry}`,
+      passed: actual === data.length,
+      detail: actual === data.length ? undefined : `size ${actual} != ${data.length}`
+    })
+  }
+
+  try {
+    mkdirSync(dirPath, { recursive: true })
+    writeEntry(README_FILENAME, Buffer.from(input.readmeContent, 'utf8'))
+    writeEntry(SYSTEM_INFO_FILENAME, Buffer.from(input.systemInfoContent, 'utf8'))
+    writeEntry(AGENT_GUIDE_FILENAME, Buffer.from(input.agentGuideContent, 'utf8'))
+    for (const staged of input.stagedStateFiles) {
+      writeEntry(staged.entry, readFileSync(staged.src))
+    }
+    if (input.traceLatestPointer) {
+      writeEntry('traces/latest.txt', readFileSync(input.traceLatestPointer))
+    }
+    for (const chunk of input.traceChunks) {
+      writeEntry(chunk.entry, chunk.data)
+    }
+  } catch (error) {
+    checks.push({ name: 'sync-directory-write', passed: false, detail: String(error) })
+  }
+
+  return {
+    path: dirPath,
+    bytes: totalBytes,
+    verification: { ok: checks.every((c) => c.passed), checks }
   }
 }
 

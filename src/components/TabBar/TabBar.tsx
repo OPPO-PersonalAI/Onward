@@ -40,6 +40,9 @@ export function TabBar() {
   const [appName, setAppName] = useState('Onward 2')
   const [updateStatus, setUpdateStatus] = useState<UpdaterStatus | null>(null)
   const [isRestartingForUpdate, setIsRestartingForUpdate] = useState(false)
+  const [threadpoolStalled, setThreadpoolStalled] = useState(false)
+  const [stallBannerDismissed, setStallBannerDismissed] = useState(false)
+  const [isRelaunchingForRecovery, setIsRelaunchingForRecovery] = useState(false)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
 
@@ -79,10 +82,40 @@ export function TabBar() {
     }
   }, [])
 
+  // Threadpool-watchdog banner: the main process broadcasts when its libuv
+  // threadpool stalls (async fs/dns dead until restart — terminal input,
+  // log generation and update checks are all degraded). Restarting kills
+  // running shells, so the banner only *offers* the restart.
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.system?.onThreadpoolHealthChanged?.((info) => {
+      setThreadpoolStalled(info.status === 'stalled')
+      if (info.status !== 'stalled') {
+        setStallBannerDismissed(false)
+      }
+    })
+    return () => {
+      unsubscribe?.()
+    }
+  }, [])
+
   const highlightName = appName.startsWith('Onward') ? 'Onward' : null
   const restName = highlightName ? appName.slice(highlightName.length) : appName
-  const showUpdateBanner = updateStatus?.phase === 'downloaded' && !updateStatus.bannerDismissed
+  const showStallBanner = threadpoolStalled && !stallBannerDismissed
+  // Infrastructure degradation outranks the update banner; never stack both.
+  const showUpdateBanner = !showStallBanner && updateStatus?.phase === 'downloaded' && !updateStatus.bannerDismissed
   const installableVersion = updateStatus?.phase === 'downloaded' ? updateStatus.targetVersion : null
+
+  const handleRelaunchForRecovery = useCallback(async () => {
+    setIsRelaunchingForRecovery(true)
+    try {
+      const result = await window.electronAPI.system.relaunchApp()
+      if (!result.success) {
+        setIsRelaunchingForRecovery(false)
+      }
+    } catch {
+      setIsRelaunchingForRecovery(false)
+    }
+  }, [])
 
   const handleRestartToUpdate = useCallback(async () => {
     setIsRestartingForUpdate(true)
@@ -190,6 +223,35 @@ export function TabBar() {
               </span>
             )}
           </div>
+
+          {showStallBanner && (
+            <div className="tab-bar-update-banner tab-bar-stall-banner" role="alert" aria-live="assertive">
+              <span className="tab-bar-update-text">
+                {t('tabBar.threadpoolStall.message')}
+              </span>
+              <button
+                className="tab-bar-update-action"
+                type="button"
+                onClick={handleRelaunchForRecovery}
+                disabled={isRelaunchingForRecovery}
+                title={t('tabBar.threadpoolStall.restart')}
+              >
+                {isRelaunchingForRecovery ? t('tabBar.threadpoolStall.restarting') : t('tabBar.threadpoolStall.restart')}
+              </button>
+              <button
+                className="tab-bar-update-close"
+                type="button"
+                onClick={() => setStallBannerDismissed(true)}
+                title={t('tabBar.threadpoolStall.dismiss')}
+                aria-label={t('tabBar.threadpoolStall.dismiss')}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <line x1="9" y1="3" x2="3" y2="9" />
+                  <line x1="3" y1="3" x2="9" y2="9" />
+                </svg>
+              </button>
+            </div>
+          )}
 
           {showUpdateBanner && (
             <div className="tab-bar-update-banner" role="status" aria-live="polite">

@@ -25,6 +25,7 @@ import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../
 import {
   terminalSessionManager,
   ensureGpuCrashRecoverySubscription,
+  ensureVisibilityRecoverySubscription,
   TerminalSessionOptions,
   TerminalSessionStatus,
   type TerminalRendererSurfaceEvent
@@ -1378,10 +1379,12 @@ export const TerminalGrid = memo(function TerminalGrid({
     }
   }, [applyTerminalInfoUpdate, gitDiffOpen])
 
-  // GPU-crash recovery wiring: idempotent global subscription (survives the
-  // subscriber grid unmounting; the manager is a singleton spanning tabs).
+  // GPU-crash + visibility-watchdog recovery wiring: idempotent global
+  // subscriptions (survive the subscriber grid unmounting; the manager is a
+  // singleton spanning tabs).
   useEffect(() => {
     ensureGpuCrashRecoverySubscription()
+    ensureVisibilityRecoverySubscription()
   }, [])
 
   useEffect(() => {

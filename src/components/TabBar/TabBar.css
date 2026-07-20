@@ -247,6 +247,21 @@
   -webkit-app-region: no-drag;
 }
 
+/* Threadpool-degradation variant: warning tint instead of accent so the
+   banner reads as a fault, not a feature announcement. */
+.tab-bar-stall-banner {
+  border-color: color-mix(in srgb, #f2b04c 45%, var(--border));
+  background: color-mix(in srgb, #f2b04c 14%, var(--bg-1));
+}
+
+.tab-bar-stall-banner .tab-bar-update-action {
+  background: #f2b04c;
+}
+
+.tab-bar-stall-banner .tab-bar-update-action:hover:not(:disabled) {
+  background: color-mix(in srgb, #f2b04c 84%, white);
+}
+
 .tab-bar-update-text {
   font-size: var(--font-sm);
   color: var(--text-1);

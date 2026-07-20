@@ -673,3 +673,84 @@ test('DB-10 V10: autotest marker present + args match → pass', async () => {
     fix.cleanup()
   }
 })
+
+// ─────────── DB-11/DB-12: threadpool-immune sync-directory fallback ───────────
+// (2026-07-20 incident: the yazl/zlib zip path rides the libuv threadpool and
+// deadlocked forever while the pool was stalled — "generate log" hung during
+// the exact failure it existed to capture. 'sync-directory' delivers the same
+// content with only synchronous fs.)
+
+test('DB-11 sync-directory mode: bundle delivered as a plain directory with full content', async () => {
+  const fs = await import('node:fs')
+  const fix = makeFixture()
+  try {
+    const result = await createDiagnosticBundle({
+      userDataDir: fix.userDataDir,
+      outputPath: fix.outputPath,
+      appInfo: APP_INFO,
+      timestamp: '2026-07-20T03:00:00.000Z',
+      archiveMode: 'sync-directory'
+    })
+    assert.equal(result.success, true, `sync fallback failed: ${result.error ?? '(no error)'}`)
+    assert.equal(result.archiveMode, 'sync-directory')
+    assert.ok(result.path, 'fallback path missing')
+    assert.notEqual(result.path, fix.outputPath, 'fallback must not claim the .zip path')
+    assert.ok(fs.statSync(result.path!).isDirectory(), 'fallback path must be a directory')
+    assert.ok((result.bytes ?? 0) > 0, 'fallback should report non-zero bytes')
+
+    for (const entry of [
+      'README.txt',
+      'AGENT-GUIDE.md',
+      'system-info.txt',
+      'app-state.json',
+      'telemetry-events.jsonl',
+      'settings.json',
+      'window-state.json',
+      'feedback.json',
+      'traces/latest.txt'
+    ]) {
+      assert.ok(
+        fs.existsSync(join(result.path!, entry)),
+        `expected fallback entry ${entry} missing`
+      )
+    }
+    const chunks = fs.readdirSync(join(result.path!, 'traces')).filter((f: string) => f.startsWith('perf-'))
+    assert.equal(chunks.length, 2, 'expected 2 perf chunks in fallback directory')
+    // Every per-entry sync verification check must have passed.
+    assert.equal(result.verification?.ok, true)
+    assert.ok((result.verification?.checks.length ?? 0) > 0)
+    fs.rmSync(result.path!, { recursive: true, force: true })
+  } finally {
+    fix.cleanup()
+  }
+})
+
+test('DB-12 sync-directory README content matches the zip-mode README byte-for-byte', async () => {
+  const fs = await import('node:fs')
+  const fix = makeFixture()
+  try {
+    const ts = '2026-07-20T03:00:00.000Z'
+    const zipResult = await createDiagnosticBundle({
+      userDataDir: fix.userDataDir,
+      outputPath: fix.outputPath,
+      appInfo: APP_INFO,
+      timestamp: ts
+    })
+    assert.equal(zipResult.success, true)
+    const zipReadme = readZipEntry(fix.outputPath, 'README.txt')
+
+    const dirResult = await createDiagnosticBundle({
+      userDataDir: fix.userDataDir,
+      outputPath: join(fix.userDataDir, 'again.zip'),
+      appInfo: APP_INFO,
+      timestamp: ts,
+      archiveMode: 'sync-directory'
+    })
+    assert.equal(dirResult.success, true)
+    const dirReadme = fs.readFileSync(join(dirResult.path!, 'README.txt'), 'utf-8')
+    assert.equal(dirReadme, zipReadme, 'fallback README must be identical to zip-mode README')
+    fs.rmSync(dirResult.path!, { recursive: true, force: true })
+  } finally {
+    fix.cleanup()
+  }
+})

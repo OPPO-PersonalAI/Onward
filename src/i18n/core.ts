@@ -369,6 +369,10 @@ const en = {
   'tabBar.updateReady.restarting': 'Restarting...',
   'tabBar.updateReady.dismiss': 'Dismiss update notice',
   'tabBar.updateReady.installableVersion': 'Ready: {{version}}',
+  'tabBar.threadpoolStall.message': 'An internal service has stopped responding. Terminal input and log export are degraded — restart the app when convenient.',
+  'tabBar.threadpoolStall.restart': 'Restart app',
+  'tabBar.threadpoolStall.restarting': 'Restarting...',
+  'tabBar.threadpoolStall.dismiss': 'Dismiss service notice',
 
   'app.projectEditor.switchTerminalConfirm': 'This file has unsaved changes. Switching terminals will discard them. Continue?',
   'app.exportPromptsTitle': 'Export all Prompts',
@@ -1810,6 +1814,10 @@ const zhCN: LocaleTranslations = {
   'tabBar.updateReady.restarting': '正在重启...',
   'tabBar.updateReady.dismiss': '关闭更新提示',
   'tabBar.updateReady.installableVersion': '可安装：{{version}}',
+  'tabBar.threadpoolStall.message': '内部服务已停止响应，终端输入与日志导出等功能已降级，建议尽快重启应用。',
+  'tabBar.threadpoolStall.restart': '重启应用',
+  'tabBar.threadpoolStall.restarting': '正在重启...',
+  'tabBar.threadpoolStall.dismiss': '关闭服务提示',
 
   'app.projectEditor.switchTerminalConfirm': '当前文件有未保存修改，切换终端会丢失这些修改，是否继续？',
   'app.exportPromptsTitle': '导出全部 Prompt',
