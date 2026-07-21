@@ -415,6 +415,74 @@ which require user confirmation before any edit:
 
 When in doubt: leave the test alone, fix production.
 
+### Stability gate FIRST: stable vs unstable, and the EDR abandon rule
+
+**A failure is not by itself a mandate to change code.** Before triaging or fixing
+anything, establish for EVERY failing runner whether the failure is STABLE or
+UNSTABLE, and — when unstable — whether EDR is *provably* responsible. An
+EDR-induced flake on this host is an environment artefact, not a defect; chasing
+it with edits produces churn and, at worst, a test that lies. This gate is not
+optional and it is cheap: one isolation re-run per failing suite, minutes.
+
+**1. Measure stability — isolation re-run, 3 iterations.**
+
+```bash
+python3 test/autotest/run-full-regression.py --only run-<suite> --repeat 3
+```
+
+Reuse the existing package when the working tree has NOT changed since the failing
+run — `release/` then holds the exact artefact that produced the failure, which
+makes isolation-vs-full-run the only variable. Add `--build` whenever the tree has
+moved since.
+
+- **3/3 red → STABLE.** A reproducible defect. Go to *Triage FIRST* below and fix it.
+- **1–2 of 3 red → UNSTABLE.** Go to step 2.
+- **0/3 red → UNSTABLE** (fails only under full-run pressure). Go to step 2.
+
+**2. Attribute the instability — positive evidence REQUIRED.**
+
+"It goes green in isolation" is **not sufficient on its own** — a genuine product
+race also goes green once the load is removed, and attributing on that alone would
+quietly discard real concurrency bugs. Attribute to EDR only when the isolation
+result is corroborated by at least one positive fingerprint AND no product-fault
+signal is present.
+
+Positive EDR fingerprints (need ≥ 1):
+- the harness's own EDR compensation is visibly active in the log (e.g. `edrScale`
+  applied, a scaled `timeoutMs` well above `baseTimeoutMs`);
+- process-spawn / file-access latency in the log sits far above the healthy
+  baseline (this host taxes every spawn 1.3–12.9 s);
+- the failure lands on a **wait timeout** — the assertion never observed a result —
+  rather than on a wrong value.
+
+Disqualifying signals (ANY one → NOT EDR, do not abandon):
+- a crash signature (`Segmentation fault` / `Access violation` / `0xC0000005` /
+  `STATUS_*`);
+- an unhandled rejection, or an error the app itself surfaced;
+- the assertion observed a **wrong value** rather than no value;
+- the same failure reproduces on a host without EDR, or in CI.
+
+**3. Act on the verdict.**
+
+- **UNSTABLE + EDR-attributed → ABANDON the fix.** Change **nothing**: no
+  production file, no test file, no fixture, no timeout, no threshold. Record the
+  cluster in `repair-progress.json` with `"status": "abandoned-edr"`, the stability
+  result (`n/3`), the fingerprint(s) relied on, and the disqualifying signals you
+  checked for and did not find. Name it in the completion report as
+  abandoned-with-reason. Do NOT mark it `verified`, and do NOT let it block the
+  rest of the pass.
+- **UNSTABLE + NOT EDR-attributed → treat it as a real race** — a product
+  concurrency defect that load merely exposes — and continue into *Triage FIRST*,
+  usually Bucket 2 or 3.
+- **STABLE → continue into *Triage FIRST*** as normal.
+
+**How this gate relates to the buckets below.** The buckets classify the *nature*
+of a defect once you have decided to act; this gate decides *whether to act at
+all*. They are not in conflict: a STABLE failure whose root cause is a test-design
+timing race is still Bucket 1 and is still fixed by hardening the test — being
+timing-related does not exempt it, because it reproduces every time. What the gate
+removes is the churn of editing tests to chase a failure that will not reproduce.
+
 ### Triage FIRST: EDR flake vs crash vs real drift (hard-won field lessons)
 
 The "fix production, the test is ground truth" default above is correct for a
@@ -427,6 +495,9 @@ each is fixed in an opposite way. (The full write-up lives in `docs/lessons.md`
 § "EDR full-regression convergence" — read it before a repair pass.)
 
 **Bucket 1 — EDR / timing flake (a test-design race). The most common here. Fix the TEST.**
+Reachable only for failures the stability gate cleared for action — a STABLE
+timing race, or an unstable one WITHOUT positive EDR evidence. An unstable failure
+with that evidence was already abandoned above and must not be "fixed" here.
 Tells: it passes in isolation but flaked only in the full run; the assertion read a value
 that was *stale / empty / `-1`* (a single-shot read of async-populated state); the gate is
 a *latency / median / p95 / ratio* comparison; there is a *fixed `sleep(N)`* right before
@@ -487,7 +558,12 @@ The shape of a repair pass (each step's mechanics are in the numbered Steps belo
 1. **Start from a completed full run** — you repair the failures of an existing
    `test/full-regression-results/<timestamp>/`, never run a fresh full pass just to
    *discover* them (the user already did that). See the Hard precondition below.
-2. **Analyse each failure deeply — reach for the Workflow tool for anything
+2. **Run the stability gate on every failure BEFORE analysing or fixing anything**
+   (§ *Stability gate FIRST*): isolation re-run `--repeat 3`, then STABLE → fix,
+   UNSTABLE + positive EDR evidence → **abandon and change nothing**, UNSTABLE
+   without that evidence → treat as a real race. Never skip straight from a red
+   summary to a code edit.
+3. **Analyse each failure deeply — reach for the Workflow tool for anything
    non-trivial.** For a single opaque log, the Explore subagent / Grep / Read is
    enough. But when several suites fail, or a root cause spans subsystems, author a
    short Workflow that fans out one diagnostic agent per failing suite (each reads
@@ -495,10 +571,10 @@ The shape of a repair pass (each step's mechanics are in the numbered Steps belo
    fix with `file:line`). A shifting / multi-suite failure set is usually ONE shared
    root cause (§ *Triage FIRST*), and a Workflow surfaces that far faster than
    guessing serially.
-3. **Fix, then verify that ONE fix in ISOLATION** with `--background --build --only
+4. **Fix, then verify that ONE fix in ISOLATION** with `--background --build --only
    run-<suite>` — minutes, no user typing. Do NOT run the full suite to validate a
    single fix (a 30–70 min round-trip to check one thing).
-4. **Only after every individual fix verifies, run ONE final full pass** (also
+5. **Only after every individual fix verifies, run ONE final full pass** (also
    `--background`) to confirm nothing else regressed and no *other* suite now fails;
    use `--repeat 2`/`3` if any repaired failure was a timing flake. The task is
    **done ONLY when that final full pass is all-green** (STABLE across iterations).
@@ -583,8 +659,11 @@ so the original evidence is preserved.
 Per-cluster `status`: `pending` (not started), `fixed` (production
 change applied, not yet re-verified), `verified` (targeted re-run
 green), `deferred` (user explicitly asked to skip this cluster this
-round). Top-level `final_status`: `in_progress`, `all_green`,
-`new_failures`.
+round), `abandoned-edr` (the stability gate found it unstable AND
+attributable to EDR — nothing was changed; carry the `n/3` stability
+result, the fingerprint(s) relied on, and the disqualifying signals
+checked for and not found). Top-level `final_status`: `in_progress`,
+`all_green`, `new_failures`.
 
 ### Step 4 — Cluster by root cause
 
@@ -816,6 +895,9 @@ and require an explicit "yes, clean" before invoking the script.
 
 **Always:**
 
+- Run the stability gate (§ *Stability gate FIRST*) on every failure before any
+  analysis or edit, and abandon — changing nothing — any unstable failure with
+  positive EDR evidence and no product-fault signal.
 - Treat tests as the contract; production code is what drifts.
 - Use `--build` on every regression invocation — Mode A's run, Mode
   B's per-cluster verify, and Mode B's final pass alike.
@@ -874,6 +956,13 @@ and require an explicit "yes, clean" before invoking the script.
   `run-prompt-integrity` hung for ~1 h 49 m instead of a clean 180 s `TIMEOUT`.)
   A single, actively-watched suite you read the log for and kill yourself is the
   only acceptable direct invocation — never a batch, never backgrounded-and-left.
+- Edit anything — production, test, fixture, timeout, threshold — for a failure
+  the stability gate attributed to EDR. "Abandon" means abandon: record it in
+  `repair-progress.json` as `abandoned-edr`, name it in the report, move on.
+- Attribute a failure to EDR on "it passes in isolation" alone. That evidence is
+  equally consistent with a real product race; a positive EDR fingerprint is
+  required, and any crash / unhandled-rejection / wrong-value signal disqualifies
+  the attribution outright.
 - Apply more than one fix cluster per Plan Mode pass. One plan, one
   approval, one fix.
 - Start `--repair` when no prior run exists on disk. Refuse, point
