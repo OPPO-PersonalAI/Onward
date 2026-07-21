@@ -29,6 +29,13 @@ test/results/
 traces/*
 !traces/.gitkeep
 logs/
+# User-supplied diagnostic bundles fed to the `ow_log_analysis` skill, plus the
+# HTML analysis reports it writes to Logs/reports/. Bundles contain unredacted
+# state files (app-state.json / settings.json / feedback.json) and raw paths in
+# trace args, so they must never be committed. Listed separately from `logs/`
+# above because gitignore matching is case-SENSITIVE on Linux/macOS — `logs/`
+# alone would not cover `Logs/` there, only on Windows (core.ignorecase=true).
+Logs/
 .DS_Store
 # Local scheduled-task lock and other .claude/*.lock files produced by skill runtimes.
 .claude/*.lock
