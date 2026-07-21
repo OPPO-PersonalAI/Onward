@@ -1,0 +1,586 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 OPPO; SPDX-License-Identifier: Apache-2.0 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HANDOFF &#x2014; Onward &#x7EC8;&#x7AEF;&#x5DE5;&#x4F5C;&#x76EE;&#x5F55;&#x4E00;&#x81F4;&#x6027;</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070a0f;
+      --panel: #0d121a;
+      --panel-2: #111925;
+      --line: #293343;
+      --text: #d8e1ec;
+      --muted: #8ea0b5;
+      --blue: #69a8ff;
+      --green: #62d49b;
+      --amber: #f2c66d;
+      --red: #ff7e86;
+      --violet: #b8a2ff;
+      --toc: 286px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: auto !important; background: var(--bg); }
+    body { margin: 0; background: radial-gradient(circle at 90% 0, #111a29 0, var(--bg) 36rem); color: var(--text); font: 14px/1.65 Inter, "Segoe UI", system-ui, sans-serif; }
+    a { color: var(--blue); }
+    code, pre, .mono { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; }
+    #toc-sidebar { position: fixed; inset: 0 auto 0 0; width: var(--toc); overflow: auto; padding: 24px 18px; background: rgba(8, 12, 18, .97); border-right: 1px solid var(--line); z-index: 10; }
+    #toc-sidebar h2 { margin: 0; color: #f1f6fc; font-size: 15px; letter-spacing: .08em; text-transform: uppercase; }
+    #toc-sidebar .toc-meta { margin: 5px 0 18px; color: var(--muted); font-size: 11px; }
+    #toc-nav { display: grid; gap: 3px; }
+    #toc-nav a { display: block; padding: 5px 9px; border-radius: 7px; color: var(--muted); text-decoration: none; line-height: 1.35; }
+    #toc-nav a[data-level="1"] { margin-top: 8px; color: #e7eef8; font-weight: 700; }
+    #toc-nav a[data-level="2"] { margin-top: 7px; color: #c5d0dd; font-weight: 650; }
+    #toc-nav a[data-level="3"] { padding-left: 20px; font-size: 12px; }
+    #toc-nav a:hover, #toc-nav a.active { background: #172131; color: #fff; }
+    main { width: min(1180px, calc(100% - var(--toc))); margin-left: var(--toc); padding: 36px 36px 72px; }
+    header { padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: clamp(27px, 3vw, 42px); line-height: 1.15; color: #f3f7fc; }
+    h2 { margin: 0 0 14px; color: #eff5fc; font-size: 21px; }
+    h3 { margin: 0 0 10px; color: #dfe8f3; font-size: 15px; }
+    p { margin: 8px 0; }
+    section[id], h1[id], h2[id], h3[id] { scroll-margin-top: 12px; }
+    .subtitle { margin-top: 12px; max-width: 870px; color: #adbbcb; font-size: 17px; }
+    .metadata { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+    .pill, .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px; background: #101722; color: #b9c7d7; font-size: 11px; }
+    .badge.blocked { border-color: #8b6432; background: #241b10; color: var(--amber); }
+    .badge.good { border-color: #285e47; background: #0c2018; color: var(--green); }
+    .card, .feature-block { margin-top: 24px; padding: 22px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(155deg, rgba(17, 25, 37, .97), rgba(10, 15, 23, .97)); box-shadow: 0 14px 45px rgba(0,0,0,.18); }
+    .feature-block { padding: 26px; }
+    .sub-section { margin-top: 15px; padding: 18px; border: 1px solid #253044; border-radius: 10px; background: rgba(8, 13, 20, .75); }
+    .callout { margin: 14px 0; padding: 14px 16px; border-left: 4px solid var(--blue); border-radius: 8px; background: #0d1724; }
+    .callout.warn { border-left-color: var(--amber); background: #1b160d; }
+    .callout.danger { border-left-color: var(--red); background: #211014; }
+    .user-quote { margin: 10px 0; padding: 12px 16px; border-left: 3px solid var(--blue); border-radius: 0 8px 8px 0; background: #0a1623; color: #dfe9f5; }
+    .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+    .metric { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #0a1018; }
+    .metric strong { display: block; color: #f3f7fc; font-size: 24px; line-height: 1.1; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: #93a7bc; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
+    td { color: #ced8e4; }
+    .table-wrap { overflow-x: auto; }
+    ul, ol { margin: 8px 0; padding-left: 22px; }
+    li + li { margin-top: 7px; }
+    .decision-list { counter-reset: item; list-style: none; padding: 0; }
+    .decision-list > li { position: relative; padding: 12px 12px 12px 48px; border: 1px solid var(--line); border-radius: 9px; background: #0b111a; }
+    .decision-list > li::before { counter-increment: item; content: counter(item); position: absolute; left: 13px; top: 13px; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 7px; background: #1b2b42; color: var(--blue); font-weight: 800; }
+    .flow { margin: 18px 0 4px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: #080d14; overflow-x: auto; }
+    .flow svg { display: block; min-width: 850px; width: 100%; height: auto; }
+    .flow text { fill: #dce6f1; font: 12px "Segoe UI", sans-serif; text-anchor: middle; }
+    .flow .sub { fill: #91a2b5; font-size: 10px; }
+    .flow rect { fill: #121d2b; stroke: #3a526e; stroke-width: 1.2; rx: 9; }
+    .flow .ok { fill: #0d251b; stroke: #398460; }
+    .flow .bad { fill: #281216; stroke: #a84c55; }
+    .flow path { fill: none; stroke: #6ba8ee; stroke-width: 1.7; marker-end: url(#arrow); }
+    figure.impl-figure { margin: 14px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #080d13; }
+    figure.impl-figure figcaption { padding: 8px 12px; background: #141d2a; color: #b6c5d6; font-size: 12px; }
+    pre { margin: 0; padding: 14px; overflow: auto; color: #d9e5f1; background: #070b11; font-size: 12px; line-height: 1.55; }
+    .impl-tradeoff { margin: 0; padding: 10px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .worked { color: var(--green); }
+    .failed { color: var(--red); }
+    .next { color: var(--amber); }
+    .reviews-empty { padding: 14px; border: 1px dashed #354256; border-radius: 9px; color: var(--muted); }
+    footer { margin-top: 32px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    @media (max-width: 900px) {
+      #toc-sidebar { position: relative; width: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+      main { width: 100%; margin-left: 0; padding: 24px 16px 54px; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 540px) { .metric-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <script type="application/json" id="handoff-data">
+{
+  "schema_version": "6.0",
+  "skill_version": "0.9.0",
+  "last_updated": "2026-07-21 14:11:18 +0800",
+  "language": "zh-CN",
+  "project": {
+    "name": "Onward",
+    "tagline": "\u4FEE\u590D\u7EC8\u7AEF\u3001\u5E94\u7528\u72B6\u6001\u4E0E Git \u5DE5\u4F5C\u76EE\u5F55\u4E0D\u4E00\u81F4\uFF0C\u5E76\u6536\u655B\u5DF2\u7ECF\u8FC7\u5EA6\u6269\u5927\u7684\u5B9E\u73B0\u8303\u56F4\u3002"
+  },
+  "tasks": [
+    {
+      "id": "terminal-cwd-consistency",
+      "name": "\u7EC8\u7AEF\u76EE\u5F55\u4E00\u81F4\u6027",
+      "tagline": "\u542F\u52A8\u811A\u672C\u5931\u6548\u65F6\uFF0C\u4E5F\u8981\u8BA9 Terminal\u3001Onward \u4E0E Git \u4F7F\u7528\u540C\u4E00\u4E2A\u7ECF\u8FC7\u9A8C\u8BC1\u7684\u76EE\u5F55\u3002",
+      "touched_path_count": 254,
+      "touched_paths": [
+        "electron/main/pty-manager.ts",
+        "electron/main/ipc-handlers.ts",
+        "electron/main/terminal-cwd-validation.ts",
+        "electron/main/terminal-cwd-settlement-policy.ts",
+        "electron/main/terminal-pty-disposal-policy.ts",
+        "electron/main/terminal-default-cwd-policy.ts",
+        "electron/main/git-utils.ts",
+        "electron/main/git-state-mirror-router.ts",
+        "electron/main/git-exec-file-hard-timeout.ts",
+        "electron/main/git-executable-resolver.ts",
+        "electron/shared/shell-cwd-command-planner.mjs",
+        "electron/shared/terminal-directory-identity.mjs",
+        "resources/shell-integration/bash.sh",
+        "resources/shell-integration/fish.fish",
+        "resources/shell-integration/pwsh.ps1",
+        "resources/shell-integration/zsh-zdotdir/.zshrc",
+        "resources/shell-integration/wsl-bootstrap.sh",
+        "resources/native/windows/onward-git-job-supervisor.c",
+        "src/components/TerminalGrid/TerminalGrid.tsx",
+        "src/components/TerminalGrid/TerminalGrid.css",
+        "src/i18n/core.ts",
+        "src/utils/terminal-command.ts",
+        "src/utils/terminal-cwd-osc-gate.ts",
+        "src/autotest/test-terminal-state-persistence.ts",
+        "test/autotest/test-shell-integration-cwd.mjs",
+        "test/autotest/shell-integration-matrix-oracle.mjs",
+        "test/autotest/run-full-regression.py",
+        "test/unittest/terminal-command.test.mts",
+        "test/unittest/terminal-cwd-settlement-policy.test.mts",
+        "test/unittest/terminal-pty-disposal-policy.test.mts",
+        ".github/workflows/release.yml"
+      ],
+      "next_step_status": "blocked",
+      "goal": {
+        "user_quotes": [
+          "\u5206\u6790\u8FD9\u4EFD\u65E5\u5FD7\uFF0C\u5B9A\u4F4D\u95EE\u9898\u539F\u56E0",
+          "\u5BF9\u4E8E\u8FD9\u7C7B\u68C0\u6D4B\u7C7B\u7684\uFF0C\u5E94\u8BE5\u662F\u6709\u5FEB\u901F\u8DEF\u5F84\u4F5C\u4E3A\u9996\u8981\u7684\u65B9\u6848\uFF0C\u6709\u515C\u5E95\u7684\u65B9\u6848\u4F5C\u4E3A\u6BBF\u540E\u7684\u591A\u5C42 \u7ED3\u6784\u3002",
+          "\u5982\u679C\u542F\u52A8\u811A\u672C\u5931\u8D25\uFF0C\u5219\u5E94\u8BE5\u63D0\u793A\u7528\u6237\u4F7F\u7528terminal\u4E2D\u7684\u4E3B\u52A8\u4F7F\u7528\u5207\u6362\u5DE5\u4F5C\u76EE\u5F55\u6765\u5B9E\u73B0\u5DE5\u4F5C\u76EE\u5F55\u7684\u5207\u6362\u3002\u56E0\u6B64\u8FD9\u4E2A\u64CD\u4F5C\u4E0B\uFF0C\u4F60\u8981\u786E\u4FDD\u80FD\u591F\u5207\u6362\u5230\u771F\u6B63\u7684\u5DE5\u4F5C\u76EE\u5F55\u3002 \u4E5F\u5E94\u8BE5\u5C06\u8FD9\u79CD\u4E3B\u52A8\u64CD\u4F5C\uFF0C\u6CE8\u5165\u5230\u5F53\u524D\u7684terminal\u4E2D\uFF0C\u76F4\u63A5\u628A\u5DE5\u4F5C\u76EE\u5F55\u5207\u6362\u8FC7\u6765\u3002",
+          "\u4F60\u9996\u5148\u8981\u9488\u5BF9\u6211\u4EEC\u7684\u95EE\u9898\u6784\u9020\u51FA\u5404\u79CD\u8FB9\u754C\u60C5\u51B5\u4E0B\u7684\u6D4B\u8BD5\u7A0B\u5E8F\u3002\u5305\u62EC\u4F46\u4E0D\u9650\u4E8E\u6587\u4EF6\u7684\u8BBF\u95EE\u5EF6\u8FDF\u3001\u6743\u9650\u3001cwd\u5FEB\u901F\u5207\u6362\u7B49\u7B49\u3002",
+          "\u6211\u89C9\u5F97\u4F60\u73B0\u5728\u6CA1\u6CD5\u89E3\u51B3\u8FD9\u4E2A\u95EE\u9898\u3002 \u4F60\u603B\u7ED3\u4E0B\uFF0C\u4F60\u8981\u89E3\u51B3\u7684\u95EE\u9898\u662F\u4EC0\u4E48",
+          "\u90A3\u4F60\u4E3A\u4EC0\u4E48\u4FEE\u6539\u8FD9\u4E48\u591A\u6587\u4EF6\uFF0C\u963B\u585E\u5728\u54EA\u6765"
+        ],
+        "completion_signal": "\u542F\u52A8\u811A\u672C\u53EF\u7528\u4E0E\u4E0D\u53EF\u7528\u4E24\u79CD\u60C5\u51B5\u4E0B\uFF0C\u5F53\u524D Terminal \u90FD\u80FD\u5207\u6362\u5230\u76EE\u6807\u76EE\u5F55\uFF1BShell \u56DE\u4F20\u5E76\u7ECF\u6587\u4EF6\u7CFB\u7EDF\u8EAB\u4EFD\u6838\u5BF9\u540E\u624D\u6301\u4E45\u5316\u548C\u542F\u7528 Git\uFF1B\u5FEB\u901F\u5207\u6362\u3001\u6743\u9650\u9519\u8BEF\u3001\u6620\u5C04\u76D8\u3001UNC \u4E0E\u4E0D\u540C Shell \u7684\u81EA\u52A8\u5316\u6D4B\u8BD5\u901A\u8FC7\uFF1B\u6700\u7EC8\u5F00\u53D1\u6784\u5EFA\u53EF\u542F\u52A8\u4E14\u5168\u91CF\u56DE\u5F52\u901A\u8FC7\u3002"
+      },
+      "context": {
+        "trigger_phenomenon": "\u8BCA\u65AD\u5305\u663E\u793A\u5E94\u7528\u4FDD\u5B58\u4E86 Y:\\oppo_W9077731\\code\\tools\\wf-ai\\wf_tool\uFF0C\u4F46 PowerShell PTY \u5B9E\u9645\u4ECE C:\\Users\\w9077731 \u542F\u52A8\uFF1B\u8BB0\u5F55\u540C\u65F6\u51FA\u73B0 cwdProvided:false \u4E0E hasShellIntegration:false\uFF0C\u968F\u540E Git \u5728 Y: \u4E0A\u7684\u63A2\u6D4B\u53CD\u590D\u7EA6 10 \u79D2\u8D85\u65F6\u3002",
+        "current_code_state": "\u6839\u56E0\u5DF2\u7ECF\u5B9A\u4F4D\u4E3A\u76EE\u5F55\u72B6\u6001\u5206\u88C2\uFF0C\u800C\u4E0D\u662F\u5355\u7EAF\u7684 PowerShell Execution Policy\u3002\u5F53\u524D\u5DE5\u4F5C\u6811\u7D2F\u8BA1 254 \u4E2A\u53D8\u66F4\u8DEF\u5F84\uFF1A88 \u4E2A\u5DF2\u8DDF\u8E2A\u6587\u4EF6\u4FEE\u6539\u3001166 \u4E2A\u672A\u8DDF\u8E2A\u8DEF\u5F84\uFF1B\u5DF2\u8DDF\u8E2A diff \u4E3A +13194/-1641\u3002\u5B9E\u73B0\u8303\u56F4\u5DF2\u7ECF\u6269\u5C55\u5230\u7EC8\u7AEF\u4E8B\u52A1\u3001Git worker\u3001\u7F13\u5B58\u3001Windows \u5B50\u8FDB\u7A0B\u76D1\u7BA1\u3001\u53D1\u5E03\u6D41\u7A0B\u548C\u5927\u89C4\u6A21\u6D4B\u8BD5\u77E9\u9635\u3002HEAD \u4ECD\u4E3A 0cdb0a1\uFF0C\u672C\u4F1A\u8BDD\u6CA1\u6709 commit\u3002",
+        "additional_constraints": [
+          "\u7528\u6237\u8981\u6C42 Windows\u3001macOS\u3001Linux \u5206\u5C42\u8BBE\u8BA1\uFF0C\u5171\u7528\u903B\u8F91\u96C6\u4E2D\u3001\u5E73\u53F0\u5DEE\u5F02\u9694\u79BB\u3002",
+          "\u542F\u52A8\u811A\u672C\u5931\u8D25\u65F6\u5FC5\u987B\u663E\u793A\u63D0\u793A\uFF0C\u5E76\u628A\u5207\u6362\u547D\u4EE4\u6CE8\u5165\u5F53\u524D Terminal\u3002",
+          "\u4E0D\u80FD\u628A\u547D\u4EE4\u5199\u5165\u6210\u529F\u5F53\u4F5C\u76EE\u5F55\u5207\u6362\u6210\u529F\uFF0C\u5FC5\u987B\u9A8C\u8BC1 Shell \u5B9E\u9645\u76EE\u5F55\u3002",
+          "\u6BCF\u9879\u4FEE\u590D\u9700\u8981 unit test \u4E0E autotest \u914D\u5BF9\uFF0C\u65F6\u95F4\u654F\u611F\u9879\u9700\u5185\u90E8\u91CD\u590D\u5E76\u505A repeat 3 \u7A33\u5B9A\u6027\u9A8C\u8BC1\u3002",
+          "\u6700\u7EC8\u5FC5\u987B\u6E05\u7406 out/release \u540E\u6267\u884C pnpm dist:dev\uFF0C\u5E76\u5B8C\u6210\u542F\u52A8\u68C0\u67E5\u3002",
+          "\u7981\u6B62\u81EA\u52A8 commit\u3001push\u3001\u521B\u5EFA\u5206\u652F\u6216 worktree\u3002"
+        ]
+      },
+      "approach": {
+        "narrative": "\u5148\u4ECE\u4E09\u4EFD\u8BCA\u65AD\u65E5\u5FD7\u786E\u8BA4 PTY \u5B9E\u9645 cwd \u4E0E\u5E94\u7528/Git \u8BB0\u5F55\u4E0D\u4E00\u81F4\uFF0C\u518D\u628A\u76EE\u5F55\u5207\u6362\u8BBE\u8BA1\u6210\u4E8B\u52A1\uFF1A\u9884\u68C0\u76EE\u6807\u76EE\u5F55\u3001\u5411\u5F53\u524D Shell \u5199\u5165\u5E73\u53F0\u5BF9\u5E94\u547D\u4EE4\u3001\u7B49\u5F85\u5E26 nonce \u7684\u5B9E\u9645 cwd \u56DE\u62A5\u3001\u6838\u5BF9\u76EE\u5F55\u8EAB\u4EFD\uFF0C\u6700\u540E\u624D\u63D0\u4EA4 renderer\u3001\u6301\u4E45\u5316\u548C Git authority\u3002\u968F\u540E\u4E3A\u4E86\u8986\u76D6\u6620\u5C04\u76D8\u3001UNC\u3001Shell hook \u7ADE\u6001\u3001Git \u8D85\u65F6\u4E0E\u5927\u91CF\u6545\u969C\u7EC4\u5408\uFF0C\u6539\u52A8\u7EE7\u7EED\u6269\u5C55\u5230\u4E86 Git worker \u4E0E\u6784\u5EFA\u53D1\u5E03\u5C42\uFF0C\u8D85\u8FC7\u4E86\u6838\u5FC3\u95EE\u9898\u7684\u5FC5\u8981\u8FB9\u754C\u3002",
+        "key_decisions": [
+          {
+            "decision": "\u628A Shell \u5B9E\u9645\u56DE\u62A5\u4F5C\u4E3A\u76EE\u5F55\u5207\u6362\u6210\u529F\u7684\u5FC5\u8981\u6761\u4EF6\u3002",
+            "why": "\u6838\u5FC3\u6545\u969C\u6B63\u662F\u5E94\u7528\u9884\u671F\u76EE\u5F55\u4E0E Terminal \u5B9E\u9645\u76EE\u5F55\u4E0D\u540C\u3002",
+            "alternatives_rejected": "\u4EC5\u51ED PTY write \u6210\u529F\u3001\u6587\u4EF6\u9009\u62E9\u7ED3\u679C\u6216 renderer \u72B6\u6001\u76F4\u63A5\u4FDD\u5B58\uFF0C\u90FD\u4F1A\u518D\u6B21\u5236\u9020\u72B6\u6001\u5206\u88C2\u3002"
+          },
+          {
+            "decision": "\u6240\u6709\u5065\u5EB7\u72B6\u6001\u90FD\u8FFD\u52A0\u4E00\u6B21\u4E0D\u6539\u53D8\u76EE\u5F55\u7684 prompt \u540E\u89C2\u5BDF\u3002",
+            "why": "\u771F\u5B9E Git Bash \u590D\u73B0\u53D1\u73B0\uFF0C\u540E\u6CE8\u518C\u7684 prompt hook \u53EF\u4EE5\u5728\u65E9\u671F CwdProof \u540E\u518D\u6B21 cd\uFF0C\u65E7\u8BC1\u660E\u4F1A\u8FC7\u65F6\u3002",
+            "alternatives_rejected": "\u53EA\u4F9D\u8D56\u542F\u52A8 hook \u7684\u9996\u4E2A ACK \u6216\u65E9\u671F CwdProof\uFF0C\u65E0\u6CD5\u6392\u9664\u540C\u4E00 prompt \u8FB9\u754C\u5185\u7684\u540E\u7EED\u76EE\u5F55\u53D8\u5316\u3002"
+          },
+          {
+            "decision": "Shell Integration \u5931\u8D25\u65F6\u4FDD\u7559\u7528\u6237\u53EF\u89C1\u7684\u4E3B\u52A8\u5207\u6362\u5165\u53E3\u3002",
+            "why": "\u8FD9\u662F\u7528\u6237\u660E\u786E\u8981\u6C42\u7684\u5373\u65F6\u6062\u590D\u8DEF\u5F84\uFF0C\u5E76\u4E14\u4E0D\u5E94\u4F9D\u8D56\u542F\u52A8\u811A\u672C\u7EE7\u7EED\u5DE5\u4F5C\u3002",
+            "alternatives_rejected": "\u53EA\u663E\u793A ExecutionPolicy \u6307\u4EE4\u65E0\u6CD5\u5904\u7406 cwd \u672A\u4F20\u5165\u3001profile\u3001\u5E94\u7528\u63A7\u5236\u3001Shell \u5DEE\u5F02\u548C\u65F6\u5E8F\u95EE\u9898\u3002"
+          },
+          {
+            "decision": "\u5F53\u524D\u5FC5\u987B\u5148\u6536\u655B\u8303\u56F4\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u4FDD\u7559 Git worker \u4E0E\u539F\u751F supervisor \u6269\u5C55\u3002",
+            "why": "254 \u4E2A\u8DEF\u5F84\u548C\u7EA6\u4E24\u4E07\u884C tracked diff \u5DF2\u7ECF\u8BA9\u6838\u5FC3\u4FEE\u590D\u96BE\u4EE5\u72EC\u7ACB\u9A8C\u8BC1\uFF0C\u4E5F\u76F4\u63A5\u5BFC\u81F4\u7528\u6237\u8D28\u7591\u3002",
+            "alternatives_rejected": "\u7EE7\u7EED\u8865\u5145\u66F4\u591A\u8FB9\u754C\u5B9E\u73B0\u548C\u6D4B\u8BD5\u53EA\u4F1A\u5EF6\u540E\u5F62\u6210\u53EF\u5BA1\u6838\u3001\u53EF\u6784\u5EFA\u7684\u6700\u5C0F\u95ED\u73AF\u3002"
+          }
+        ],
+        "flow_diagram_caption": "\u76EE\u6807\u72B6\u6001\uFF1A\u5FEB\u901F\u8DEF\u5F84\u548C\u6062\u590D\u8DEF\u5F84\u6700\u7EC8\u90FD\u6C47\u5408\u5230\u540C\u4E00\u4E2A\u2018Shell \u5B9E\u9645\u76EE\u5F55 + \u6587\u4EF6\u7CFB\u7EDF\u8EAB\u4EFD\u2019\u786E\u8BA4\u70B9\u3002"
+      },
+      "code_changes": {
+        "stat_summary": "\u751F\u6210 HANDOFF \u524D\uFF1A88 \u4E2A\u5DF2\u8DDF\u8E2A\u6587\u4EF6\uFF0C+13194/-1641\uFF1B\u53E6\u6709 166 \u4E2A\u672A\u8DDF\u8E2A\u8DEF\u5F84\u3002",
+        "key_files": [
+          { "path": "electron/main/pty-manager.ts", "diff_summary": "+2017 -202", "intent": "\u5B9E\u73B0 PTY \u542F\u52A8\u3001Shell \u5065\u5EB7\u63E1\u624B\u3001\u9A8C\u8BC1\u5F0F cwd \u4E8B\u52A1\u53CA\u5931\u914D\u5904\u7406\u3002" },
+          { "path": "test/autotest/test-shell-integration-cwd.mjs", "diff_summary": "+1651 -51", "intent": "\u6269\u5C55\u771F\u5B9E Shell\u3001\u6743\u9650\u3001\u5EF6\u8FDF\u3001hook \u987A\u5E8F\u548C\u76EE\u5F55\u5207\u6362\u77E9\u9635\u3002" },
+          { "path": "electron/main/ipc-handlers.ts", "diff_summary": "+1207 -92", "intent": "\u8FDE\u63A5\u7EC8\u7AEF cwd \u4E8B\u52A1\u3001Git authority\u3001\u9519\u8BEF\u4F20\u64AD\u53CA\u6E05\u7406\u3002" },
+          { "path": "electron/main/git-utils.ts", "diff_summary": "+742 -232", "intent": "\u6269\u5C55 Git \u53EF\u6267\u884C\u6587\u4EF6\u9009\u62E9\u3001\u8D85\u65F6\u3001\u76EE\u5F55\u8EAB\u4EFD\u548C\u9519\u8BEF\u5206\u7C7B\u3002" },
+          { "path": "electron/main/terminal-cwd-validation.ts", "diff_summary": "+700 -11", "intent": "\u589E\u52A0\u76EE\u5F55\u53EF\u8FBE\u6027\u3001\u89C4\u8303\u5316\u3001\u8EAB\u4EFD\u4E0E\u8D85\u65F6\u9A8C\u8BC1\u3002" },
+          { "path": "src/utils/terminal-command.ts", "diff_summary": "+642 -7", "intent": "\u4E3A PowerShell\u3001cmd\u3001Bash\u3001Zsh\u3001Fish\u3001WSL \u6784\u9020\u5E26\u9A8C\u8BC1\u7684\u547D\u4EE4\u3002" },
+          { "path": "electron/main/git-state-mirror-router.ts", "diff_summary": "+548 -77", "intent": "\u6309 workspace revision \u7BA1\u7406 Git mirror \u8BF7\u6C42\u4E0E\u5931\u6548\u3002" },
+          { "path": "src/autotest/test-terminal-state-persistence.ts", "diff_summary": "+562 -15", "intent": "\u9A8C\u8BC1\u53EA\u6709\u6210\u529F\u786E\u8BA4\u7684\u76EE\u5F55\u624D\u8FDB\u5165\u6301\u4E45\u5316\u72B6\u6001\u3002" }
+        ],
+        "figures": [
+          { "file": "electron/main/terminal-cwd-settlement-policy.ts", "line": "17", "description": "\u6240\u6709\u72B6\u6001\u7EDF\u4E00\u4F7F\u7528 prompt \u540E\u72EC\u7ACB\u89C2\u5BDF\u3002", "tradeoff": "\u589E\u52A0\u4E00\u6B21\u89C2\u5BDF\u6210\u672C\uFF0C\u4EE5\u907F\u514D\u65E9\u671F\u8BC1\u660E\u5728\u665A\u6CE8\u518C hook \u540E\u5931\u6548\u3002" },
+          { "file": "electron/main/pty-manager.ts", "line": "1091", "description": "\u628A\u5F53\u524D Shell \u4E2D\u7684 cwd \u5207\u6362\u5EFA\u6A21\u4E3A nonce \u4E8B\u52A1\u3002", "tradeoff": "\u72B6\u6001\u673A\u8F83\u590D\u6742\uFF0C\u4F46\u4E0D\u518D\u628A\u5199\u547D\u4EE4\u7B49\u540C\u4E8E\u5207\u6362\u6210\u529F\u3002" },
+          { "file": "src/components/TerminalGrid/TerminalGrid.tsx", "line": "2893", "description": "renderer \u53EA\u63D0\u4EA4 main process \u5DF2\u9A8C\u8BC1\u7684\u76EE\u5F55\u3002", "tradeoff": "\u5931\u8D25\u65F6\u4FDD\u7559\u539F\u72B6\u6001\u5E76\u663E\u793A\u539F\u56E0\uFF0C\u800C\u4E0D\u662F\u4E50\u89C2\u66F4\u65B0\u3002" }
+        ],
+        "experimental_files": [
+          "electron/main/git-exec-file-hard-timeout.ts",
+          "electron/main/git-executable-resolver.ts",
+          "electron/main/git-status-worker-budget.ts",
+          "resources/native/windows/onward-git-job-supervisor.c",
+          "scripts/ensure-windows-git-job-supervisor.js",
+          ".github/workflows/release.yml",
+          "test/autotest/git-workspace-resolution-matrix.mjs",
+          "test/autotest/git-workspace-resolution-fault-plans.mjs",
+          "test/autotest/run-git-workspace-resolution-*-autotest.*"
+        ]
+      },
+      "what_worked": [
+        {
+          "did": "\u7528\u8BCA\u65AD\u65E5\u5FD7\u5BF9\u9F50\u4FDD\u5B58\u76EE\u5F55\u3001PTY \u5B9E\u9645\u542F\u52A8\u76EE\u5F55\u548C Git \u63A2\u6D4B\u76EE\u5F55\u3002",
+          "evidence": "onward-diagnostic-2026-07-17_16-35-49.zip \u4E2D\u51FA\u73B0 lastCwd=Y:\\...\u3001PTY \u4ECE C:\\Users\\w9077731 \u542F\u52A8\u3001cwdProvided:false\u3001hasShellIntegration:false\uFF0C\u4EE5\u53CA Y: \u63A2\u6D4B\u7EA6 10.03 \u79D2\u8D85\u65F6\u3002",
+          "next_agent_usage": "\u76F4\u63A5\u6CBF\u7528\u2018\u76EE\u5F55\u72B6\u6001\u5206\u88C2\u2019\u8FD9\u4E2A\u6839\u56E0\uFF0C\u4E0D\u8981\u91CD\u65B0\u628A\u95EE\u9898\u5F52\u56E0\u6210 Git \u672A\u5B89\u88C5\u6216 ExecutionPolicy\u3002"
+        },
+        {
+          "did": "\u6784\u9020\u5E76\u8FD0\u884C\u771F\u5B9E Git Bash \u7684\u665A\u6CE8\u518C prompt hook \u7ADE\u6001\u3002",
+          "evidence": "\u4F1A\u8BDD\u4E2D\u7684\u771F\u5B9E PTY \u590D\u73B0\u663E\u793A\uFF1AACK A\u3001CwdProof A \u540E\uFF0C\u665A\u6CE8\u518C hook \u6267\u884C cd B\uFF0C\u65E7\u5B9E\u73B0\u4ECD\u53EF\u80FD\u63D0\u4EA4 A\u3002",
+          "next_agent_usage": "\u4FDD\u7559\u72EC\u7ACB\u7684 prompt \u540E\u89C2\u5BDF\u601D\u8DEF\uFF0C\u5E76\u8865\u9F50\u6700\u65B0\u5B9E\u73B0\u540E\u7684\u771F\u5B9E Shell \u91CD\u8DD1\u3002"
+        },
+        {
+          "did": "\u4E3A\u5173\u952E\u7EAF\u903B\u8F91\u8FD0\u884C\u5B9A\u5411 unit test \u548C typecheck\u3002",
+          "evidence": "\u4F1A\u8BDD\u547D\u4EE4\u8F93\u51FA\uFF1Apnpm typecheck \u9000\u51FA 0\uFF1Bterminal-cwd-settlement-policy 2/2\u3001terminal-pty-disposal-policy 2/2\u3001terminal-command 35/35\u3001authority 8/8\u3001startup authority 3/3\u3001matrix catalogue 8/8\u3001project-editor source 4/4 \u901A\u8FC7\u3002",
+          "next_agent_usage": "\u8FD9\u4E9B\u7ED3\u679C\u53EF\u4F5C\u4E3A\u5C40\u90E8\u57FA\u7EBF\uFF0C\u4F46\u7531\u4E8E\u4E4B\u540E\u53C8\u6539\u4E86 Bash/Zsh prompt \u8FB9\u754C\uFF0C\u4E0D\u80FD\u66FF\u4EE3\u6700\u7EC8\u91CD\u8DD1\u3002"
+        },
+        {
+          "did": "\u5B9E\u73B0\u53CC\u8BED\u6062\u590D\u63D0\u793A\u548C\u6309 Shell \u7C7B\u578B\u4E3B\u52A8\u5207\u6362\u5165\u53E3\u3002",
+          "evidence": "src/i18n/core.ts:617-633 \u4E0E 2129-2149 \u5DF2\u5305\u542B en/zh-CN \u63D0\u793A\uFF1BTerminalGrid.tsx:2875-2930 \u8C03\u7528 changeWorkingDirectory\uFF0C\u5E76\u53EA\u63D0\u4EA4 resolveVerifiedTerminalCwd \u7684\u7ED3\u679C\u3002",
+          "next_agent_usage": "\u82E5\u6536\u7F29\u6539\u52A8\uFF0C\u5E94\u4F18\u5148\u4FDD\u7559\u8FD9\u4E00\u6761\u7528\u6237\u53EF\u89C1\u95ED\u73AF\u53CA\u5176\u6700\u5C0F IPC/PTY \u4F9D\u8D56\u3002"
+        }
+      ],
+      "what_didnt_work": [
+        {
+          "tried": "\u8BA9\u7528\u6237\u6267\u884C Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser\u3002",
+          "result": "\u7528\u6237\u660E\u786E\u53CD\u9988\u2018\u8FD8\u662F\u6709\u95EE\u9898\u2019\uFF0C\u540E\u7EED\u65E5\u5FD7\u4ECD\u663E\u793A PTY \u672A\u4F7F\u7528\u76EE\u6807 cwd\u3002",
+          "reason": "\u4E8B\u5B9E\uFF1A\u65E5\u5FD7\u6CA1\u6709\u628A\u95EE\u9898\u6307\u5411\u6267\u884C\u7B56\u7565\uFF1B\u8BE5\u547D\u4EE4\u65E0\u6CD5\u4FEE\u590D cwdProvided:false\u3001Shell hook \u65F6\u5E8F\u6216\u5E94\u7528\u4E0E Terminal \u7684\u72B6\u6001\u5206\u88C2\u3002",
+          "by_product": "\u6743\u9650\u63D0\u793A\u5E94\u6539\u6210\u8BCA\u65AD MachinePolicy/UserPolicy\u3001AppLocker\u3001WDAC\u3001\u8D44\u6E90\u53EF\u8BFB\u6027\uFF0C\u800C\u4E0D\u662F\u9ED8\u8BA4\u8981\u6C42\u653E\u5BBD\u7B56\u7565\u3002"
+        },
+        {
+          "tried": "\u628A\u542F\u52A8 Shell Integration \u6216\u65E9\u671F CwdProof \u5F53\u4F5C\u53EF\u4FE1\u5B8C\u6210\u70B9\u3002",
+          "result": "\u665A\u6CE8\u518C prompt hook \u53EF\u4EE5\u5728\u8BC1\u660E\u4E4B\u540E\u6539\u53D8\u76EE\u5F55\uFF0C\u5BFC\u81F4\u5E94\u7528\u4FDD\u5B58\u65E7\u76EE\u5F55\u3002",
+          "reason": "\u4E8B\u5B9E\uFF1A\u4E00\u4E2A prompt \u8FB9\u754C\u5185\u7684 hook \u987A\u5E8F\u5E76\u4E0D\u5B8C\u5168\u7531 Onward \u63A7\u5236\uFF0C\u65E9\u671F\u89C2\u6D4B\u4E0D\u80FD\u8BC1\u660E\u8FB9\u754C\u7ED3\u675F\u65F6\u7684\u76EE\u5F55\u3002",
+          "by_product": "\u5F15\u51FA\u4E86\u72EC\u7ACB\u3001\u975E\u53D8\u66F4\u5F0F\u7684 prompt \u540E\u89C2\u5BDF\u3002"
+        },
+        {
+          "tried": "\u76EE\u5F55\u5931\u914D\u6216\u8D85\u65F6\u65F6\u76F4\u63A5 dispose PTY\u3002",
+          "result": "\u65E7\u8DEF\u5F84\u5148\u79FB\u9664\u4E86 exit listener\uFF0C\u518D\u7EC8\u6B62\u8FDB\u7A0B\uFF0Crenderer \u6536\u4E0D\u5230\u9000\u51FA\u901A\u77E5\uFF0C\u754C\u9762\u53EF\u80FD\u4FDD\u7559\u4E00\u4E2A\u5DF2\u7ECF\u5931\u6548\u7684 Terminal\u3002",
+          "reason": "\u4E8B\u5B9E\uFF1A\u6E05\u7406\u987A\u5E8F\u7834\u574F\u4E86\u5916\u90E8\u751F\u547D\u5468\u671F\u901A\u77E5\u3002\u5F53\u524D\u589E\u52A0 unsafe-cwd disposal policy\uFF0C\u4F46 packaged E2E \u5C1A\u672A\u5B8C\u6210\u3002",
+          "by_product": "\u9700\u8981\u5728\u7AEF\u5230\u7AEF\u6D4B\u8BD5\u4E2D\u540C\u65F6\u786E\u8BA4\u9000\u51FA\u4E8B\u4EF6\u3001\u7F13\u5B58\u6E05\u7406\u548C\u7528\u6237\u53EF\u6062\u590D\u754C\u9762\u3002"
+        },
+        {
+          "tried": "\u628A\u76EE\u5F55\u4E00\u81F4\u6027\u95EE\u9898\u7EE7\u7EED\u6269\u5C55\u4E3A Git \u53EF\u6267\u884C\u6587\u4EF6\u6062\u590D\u3001worker \u5F3A\u5236\u8D85\u65F6\u3001\u7F13\u5B58 revision\u3001\u539F\u751F Windows Job supervisor \u548C\u53D1\u5E03\u6D41\u7A0B\u7684\u4E00\u6B21\u6027\u6539\u9020\u3002",
+          "result": "\u5DE5\u4F5C\u6811\u6269\u5927\u5230 254 \u4E2A\u8DEF\u5F84\u3001tracked diff \u7EA6 2 \u4E07\u884C\uFF0C\u6700\u7EC8\u6784\u5EFA\u548C\u5168\u91CF\u56DE\u5F52\u4ECD\u672A\u5B8C\u6210\uFF0C\u6838\u5FC3\u4FEE\u590D\u4E5F\u96BE\u4EE5\u5355\u72EC\u5BA1\u6838\u3002",
+          "reason": "\u5224\u65AD\uFF1A\u8FD9\u662F\u4EA4\u4ED8\u7B56\u7565\u5931\u63A7\uFF0C\u4E0D\u662F\u6838\u5FC3\u95EE\u9898\u5FC5\u7136\u8981\u6C42\u7684\u6539\u52A8\u91CF\u3002\u7528\u6237\u5BF9\u80FD\u529B\u4EA7\u751F\u8D28\u7591\u4E0E\u8FD9\u4E00\u70B9\u76F4\u63A5\u76F8\u5173\u3002",
+          "by_product": "\u4E0B\u4E00\u6B65\u5FC5\u987B\u5148\u505A\u8303\u56F4\u5206\u7C7B\uFF0C\u4E0D\u80FD\u7EE7\u7EED\u589E\u52A0\u5B9E\u73B0\u3002"
+        },
+        {
+          "tried": "\u628A 7,800 \u4E2A\u7EC4\u5408\u76EE\u5F55\u5F53\u4F5C\u6D4B\u8BD5\u5145\u5206\u6027\u7684\u4E3B\u8981\u8868\u8FBE\u3002",
+          "result": "\u8FD9\u4E9B\u4E3B\u8981\u662F\u6545\u969C\u76EE\u5F55\u548C\u786E\u5B9A\u6027\u7EC4\u5408\u6E05\u5355\uFF0C\u4E0D\u662F 7,800 \u6B21\u771F\u5B9E\u4EA7\u54C1\u7AEF\u5230\u7AEF\u6267\u884C\u3002",
+          "reason": "\u4E8B\u5B9E\uFF1A\u8BBE\u8BA1\u679A\u4E3E\u4E0D\u80FD\u66FF\u4EE3\u5C11\u91CF\u9AD8\u4EF7\u503C\u771F\u5B9E Shell\u3001\u771F\u5B9E\u6587\u4EF6\u7CFB\u7EDF\u548C packaged E2E\u3002",
+          "by_product": "\u4EA4\u63A5\u4E0E\u6700\u7EC8\u6C47\u62A5\u5FC5\u987B\u533A\u5206\u7EC4\u5408\u6E05\u5355\u3001unit \u6620\u5C04\u548C\u771F\u5B9E\u8FD0\u884C\u6B21\u6570\u3002"
+        }
+      ],
+      "incomplete": [
+        {
+          "action": "\u5148\u628A\u5F53\u524D 254 \u4E2A\u53D8\u66F4\u8DEF\u5F84\u5212\u5206\u4E3A\u2018\u6838\u5FC3 cwd \u95ED\u73AF\u2019\u3001\u2018\u5FC5\u8981\u6D4B\u8BD5\u2019\u548C\u2018\u65C1\u652F\u5B9E\u9A8C\u2019\uFF0C\u5411\u7528\u6237\u63D0\u4EA4\u4FDD\u7559/\u79FB\u9664\u6E05\u5355\u5E76\u83B7\u5F97\u786E\u8BA4\u3002",
+          "target": "git status\u3001git diff\uFF1B\u91CD\u70B9\u5BA1\u67E5 electron/main/pty-manager.ts\u3001ipc-handlers.ts\u3001terminal-cwd-validation.ts\u3001src/components/TerminalGrid/TerminalGrid.tsx\u3001src/utils/terminal-command.ts\uFF0C\u4EE5\u53CA\u6240\u6709 git-* \u4E0E resources/native \u6269\u5C55\u3002",
+          "done_when": "\u7528\u6237\u660E\u786E\u786E\u8BA4\u4E00\u4E2A\u53EF\u5BA1\u6838\u7684\u8303\u56F4\uFF1B\u6838\u5FC3\u4FEE\u590D\u548C\u65C1\u652F\u5B9E\u9A8C\u6709\u6E05\u6670\u8FB9\u754C\uFF0C\u540E\u7EED\u4E0D\u518D\u5728\u672A\u786E\u8BA4\u7684\u67B6\u6784\u7B56\u7565\u4E0A\u7EE7\u7EED\u6269\u5C55\u3002",
+          "blocking": "\u5F53\u524D\u4E3B\u8981\u963B\u585E\u662F\u8303\u56F4\u6CA1\u6709\u6536\u655B\uFF0C\u800C\u4E0D\u662F\u6839\u56E0\u672A\u77E5\u3002",
+          "trap": "\u4E0D\u8981\u4F7F\u7528 git reset/checkout\uFF1B\u5DE5\u4F5C\u6811\u53EF\u80FD\u542B\u7528\u6237\u6539\u52A8\u3002\u4EFB\u4F55\u79FB\u9664\u90FD\u5E94\u6309\u6587\u4EF6\u9010\u9879\u6838\u5BF9\u5E76\u4F7F\u7528 apply_patch\u3002"
+        },
+        {
+          "action": "\u5728\u786E\u8BA4\u8303\u56F4\u540E\uFF0C\u91CD\u65B0\u8FD0\u884C\u6700\u65B0 prompt-boundary \u4E0E cwd \u4E8B\u52A1\u7684\u5168\u90E8\u5B9A\u5411\u6D4B\u8BD5\u3002",
+          "target": "terminal-command\u3001terminal-cwd-settlement-policy\u3001terminal-pty-disposal-policy\u3001shell-integration-cwd matrix\uFF0C\u4EE5\u53CA PowerShell/cmd/Git Bash \u7684\u771F\u5B9E PTY \u7528\u4F8B\u3002",
+          "done_when": "\u6240\u6709 unit test \u9000\u51FA 0\uFF1B\u65F6\u95F4\u654F\u611F\u7528\u4F8B\u5185\u90E8\u5B8C\u6210\u89C4\u5B9A\u6B21\u6570\uFF1B\u65B0\u589E\u6216\u4FEE\u6539 runner \u5728\u6CE8\u518C\u524D\u76F4\u63A5\u901A\u8FC7\u5E76 repeat 3 \u7A33\u5B9A\u3002",
+          "blocking": "\u4F9D\u8D56\u4E0A\u4E00\u9879\u786E\u5B9A\u54EA\u4E9B\u5B9E\u73B0\u548C\u6D4B\u8BD5\u4FDD\u7559\uFF1BmacOS/Linux \u7684\u771F\u5B9E Zsh/Fish \u9700\u8981\u76F8\u5E94\u8FD0\u884C\u73AF\u5883\u6216 CI\u3002",
+          "trap": "Bash/Zsh prompt \u8FB9\u754C\u5728\u6700\u8FD1\u4E00\u6B21\u5C40\u90E8\u901A\u8FC7\u540E\u53C8\u88AB\u4FEE\u6539\uFF0C\u65E7\u7684 5/5 \u7ED3\u679C\u4E0D\u80FD\u4F5C\u4E3A\u6700\u7EC8\u8BC1\u636E\u3002"
+        },
+        {
+          "action": "\u6267\u884C\u5E72\u51C0\u5F00\u53D1\u6784\u5EFA\u5E76\u5B8C\u6210\u542F\u52A8\u68C0\u67E5\u3002",
+          "target": "\u5728 Git Bash \u4E2D\u6267\u884C rm -rf out release && pnpm dist:dev\uFF1BWindows \u5E94\u542F\u52A8 Under Development 2.0.1-master\u3002",
+          "done_when": "\u6784\u5EFA\u9000\u51FA 0\uFF0C\u6253\u5305\u5E94\u7528\u6B63\u5E38\u542F\u52A8\u5E76\u8FDB\u5165\u4E3B\u754C\u9762\uFF0C\u65E5\u5FD7\u4E0D\u5B58\u5728\u542F\u52A8\u65F6 cwd/\u8D44\u6E90\u52A0\u8F7D\u9519\u8BEF\u3002",
+          "blocking": "\u5FC5\u987B\u5148\u5B8C\u6210\u8303\u56F4\u6536\u655B\u548C\u5B9A\u5411\u6D4B\u8BD5\uFF0C\u907F\u514D\u53CD\u590D\u5BF9\u8FC7\u5927\u7684\u5DE5\u4F5C\u6811\u6253\u5305\u3002",
+          "trap": "\u5FC5\u987B\u5728\u540C\u4E00\u547D\u4EE4\u4E2D\u6E05\u7406\u5E76\u6784\u5EFA\uFF1B\u6D4B\u8BD5\u524D\u540E\u53EA\u6309\u7CBE\u786E\u5E94\u7528\u540D\u7EC8\u6B62\u8FDB\u7A0B\u3002"
+        },
+        {
+          "action": "\u8FD0\u884C\u6062\u590D UI\u3001\u7EC8\u7AEF\u6301\u4E45\u5316\u3001Git workspace resolution \u4E0E\u5371\u9669 PTY \u9000\u51FA\u7684 packaged autotest\u3002",
+          "target": "\u76F8\u5173 run-*-autotest.sh/.ps1\uFF1B\u91CD\u70B9\u65AD\u8A00\u63D0\u793A\u53EF\u89C1\u3001\u547D\u4EE4\u8FDB\u5165\u5F53\u524D Terminal\u3001\u5931\u914D\u4E0D\u6301\u4E45\u5316\u3001\u6210\u529F\u540E Git diff \u6062\u590D\u3001unsafe-cwd \u4F1A\u901A\u77E5 renderer\u3002",
+          "done_when": "\u53D7\u5F71\u54CD runner \u76F4\u63A5\u901A\u8FC7\u4E14 repeat 3 \u7A33\u5B9A\uFF0CPowerShell \u4E0E .sh/.ps1 runner \u4FDD\u6301\u903B\u8F91\u4E00\u81F4\u3002",
+          "blocking": "\u4F9D\u8D56\u5E72\u51C0\u5F00\u53D1\u6784\u5EFA\u3002",
+          "trap": "\u540E\u53F0\u6267\u884C\u540E\u7B49\u5F85\u8FDB\u7A0B\u9000\u51FA\u901A\u77E5\uFF0C\u53EA\u5728\u9000\u51FA\u540E\u8BFB\u53D6\u4E00\u6B21\u6301\u4E45\u65E5\u5FD7\uFF1B\u4E0D\u8981\u8F6E\u8BE2\u65E5\u5FD7\u3002"
+        },
+        {
+          "action": "\u6700\u540E\u8FD0\u884C\u5B8C\u6574 regression \u5E76\u6839\u636E\u7ED3\u679C\u4FEE\u6B63\uFF0C\u4E0D\u518D\u6269\u5927\u529F\u80FD\u8303\u56F4\u3002",
+          "target": "test/autotest/run-full-regression.py \u53CA\u5176 summary.json/summary.log\u3002",
+          "done_when": "\u5B8C\u6574\u56DE\u5F52\u65E0 FAIL/TIMEOUT\uFF0C\u5DE5\u4F5C\u6811\u6CA1\u6709 __autotest_*\u3001\u4E34\u65F6 .obj\u3001.DS_Store \u6216\u6B8B\u7559\u6D4B\u8BD5\u8FDB\u7A0B\u3002",
+          "blocking": "\u4F9D\u8D56\u524D\u56DB\u9879\u5B8C\u6210\u3002",
+          "trap": "\u5355\u4E2A\u64CD\u4F5C\u8D85\u65F6\u5E94\u4FEE\u590D\u7A0B\u5E8F\uFF1B\u5927\u91CF\u5FEB\u901F\u573A\u666F\u7D2F\u8BA1\u8D85\u65F6\u624D\u62C6\u5206 runner\uFF0C\u4E0D\u80FD\u6269\u5927 300 \u79D2\u4E0A\u9650\u3002"
+        }
+      ]
+    }
+  ],
+  "reviews": [],
+  "changelog": [
+    {
+      "timestamp": "2026-07-21 14:11:18 +0800",
+      "summary": "\u521D\u59CB\u5316 HANDOFF.html \u2014 \u4EA4\u63A5 terminal-cwd-consistency\uFF0C\u5E76\u660E\u786E\u8BB0\u5F55\u8303\u56F4\u6269\u5927\u4E0E\u6700\u7EC8\u9A8C\u8BC1\u5C1A\u672A\u5B8C\u6210\u3002",
+      "touched_tasks": ["terminal-cwd-consistency"]
+    }
+  ],
+  "navigation": {
+    "cwd": "D:\\Users\\Documents\\Onward_report_material\\Onward-Github",
+    "branch": "master",
+    "worktree": "D:\\Users\\Documents\\Onward_report_material\\Onward-Github"
+  }
+}
+  </script>
+
+  <aside id="toc-sidebar" aria-label="&#x672C;&#x6587;&#x76EE;&#x5F55;">
+    <h2>HANDOFF</h2>
+    <p class="toc-meta">Onward &#xB7; terminal-cwd-consistency</p>
+    <nav id="toc-nav"></nav>
+  </aside>
+
+  <main id="content">
+    <header>
+      <h1 id="handoff-title">Onward &#x4F1A;&#x8BDD;&#x4EA4;&#x63A5;</h1>
+      <p class="subtitle">&#x4FEE;&#x590D;&#x7EC8;&#x7AEF;&#x3001;&#x5E94;&#x7528;&#x72B6;&#x6001;&#x4E0E; Git &#x5DE5;&#x4F5C;&#x76EE;&#x5F55;&#x4E0D;&#x4E00;&#x81F4;&#xFF0C;&#x5E76;&#x6536;&#x655B;&#x5DF2;&#x7ECF;&#x8FC7;&#x5EA6;&#x6269;&#x5927;&#x7684;&#x5B9E;&#x73B0;&#x8303;&#x56F4;&#x3002;</p>
+      <div class="metadata">
+        <span class="pill mono">2026-07-21 14:11:18 +0800</span>
+        <span class="pill mono">branch: master</span>
+        <span class="pill mono">HEAD: 0cdb0a1</span>
+        <span class="badge blocked">&#x4E0B;&#x4E00;&#x6B65;&#xFF1A;blocked</span>
+      </div>
+    </header>
+
+    <section id="tasks-overview" class="card">
+      <h2>Tasks in This Handoff <small>&#x2014; &#x672C;&#x6B21;&#x4F1A;&#x8BDD;&#x6B63;&#x5728;&#x4EA4;&#x63A5;&#x7684;&#x4EFB;&#x52A1;</small></h2>
+      <div class="metric-grid">
+        <div class="metric"><strong>254</strong><span>&#x751F;&#x6210;&#x6587;&#x6863;&#x524D;&#x7684;&#x53D8;&#x66F4;&#x8DEF;&#x5F84;</span></div>
+        <div class="metric"><strong>145</strong><span>&#x6D4B;&#x8BD5;&#x76F8;&#x5173;&#x8DEF;&#x5F84;</span></div>
+        <div class="metric"><strong>88</strong><span>&#x5DF2;&#x8DDF;&#x8E2A;&#x6587;&#x4EF6;&#x4FEE;&#x6539;</span></div>
+        <div class="metric"><strong>166</strong><span>&#x672A;&#x8DDF;&#x8E2A;&#x8DEF;&#x5F84;</span></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>&#x4EFB;&#x52A1;&#x540D;</th><th>&#x89E6;&#x53CA;&#x6587;&#x4EF6;&#x6570;</th><th>&#x4E00;&#x53E5;&#x8BDD;&#x76EE;&#x6807;</th><th>&#x4E0B;&#x4E00;&#x6B65;&#x72B6;&#x6001;</th></tr></thead>
+          <tbody><tr><td><a href="#terminal-cwd-consistency">&#x7EC8;&#x7AEF;&#x76EE;&#x5F55;&#x4E00;&#x81F4;&#x6027;</a></td><td>254</td><td>&#x542F;&#x52A8;&#x811A;&#x672C;&#x5931;&#x6548;&#x65F6;&#xFF0C;&#x4E5F;&#x8981;&#x8BA9; Terminal&#x3001;Onward &#x4E0E; Git &#x4F7F;&#x7528;&#x540C;&#x4E00;&#x4E2A;&#x7ECF;&#x8FC7;&#x9A8C;&#x8BC1;&#x7684;&#x76EE;&#x5F55;&#x3002;</td><td><span class="badge blocked">blocked&#xFF1A;&#x5148;&#x6536;&#x655B;&#x8303;&#x56F4;</span></td></tr></tbody>
+        </table>
+      </div>
+      <div class="callout danger"><strong>&#x963B;&#x585E;&#x7ED3;&#x8BBA;&#xFF1A;</strong>&#x6839;&#x56E0;&#x5E76;&#x6CA1;&#x6709;&#x5361;&#x4F4F;&#xFF1B;&#x5F53;&#x524D;&#x5361;&#x5728;&#x4EA4;&#x4ED8;&#x8FB9;&#x754C;&#x3002;&#x5B9E;&#x73B0;&#x8303;&#x56F4;&#x5DF2;&#x7ECF;&#x4ECE; cwd &#x4E00;&#x81F4;&#x6027;&#x6269;&#x5C55;&#x5230; Git worker&#x3001;&#x7F13;&#x5B58;&#x3001;&#x539F;&#x751F; Windows &#x8FDB;&#x7A0B;&#x76D1;&#x7BA1;&#x548C;&#x53D1;&#x5E03;&#x6D41;&#x7A0B;&#xFF0C;&#x6700;&#x65B0;&#x4EE3;&#x7801;&#x8FD8;&#x6CA1;&#x6709;&#x5B8C;&#x6210;&#x5E72;&#x51C0;&#x6784;&#x5EFA;&#x3001;&#x8DE8;&#x5E73;&#x53F0;&#x771F;&#x5B9E; Shell &#x6D4B;&#x8BD5;&#x548C;&#x5B8C;&#x6574;&#x56DE;&#x5F52;&#x3002;</div>
+    </section>
+
+    <section class="feature-block" id="terminal-cwd-consistency" data-task="terminal-cwd-consistency">
+      <h2>&#x7EC8;&#x7AEF;&#x76EE;&#x5F55;&#x4E00;&#x81F4;&#x6027; <span class="badge blocked">blocked</span></h2>
+      <p>&#x76EE;&#x6807;&#x4E0D;&#x662F;&#x4FDD;&#x8BC1;&#x542F;&#x52A8;&#x811A;&#x672C;&#x6C38;&#x8FDC;&#x6210;&#x529F;&#xFF0C;&#x800C;&#x662F;&#x5728;&#x811A;&#x672C;&#x5931;&#x8D25;&#x65F6;&#x4E5F;&#x4E0D;&#x5141;&#x8BB8; Terminal&#x3001;Onward &#x548C; Git &#x5BF9;&#x5F53;&#x524D;&#x76EE;&#x5F55;&#x4EA7;&#x751F;&#x4E0D;&#x540C;&#x8BA4;&#x8BC6;&#x3002;</p>
+
+      <div class="sub-section">
+        <h3>1 &#xB7; Goal&#xFF08;&#x7528;&#x6237;&#x76EE;&#x6807;&#xFF09;</h3>
+        <blockquote class="user-quote">&#x5206;&#x6790;&#x8FD9;&#x4EFD;&#x65E5;&#x5FD7;&#xFF0C;&#x5B9A;&#x4F4D;&#x95EE;&#x9898;&#x539F;&#x56E0;</blockquote>
+        <blockquote class="user-quote">&#x5BF9;&#x4E8E;&#x8FD9;&#x7C7B;&#x68C0;&#x6D4B;&#x7C7B;&#x7684;&#xFF0C;&#x5E94;&#x8BE5;&#x662F;&#x6709;&#x5FEB;&#x901F;&#x8DEF;&#x5F84;&#x4F5C;&#x4E3A;&#x9996;&#x8981;&#x7684;&#x65B9;&#x6848;&#xFF0C;&#x6709;&#x515C;&#x5E95;&#x7684;&#x65B9;&#x6848;&#x4F5C;&#x4E3A;&#x6BBF;&#x540E;&#x7684;&#x591A;&#x5C42; &#x7ED3;&#x6784;&#x3002;</blockquote>
+        <blockquote class="user-quote">&#x5982;&#x679C;&#x542F;&#x52A8;&#x811A;&#x672C;&#x5931;&#x8D25;&#xFF0C;&#x5219;&#x5E94;&#x8BE5;&#x63D0;&#x793A;&#x7528;&#x6237;&#x4F7F;&#x7528;terminal&#x4E2D;&#x7684;&#x4E3B;&#x52A8;&#x4F7F;&#x7528;&#x5207;&#x6362;&#x5DE5;&#x4F5C;&#x76EE;&#x5F55;&#x6765;&#x5B9E;&#x73B0;&#x5DE5;&#x4F5C;&#x76EE;&#x5F55;&#x7684;&#x5207;&#x6362;&#x3002;&#x56E0;&#x6B64;&#x8FD9;&#x4E2A;&#x64CD;&#x4F5C;&#x4E0B;&#xFF0C;&#x4F60;&#x8981;&#x786E;&#x4FDD;&#x80FD;&#x591F;&#x5207;&#x6362;&#x5230;&#x771F;&#x6B63;&#x7684;&#x5DE5;&#x4F5C;&#x76EE;&#x5F55;&#x3002; &#x4E5F;&#x5E94;&#x8BE5;&#x5C06;&#x8FD9;&#x79CD;&#x4E3B;&#x52A8;&#x64CD;&#x4F5C;&#xFF0C;&#x6CE8;&#x5165;&#x5230;&#x5F53;&#x524D;&#x7684;terminal&#x4E2D;&#xFF0C;&#x76F4;&#x63A5;&#x628A;&#x5DE5;&#x4F5C;&#x76EE;&#x5F55;&#x5207;&#x6362;&#x8FC7;&#x6765;&#x3002;</blockquote>
+        <blockquote class="user-quote">&#x4F60;&#x9996;&#x5148;&#x8981;&#x9488;&#x5BF9;&#x6211;&#x4EEC;&#x7684;&#x95EE;&#x9898;&#x6784;&#x9020;&#x51FA;&#x5404;&#x79CD;&#x8FB9;&#x754C;&#x60C5;&#x51B5;&#x4E0B;&#x7684;&#x6D4B;&#x8BD5;&#x7A0B;&#x5E8F;&#x3002;&#x5305;&#x62EC;&#x4F46;&#x4E0D;&#x9650;&#x4E8E;&#x6587;&#x4EF6;&#x7684;&#x8BBF;&#x95EE;&#x5EF6;&#x8FDF;&#x3001;&#x6743;&#x9650;&#x3001;cwd&#x5FEB;&#x901F;&#x5207;&#x6362;&#x7B49;&#x7B49;&#x3002;</blockquote>
+        <blockquote class="user-quote">&#x6211;&#x89C9;&#x5F97;&#x4F60;&#x73B0;&#x5728;&#x6CA1;&#x6CD5;&#x89E3;&#x51B3;&#x8FD9;&#x4E2A;&#x95EE;&#x9898;&#x3002; &#x4F60;&#x603B;&#x7ED3;&#x4E0B;&#xFF0C;&#x4F60;&#x8981;&#x89E3;&#x51B3;&#x7684;&#x95EE;&#x9898;&#x662F;&#x4EC0;&#x4E48;</blockquote>
+        <blockquote class="user-quote">&#x90A3;&#x4F60;&#x4E3A;&#x4EC0;&#x4E48;&#x4FEE;&#x6539;&#x8FD9;&#x4E48;&#x591A;&#x6587;&#x4EF6;&#xFF0C;&#x963B;&#x585E;&#x5728;&#x54EA;&#x6765;</blockquote>
+        <div class="callout"><strong>&#x5BA2;&#x89C2;&#x5B8C;&#x6210;&#x6807;&#x5FD7;&#xFF1A;</strong>&#x4E24;&#x6761;&#x8DEF;&#x5F84;&#x2014;&#x2014;&#x542F;&#x52A8;&#x5FEB;&#x901F;&#x8DEF;&#x5F84;&#x548C;&#x811A;&#x672C;&#x5931;&#x8D25;&#x540E;&#x7684;&#x4E3B;&#x52A8;&#x6062;&#x590D;&#x8DEF;&#x5F84;&#x2014;&#x2014;&#x90FD;&#x5FC5;&#x987B;&#x4EE5; Shell &#x5B9E;&#x9645;&#x56DE;&#x4F20;&#x76EE;&#x5F55;&#x548C;&#x6587;&#x4EF6;&#x7CFB;&#x7EDF;&#x8EAB;&#x4EFD;&#x6838;&#x5BF9;&#x4E3A;&#x5B8C;&#x6210;&#x70B9;&#xFF1B;&#x968F;&#x540E;&#x624D;&#x5141;&#x8BB8;&#x6301;&#x4E45;&#x5316;&#x5E76;&#x542F;&#x7528; Git&#x3002;&#x76F8;&#x5173; unit&#x3001;&#x771F;&#x5B9E; Shell&#x3001;packaged E2E&#x3001;repeat 3&#x3001;&#x5F00;&#x53D1;&#x6784;&#x5EFA;&#x548C;&#x5B8C;&#x6574;&#x56DE;&#x5F52;&#x5168;&#x90E8;&#x901A;&#x8FC7;&#x3002;</div>
+      </div>
+
+      <div class="sub-section">
+        <h3>2 &#xB7; Context&#xFF08;&#x95EE;&#x9898;&#x80CC;&#x666F;&#xFF09;</h3>
+        <p>&#x8BCA;&#x65AD;&#x5305; <code>onward-diagnostic-2026-07-17_16-35-49.zip</code> &#x7ED9;&#x51FA;&#x7684;&#x5173;&#x952E;&#x94FE;&#x8DEF;&#x662F;&#xFF1A;</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>&#x89C2;&#x5BDF;&#x5BF9;&#x8C61;</th><th>&#x65E5;&#x5FD7;&#x4E8B;&#x5B9E;</th><th>&#x542B;&#x4E49;</th></tr></thead>
+            <tbody>
+              <tr><td>&#x5E94;&#x7528;&#x4FDD;&#x5B58;&#x72B6;&#x6001;</td><td><code>lastCwd = Y:\oppo_W9077731\code\tools\wf-ai\wf_tool</code></td><td>Onward &#x8BA4;&#x4E3A;&#x76EE;&#x6807;&#x5728; Y:</td></tr>
+              <tr><td>PTY &#x542F;&#x52A8;</td><td><code>cwdProvided:false</code>&#xFF0C;&#x5B9E;&#x9645;&#x4E3A; <code>C:\Users\w9077731</code></td><td>Terminal &#x5E76;&#x672A;&#x8FDB;&#x5165;&#x76EE;&#x6807;&#x76EE;&#x5F55;</td></tr>
+              <tr><td>Shell Integration</td><td><code>hasShellIntegration:false</code></td><td>&#x65E0;&#x6CD5;&#x4F9D;&#x8D56;&#x542F;&#x52A8;&#x811A;&#x672C;&#x7EA0;&#x6B63;&#x72B6;&#x6001;</td></tr>
+              <tr><td>Git &#x63A2;&#x6D4B;</td><td>Y: &#x4E0A; mirror/rev-parse &#x591A;&#x6B21;&#x7EA6; 10.03 &#x79D2;&#x8D85;&#x65F6;</td><td>Git authority &#x4E0E;&#x5B9E;&#x9645; Shell &#x5DF2;&#x7ECF;&#x5206;&#x88C2;</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>&#x56E0;&#x6B64;&#xFF0C;<code>Set-ExecutionPolicy RemoteSigned -Scope CurrentUser</code> &#x53EA;&#x89E6;&#x53CA;&#x4E00;&#x79CD; PowerShell &#x811A;&#x672C;&#x9650;&#x5236;&#xFF0C;&#x4E0D;&#x80FD;&#x4FEE;&#x590D; PTY &#x672A;&#x4F20; cwd&#x3001;&#x665A;&#x6CE8;&#x518C; profile hook&#x3001;cmd/Git Bash/WSL &#x5DEE;&#x5F02;&#x3001;&#x6620;&#x5C04;&#x76D8;&#x5EF6;&#x8FDF;&#x6216;&#x72B6;&#x6001;&#x63D0;&#x4EA4;&#x65F6;&#x5E8F;&#x3002;</p>
+        <div class="callout warn"><strong>&#x5F53;&#x524D;&#x4EE3;&#x7801;&#x72B6;&#x6001;&#xFF1A;</strong>&#x751F;&#x6210;&#x672C;&#x4EA4;&#x63A5;&#x6587;&#x6863;&#x524D;&#x5171;&#x6709; 254 &#x4E2A;&#x53D8;&#x66F4;&#x8DEF;&#x5F84;&#xFF1B;&#x5176;&#x4E2D;&#x7EA6; 145 &#x4E2A;&#x6D4B;&#x8BD5;&#x8DEF;&#x5F84;&#x3001;42 &#x4E2A;&#x7EC8;&#x7AEF;&#x76F8;&#x5173;&#x751F;&#x4EA7;&#x8DEF;&#x5F84;&#x3001;36 &#x4E2A; Git &#x76F8;&#x5173;&#x751F;&#x4EA7;&#x8DEF;&#x5F84;&#x53CA; 31 &#x4E2A;&#x5176;&#x5B83;&#x8DEF;&#x5F84;&#x3002;&#x5DF2;&#x8DDF;&#x8E2A; diff &#x5171; 19,941 &#x884C;&#x3002;&#x6CA1;&#x6709; commit&#xFF0C;HEAD &#x4ECD;&#x662F; <code>0cdb0a1</code>&#x3002;</div>
+      </div>
+
+      <div class="sub-section">
+        <h3>3 &#xB7; Approach Taken&#xFF08;&#x91C7;&#x53D6;&#x7684;&#x8DEF;&#x5F84;&#xFF09;</h3>
+        <p>&#x5B9E;&#x73B0;&#x4ECE;&#x201C;&#x786E;&#x8BA4;&#x5B9E;&#x9645; cwd&#x201D;&#x51FA;&#x53D1;&#xFF0C;&#x9010;&#x6B65;&#x5F62;&#x6210;&#x4E00;&#x5957;&#x76EE;&#x5F55;&#x5207;&#x6362;&#x4E8B;&#x52A1;&#xFF1A;&#x5148;&#x9A8C;&#x8BC1;&#x76EE;&#x6807;&#x76EE;&#x5F55;&#xFF1B;&#x6839;&#x636E; Shell &#x7C7B;&#x578B;&#x751F;&#x6210;&#x547D;&#x4EE4;&#xFF1B;&#x628A;&#x547D;&#x4EE4;&#x5199;&#x5165;&#x5F53;&#x524D; PTY&#xFF1B;&#x7B49;&#x5F85; nonce &#x7ED1;&#x5B9A;&#x7684;&#x56DE;&#x62A5;&#xFF1B;&#x6838;&#x5BF9; Shell &#x56DE;&#x62A5;&#x76EE;&#x5F55;&#x4E0E;&#x76EE;&#x6807;&#x76EE;&#x5F55;&#x7684;&#x6587;&#x4EF6;&#x7CFB;&#x7EDF;&#x8EAB;&#x4EFD;&#xFF1B;&#x6700;&#x540E;&#x624D;&#x63D0;&#x4EA4; renderer&#x3001;&#x6301;&#x4E45;&#x5316;&#x548C; Git authority&#x3002;</p>
+        <ol class="decision-list">
+          <li><strong>&#x91C7;&#x7528;&#x5B9E;&#x9645;&#x56DE;&#x62A5;&#xFF0C;&#x4E0D;&#x91C7;&#x7528;&#x4E50;&#x89C2;&#x66F4;&#x65B0;&#x3002;</strong><br>&#x539F;&#x56E0;&#xFF1A;&#x65E5;&#x5FD7;&#x8BC1;&#x660E;&#x5E94;&#x7528;&#x72B6;&#x6001;&#x548C; Shell &#x5B9E;&#x9645;&#x72B6;&#x6001;&#x53EF;&#x4EE5;&#x4E0D;&#x540C;&#x3002;&#x88AB;&#x5426;&#x51B3;&#x65B9;&#x6848;&#xFF1A;&#x4EC5;&#x51ED;&#x76EE;&#x5F55;&#x9009;&#x62E9;&#x7ED3;&#x679C;&#x6216; PTY write &#x6210;&#x529F;&#x5C31;&#x66F4;&#x65B0; cwd&#x3002;</li>
+          <li><strong>&#x589E;&#x52A0; prompt &#x540E;&#x72EC;&#x7ACB;&#x89C2;&#x5BDF;&#x3002;</strong><br>&#x539F;&#x56E0;&#xFF1A;&#x771F;&#x5B9E; Git Bash &#x590D;&#x73B0;&#x4E86;&#x665A;&#x6CE8;&#x518C; hook &#x5728;&#x65E9;&#x671F; CwdProof &#x540E;&#x518D;&#x6B21;&#x6267;&#x884C; <code>cd</code>&#x3002;&#x88AB;&#x5426;&#x51B3;&#x65B9;&#x6848;&#xFF1A;&#x628A;&#x542F;&#x52A8; ACK &#x6216;&#x540C;&#x4E00; prompt &#x4E2D;&#x7684;&#x65E9;&#x671F;&#x8BC1;&#x660E;&#x5F53;&#x4F5C;&#x6700;&#x7EC8;&#x72B6;&#x6001;&#x3002;</li>
+          <li><strong>&#x811A;&#x672C;&#x5931;&#x8D25;&#x65F6;&#x4FDD;&#x7559;&#x4E3B;&#x52A8;&#x6062;&#x590D;&#x5165;&#x53E3;&#x3002;</strong><br>&#x539F;&#x56E0;&#xFF1A;&#x7528;&#x6237;&#x660E;&#x786E;&#x8981;&#x6C42;&#x628A;&#x5207;&#x6362;&#x547D;&#x4EE4;&#x6CE8;&#x5165;&#x5F53;&#x524D; Terminal&#x3002;&#x88AB;&#x5426;&#x51B3;&#x65B9;&#x6848;&#xFF1A;&#x53EA;&#x663E;&#x793A; ExecutionPolicy &#x6307;&#x4EE4;&#xFF0C;&#x6216;&#x8005;&#x8981;&#x6C42;&#x7528;&#x6237;&#x624B;&#x52A8;&#x590D;&#x5236;&#x547D;&#x4EE4;&#x3002;</li>
+          <li><strong>&#x4E0B;&#x4E00;&#x6B65;&#x5148;&#x7F29;&#x5C0F;&#x8303;&#x56F4;&#x3002;</strong><br>&#x539F;&#x56E0;&#xFF1A;Git worker&#x3001;&#x7F13;&#x5B58;&#x3001;&#x539F;&#x751F; supervisor &#x548C;&#x53D1;&#x5E03;&#x5C42;&#x6539;&#x52A8;&#x5E76;&#x975E;&#x5373;&#x65F6; cwd &#x4FEE;&#x590D;&#x7684;&#x5FC5;&#x8981;&#x7EC4;&#x6210;&#x3002;&#x88AB;&#x5426;&#x51B3;&#x65B9;&#x6848;&#xFF1A;&#x7EE7;&#x7EED;&#x8865;&#x5145;&#x66F4;&#x591A;&#x4EE3;&#x7801;&#x540E;&#x518D;&#x7EDF;&#x4E00;&#x9A8C;&#x8BC1;&#x3002;</li>
+        </ol>
+        <div class="flow" role="img" aria-label="&#x5DE5;&#x4F5C;&#x76EE;&#x5F55;&#x786E;&#x8BA4;&#x6D41;&#x7A0B;">
+          <svg viewBox="0 0 980 260" xmlns="http://www.w3.org/2000/svg">
+            <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#6ba8ee"/></marker></defs>
+            <rect x="22" y="38" width="165" height="62"/><text x="104" y="64">&#x521B;&#x5EFA; Terminal</text><text class="sub" x="104" y="83">&#x539F;&#x751F; PTY cwd &#x5FEB;&#x901F;&#x8DEF;&#x5F84;</text>
+            <rect x="226" y="38" width="170" height="62"/><text x="311" y="64">Shell &#x56DE;&#x62A5;&#x5B9E;&#x9645; cwd</text><text class="sub" x="311" y="83">&#x542F;&#x52A8; hook &#x53EF;&#x7528;</text>
+            <rect class="ok" x="812" y="38" width="145" height="62"/><text x="884" y="64">&#x63D0;&#x4EA4;&#x552F;&#x4E00;&#x771F;&#x503C;</text><text class="sub" x="884" y="83">&#x6301;&#x4E45;&#x5316; + Git</text>
+            <path d="M187 69 H226"/><path d="M396 69 H812"/>
+            <rect class="bad" x="226" y="158" width="170" height="68"/><text x="311" y="184">Integration &#x5931;&#x8D25;</text><text class="sub" x="311" y="204">&#x663E;&#x793A;&#x6062;&#x590D;&#x63D0;&#x793A;</text>
+            <rect x="444" y="158" width="170" height="68"/><text x="529" y="184">&#x6CE8;&#x5165; Shell &#x539F;&#x751F;&#x547D;&#x4EE4;</text><text class="sub" x="529" y="204">Set-Location / cd</text>
+            <rect x="660" y="158" width="190" height="68"/><text x="755" y="184">nonce + &#x8EAB;&#x4EFD;&#x6838;&#x5BF9;</text><text class="sub" x="755" y="204">&#x4E0D;&#x5339;&#x914D;&#x5219;&#x4E0D;&#x4FDD;&#x5B58;</text>
+            <path d="M104 100 V192 H226"/><path d="M396 192 H444"/><path d="M614 192 H660"/><path d="M850 192 H884 V100"/>
+          </svg>
+        </div>
+        <p class="mono">&#x56FE;&#x793A;&#xFF1A;&#x5FEB;&#x901F;&#x8DEF;&#x5F84;&#x548C;&#x6062;&#x590D;&#x8DEF;&#x5F84;&#x5FC5;&#x987B;&#x6C47;&#x5408;&#x5230;&#x540C;&#x4E00;&#x4E2A;&#x53EF;&#x4FE1;&#x786E;&#x8BA4;&#x70B9;&#x3002;</p>
+      </div>
+
+      <div class="sub-section">
+        <h3>4 &#xB7; Code Changes&#xFF08;&#x4EE3;&#x7801;&#x6539;&#x52A8;&#xFF09;</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>&#x6587;&#x4EF6;&#x8DEF;&#x5F84;</th><th>&#x53D8;&#x5316;</th><th>&#x6539;&#x52A8;&#x610F;&#x56FE;</th></tr></thead>
+            <tbody>
+              <tr><td><code>electron/main/pty-manager.ts</code></td><td>+2017 -202</td><td>PTY &#x542F;&#x52A8;&#x3001;&#x5065;&#x5EB7;&#x63E1;&#x624B;&#x3001;&#x9A8C;&#x8BC1;&#x5F0F; cwd &#x4E8B;&#x52A1;&#x548C;&#x5931;&#x914D;&#x5904;&#x7406;</td></tr>
+              <tr><td><code>test/autotest/test-shell-integration-cwd.mjs</code></td><td>+1651 -51</td><td>&#x771F;&#x5B9E; Shell&#x3001;&#x6743;&#x9650;&#x3001;&#x5EF6;&#x8FDF;&#x3001;hook &#x987A;&#x5E8F;&#x548C;&#x76EE;&#x5F55;&#x77E9;&#x9635;</td></tr>
+              <tr><td><code>electron/main/ipc-handlers.ts</code></td><td>+1207 -92</td><td>&#x8FDE;&#x63A5; cwd &#x4E8B;&#x52A1;&#x3001;Git authority&#x3001;&#x9519;&#x8BEF;&#x4F20;&#x64AD;&#x548C;&#x6E05;&#x7406;</td></tr>
+              <tr><td><code>electron/main/git-utils.ts</code></td><td>+742 -232</td><td>Git &#x53EF;&#x6267;&#x884C;&#x6587;&#x4EF6;&#x3001;&#x8D85;&#x65F6;&#x548C;&#x9519;&#x8BEF;&#x5206;&#x7C7B;&#x6269;&#x5C55;</td></tr>
+              <tr><td><code>electron/main/terminal-cwd-validation.ts</code></td><td>+700 -11</td><td>&#x76EE;&#x5F55;&#x89C4;&#x8303;&#x5316;&#x3001;&#x53EF;&#x8FBE;&#x6027;&#x3001;&#x8EAB;&#x4EFD;&#x548C;&#x65F6;&#x9650;&#x9A8C;&#x8BC1;</td></tr>
+              <tr><td><code>src/utils/terminal-command.ts</code></td><td>+642 -7</td><td>&#x8DE8; Shell &#x7684;&#x9A8C;&#x8BC1;&#x5F0F;&#x5207;&#x6362;&#x547D;&#x4EE4;</td></tr>
+              <tr><td><code>electron/main/git-state-mirror-router.ts</code></td><td>+548 -77</td><td>&#x6309; workspace revision &#x7BA1;&#x7406; Git &#x8BF7;&#x6C42;</td></tr>
+              <tr><td><code>src/autotest/test-terminal-state-persistence.ts</code></td><td>+562 -15</td><td>&#x9A8C;&#x8BC1;&#x53EA;&#x6709;&#x6210;&#x529F;&#x786E;&#x8BA4;&#x7684;&#x76EE;&#x5F55;&#x624D;&#x6301;&#x4E45;&#x5316;</td></tr>
+              <tr><td>&#x5176;&#x5B83;</td><td>80 &#x4E2A;&#x5DF2;&#x8DDF;&#x8E2A; + 166 &#x4E2A;&#x672A;&#x8DDF;&#x8E2A;&#x8DEF;&#x5F84;</td><td>Shell &#x8D44;&#x6E90;&#x3001;UI/i18n&#x3001;Git worker&#x3001;native helper &#x548C;&#x6D4B;&#x8BD5;&#x57FA;&#x7840;&#x8BBE;&#x65BD;</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <figure class="impl-figure">
+          <figcaption>electron/main/terminal-cwd-settlement-policy.ts:17 &#xB7; &#x6BCF;&#x79CD;&#x5065;&#x5EB7;&#x72B6;&#x6001;&#x90FD;&#x505A; prompt &#x540E;&#x89C2;&#x5BDF;</figcaption>
+          <pre><code>export function resolveTerminalCwdSettlementMode(
+  state: ShellIntegrationHealthState
+): 'post-prompt-observation' {
+  // A CwdProof can run before a prompt hook registered after Onward.
+  // The next command cannot execute until that prompt boundary completes.
+  void state
+  return 'post-prompt-observation'
+}</code></pre>
+          <p class="impl-tradeoff">&#x8FD9;&#x589E;&#x52A0;&#x4E00;&#x6B21;&#x975E;&#x53D8;&#x66F4;&#x5F0F;&#x89C2;&#x5BDF;&#xFF0C;&#x4F46;&#x907F;&#x514D;&#x65E9;&#x671F;&#x8BC1;&#x660E;&#x88AB;&#x540C;&#x4E00; prompt &#x4E2D;&#x540E;&#x6267;&#x884C;&#x7684; hook &#x63A8;&#x7FFB;&#x3002;</p>
+        </figure>
+
+        <figure class="impl-figure">
+          <figcaption>electron/main/pty-manager.ts:1091 &#xB7; &#x5F53;&#x524D; Shell &#x7684; cwd &#x5207;&#x6362;&#x662F;&#x4E00;&#x4E2A; nonce &#x4E8B;&#x52A1;</figcaption>
+          <pre><code>async changeWorkingDirectory(
+  id: string,
+  requestedCwd: string,
+  options: TerminalCwdChangeOptions = {}
+): Promise&lt;TerminalCwdChangeResult&gt; {
+  const record = this.instances.get(id)
+  if (!record) {
+    return { success: false, requestedCwd, reason: 'terminal-not-found' }
+  }
+  if (record.cwdChangeInFlightId) {
+    return { success: false, requestedCwd, reason: 'busy' }
+  }
+  const nonce = randomBytes(16).toString('hex')</code></pre>
+          <p class="impl-tradeoff">&#x72B6;&#x6001;&#x673A;&#x8F83;&#x590D;&#x6742;&#xFF0C;&#x4F46;&#x4ECE;&#x7ED3;&#x6784;&#x4E0A;&#x7981;&#x6B62;&#x201C;&#x547D;&#x4EE4;&#x5199;&#x51FA;&#x5373;&#x6210;&#x529F;&#x201D;&#x3002;</p>
+        </figure>
+
+        <figure class="impl-figure">
+          <figcaption>src/components/TerminalGrid/TerminalGrid.tsx:2893 &#xB7; renderer &#x53EA;&#x63D0;&#x4EA4; main process &#x5DF2;&#x9A8C;&#x8BC1;&#x7684; cwd</figcaption>
+          <pre><code>const result = await window.electronAPI.terminal.changeWorkingDirectory(
+  terminalId,
+  selection.path,
+  { interruptIfBusy }
+)
+if (!result.success) {
+  setCwdChangeUi((prev) =&gt; ({
+    ...prev,
+    [terminalId]: { pending: false, reason: result.reason }
+  }))
+  return
+}
+const verifiedCwd = resolveVerifiedTerminalCwd(result, window.electronAPI.platform)
+if (verifiedCwd) commitVerifiedRendererCwd(terminalId, verifiedCwd)</code></pre>
+          <p class="impl-tradeoff">&#x5931;&#x8D25;&#x65F6;&#x4FDD;&#x7559;&#x65E7;&#x72B6;&#x6001;&#x5E76;&#x663E;&#x793A;&#x539F;&#x56E0;&#xFF0C;&#x907F;&#x514D; renderer &#x5148;&#x884C;&#x6539;&#x53D8; Git workspace&#x3002;</p>
+        </figure>
+
+        <div class="callout warn"><strong>&#x5B9E;&#x9A8C;&#x6027;&#x3001;&#x662F;&#x5426;&#x4FDD;&#x7559;&#x5F85;&#x786E;&#x8BA4;&#xFF1A;</strong><code>electron/main/git-exec-file-hard-timeout.ts</code>&#x3001;<code>git-executable-resolver.ts</code>&#x3001;<code>git-status-worker-budget.ts</code>&#x3001;<code>resources/native/windows/onward-git-job-supervisor.c</code>&#x3001;<code>scripts/ensure-windows-git-job-supervisor.js</code>&#x3001;<code>.github/workflows/release.yml</code> &#x53CA;&#x5927;&#x6279; <code>git-workspace-resolution-*</code> &#x6D4B;&#x8BD5;&#x3002;&#x5B83;&#x4EEC;&#x4E0E;&#x6838;&#x5FC3; cwd &#x95ED;&#x73AF;&#x6709;&#x5173;&#x8054;&#xFF0C;&#x4F46;&#x4E0D;&#x662F;&#x5373;&#x65F6;&#x4FEE;&#x590D;&#x7684;&#x5FC5;&#x8981;&#x6700;&#x5C0F;&#x96C6;&#x5408;&#x3002;</div>
+      </div>
+
+      <div class="sub-section">
+        <h3>5 &#xB7; What Worked&#xFF08;&#x5DF2;&#x9A8C;&#x8BC1;&#x6709;&#x7528;&#xFF09;</h3>
+        <ul>
+          <li><span class="worked">&#x6709;&#x6548;&#xFF1A;</span>&#x8BCA;&#x65AD;&#x65E5;&#x5FD7;&#x5DF2;&#x7ECF;&#x628A;&#x6839;&#x56E0;&#x5B9A;&#x4F4D;&#x4E3A;&#x4E09;&#x5957;&#x76EE;&#x5F55;&#x72B6;&#x6001;&#x5206;&#x88C2;&#x3002;&#x63A5;&#x624B;&#x8005;&#x5E94;&#x76F4;&#x63A5;&#x6CBF;&#x7528;&#x8BE5;&#x7ED3;&#x8BBA;&#xFF0C;&#x4E0D;&#x8981;&#x91CD;&#x65B0;&#x4ECE;&#x201C;Git &#x662F;&#x5426;&#x5B89;&#x88C5;&#x201D;&#x6216;&#x201C;ExecutionPolicy &#x662F;&#x5426;&#x653E;&#x5F00;&#x201D;&#x5F00;&#x59CB;&#x3002;</li>
+          <li><span class="worked">&#x6709;&#x6548;&#xFF1A;</span>&#x771F;&#x5B9E; Git Bash PTY &#x590D;&#x73B0;&#x4E86;&#x665A;&#x6CE8;&#x518C; prompt hook &#x7684;&#x7ADE;&#x6001;&#xFF1A;&#x65E9;&#x671F; ACK/CwdProof &#x6307;&#x5411; A&#xFF0C;&#x540E;&#x7EED; hook &#x5207;&#x5230; B&#xFF0C;&#x65E7;&#x5B9E;&#x73B0;&#x4ECD;&#x53EF;&#x80FD;&#x63D0;&#x4EA4; A&#x3002;&#x8FD9;&#x8BC1;&#x660E;&#x72EC;&#x7ACB;&#x7684; prompt &#x540E;&#x89C2;&#x5BDF;&#x6709;&#x5FC5;&#x8981;&#x3002;</li>
+          <li><span class="worked">&#x5C40;&#x90E8;&#x6709;&#x6548;&#xFF1A;</span><code>pnpm typecheck</code> &#x9000;&#x51FA; 0&#xFF1B;settlement 2/2&#x3001;PTY disposal 2/2&#x3001;terminal command 35/35&#x3001;authority 8/8&#x3001;startup authority 3/3&#x3001;matrix catalogue 8/8&#x3001;project editor 4/4 &#x901A;&#x8FC7;&#x3002;</li>
+          <li><span class="worked">&#x5DF2;&#x63A5;&#x901A;&#xFF1A;</span><code>src/i18n/core.ts:617-633, 2129-2149</code> &#x63D0;&#x4F9B; en/zh-CN &#x6062;&#x590D;&#x63D0;&#x793A;&#xFF1B;<code>TerminalGrid.tsx:2875-2930</code> &#x8C03;&#x7528;&#x4E3B;&#x52A8;&#x5207;&#x6362;&#xFF0C;&#x5E76;&#x53EA;&#x4FDD;&#x5B58;&#x9A8C;&#x8BC1;&#x7ED3;&#x679C;&#x3002;</li>
+        </ul>
+        <div class="callout"><strong>&#x8BC1;&#x636E;&#x8FB9;&#x754C;&#xFF1A;</strong>&#x4E0A;&#x8FF0;&#x4E3A;&#x4F1A;&#x8BDD;&#x4E2D;&#x7684;&#x5B9A;&#x5411;&#x547D;&#x4EE4;&#x8F93;&#x51FA;&#xFF0C;&#x6CA1;&#x6709;&#x6700;&#x7EC8;&#x6301;&#x4E45;&#x5316;&#x56DE;&#x5F52;&#x65E5;&#x5FD7;&#xFF1B;Bash/Zsh prompt &#x8FB9;&#x754C;&#x968F;&#x540E;&#x53C8;&#x6709;&#x4FEE;&#x6539;&#xFF0C;&#x56E0;&#x6B64;&#x65E7;&#x7684;&#x771F;&#x5B9E; Shell &#x7ED3;&#x679C;&#x5FC5;&#x987B;&#x91CD;&#x8DD1;&#x3002;</div>
+      </div>
+
+      <div class="sub-section">
+        <h3>6 &#xB7; What Didn't Work&#xFF08;&#x5DF2;&#x9A8C;&#x8BC1;&#x65E0;&#x7528;&#x6216;&#x8FC7;&#x7A0B;&#x5931;&#x8BEF;&#xFF09;</h3>
+        <ol>
+          <li><span class="failed">&#x65E0;&#x6548;&#x65B9;&#x6848;&#xFF1A;</span>&#x6267;&#x884C; <code>Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser</code>&#x3002;&#x7528;&#x6237;&#x786E;&#x8BA4;&#x95EE;&#x9898;&#x4ECD;&#x5B58;&#x5728;&#xFF1B;&#x5B83;&#x4E0D;&#x80FD;&#x6539;&#x53D8; <code>cwdProvided:false</code>&#xFF0C;&#x4E5F;&#x4E0D;&#x80FD;&#x89E3;&#x51B3;&#x8DE8; Shell &#x4E0E;&#x65F6;&#x5E8F;&#x95EE;&#x9898;&#x3002;</li>
+          <li><span class="failed">&#x9519;&#x8BEF;&#x5B8C;&#x6210;&#x70B9;&#xFF1A;</span>&#x4FE1;&#x4EFB;&#x542F;&#x52A8;&#x811A;&#x672C; ACK &#x6216;&#x65E9;&#x671F; CwdProof&#x3002;&#x665A;&#x6CE8;&#x518C; hook &#x5DF2;&#x8BC1;&#x660E;&#x8BE5;&#x8BC1;&#x636E;&#x5728; prompt &#x5B8C;&#x6210;&#x524D;&#x53EF;&#x80FD;&#x8FC7;&#x65F6;&#x3002;</li>
+          <li><span class="failed">&#x751F;&#x547D;&#x5468;&#x671F;&#x7F3A;&#x9677;&#xFF1A;</span>&#x5931;&#x914D;&#x65F6;&#x76F4;&#x63A5; dispose PTY &#x66FE;&#x5148;&#x79FB;&#x9664; exit listener&#xFF0C;&#x5BFC;&#x81F4; renderer &#x4E0D;&#x77E5;&#x9053; Terminal &#x5DF2;&#x5931;&#x6548;&#x3002;&#x73B0;&#x6709; disposal policy &#x662F;&#x4FEE;&#x6B63;&#x65B9;&#x5411;&#xFF0C;&#x4F46; packaged E2E &#x5C1A;&#x672A;&#x7ED9;&#x51FA;&#x6700;&#x7EC8;&#x8BC1;&#x636E;&#x3002;</li>
+          <li><span class="failed">&#x8FC7;&#x7A0B;&#x5931;&#x8BEF;&#xFF1A;</span>&#x628A; cwd &#x4E00;&#x81F4;&#x6027;&#x7EE7;&#x7EED;&#x6269;&#x5927;&#x6210; Git worker&#x3001;&#x7F13;&#x5B58;&#x3001;&#x539F;&#x751F; Job supervisor &#x548C;&#x53D1;&#x5E03;&#x6D41;&#x7A0B;&#x7684;&#x4E00;&#x6B21;&#x6027;&#x91CD;&#x6784;&#x3002;&#x7ED3;&#x679C;&#x662F; 254 &#x4E2A;&#x8DEF;&#x5F84;&#x5C1A;&#x672A;&#x5F62;&#x6210;&#x53EF;&#x5BA1;&#x6838;&#x3001;&#x53EF;&#x6784;&#x5EFA;&#x3001;&#x5168;&#x7EFF;&#x7684;&#x95ED;&#x73AF;&#x3002;</li>
+          <li><span class="failed">&#x8BC1;&#x636E;&#x8868;&#x8FBE;&#x4E0D;&#x51C6;&#x786E;&#xFF1A;</span>7,800 &#x4E2A;&#x7EC4;&#x5408;&#x4E3B;&#x8981;&#x662F;&#x6545;&#x969C;&#x76EE;&#x5F55;/&#x8BBE;&#x8BA1;&#x6E05;&#x5355;&#xFF0C;&#x4E0D;&#x7B49;&#x4E8E; 7,800 &#x6B21;&#x771F;&#x5B9E;&#x4EA7;&#x54C1;&#x7AEF;&#x5230;&#x7AEF;&#x8FD0;&#x884C;&#x3002;&#x540E;&#x7EED;&#x6C47;&#x62A5;&#x5FC5;&#x987B;&#x660E;&#x786E;&#x533A;&#x5206;&#x3002;</li>
+        </ol>
+      </div>
+
+      <div class="sub-section">
+        <h3>7 &#xB7; Incomplete / Next Step&#xFF08;&#x672A;&#x5B8C;&#x6210;&#xFF09;</h3>
+        <ol>
+          <li><span class="next">&#x5148;&#x6536;&#x655B;&#x8303;&#x56F4;&#x3002;</span>&#x4F9D;&#x636E; <code>git status</code> &#x4E0E; <code>git diff</code> &#x5C06; 254 &#x4E2A;&#x8DEF;&#x5F84;&#x5206;&#x6210;&#x6838;&#x5FC3; cwd&#x3001;&#x5FC5;&#x8981;&#x6D4B;&#x8BD5;&#x3001;&#x65C1;&#x652F;&#x5B9E;&#x9A8C;&#xFF0C;&#x5411;&#x7528;&#x6237;&#x63D0;&#x4EA4;&#x4FDD;&#x7559;/&#x79FB;&#x9664;&#x6E05;&#x5355;&#x5E76;&#x53D6;&#x5F97;&#x786E;&#x8BA4;&#x3002;<strong>&#x5B8C;&#x6210;&#x5224;&#x5B9A;&#xFF1A;</strong>&#x7528;&#x6237;&#x786E;&#x8BA4;&#x8303;&#x56F4;&#x3002;<strong>&#x963B;&#x585E;&#xFF1A;</strong>&#x5F53;&#x524D;&#x4E3B;&#x8981;&#x963B;&#x585E;&#x3002;<strong>&#x9677;&#x9631;&#xFF1A;</strong>&#x4E0D;&#x5F97;&#x4F7F;&#x7528; reset/checkout&#xFF0C;&#x79FB;&#x9664;&#x524D;&#x9010;&#x9879;&#x6838;&#x5BF9;&#x7528;&#x6237;&#x6539;&#x52A8;&#x3002;</li>
+          <li><span class="next">&#x91CD;&#x8DD1;&#x6700;&#x65B0;&#x5B9A;&#x5411;&#x6D4B;&#x8BD5;&#x3002;</span>&#x8986;&#x76D6; settlement&#x3001;disposal&#x3001;terminal command&#x3001;Shell matrix &#x4EE5;&#x53CA; PowerShell/cmd/Git Bash &#x771F;&#x5B9E; PTY&#x3002;<strong>&#x5B8C;&#x6210;&#x5224;&#x5B9A;&#xFF1A;</strong>&#x5168;&#x90E8;&#x9000;&#x51FA; 0&#xFF0C;&#x65B0;&#x7528;&#x4F8B; repeat 3 &#x7A33;&#x5B9A;&#x3002;<strong>&#x963B;&#x585E;&#xFF1A;</strong>&#x4F9D;&#x8D56;&#x8303;&#x56F4;&#x786E;&#x8BA4;&#xFF1B;macOS/Linux &#x771F;&#x5B9E; Shell &#x9700;&#x8981;&#x76F8;&#x5E94;&#x73AF;&#x5883;&#x6216; CI&#x3002;<strong>&#x9677;&#x9631;&#xFF1A;</strong>&#x6700;&#x8FD1;&#x6539;&#x8FC7; Bash/Zsh&#xFF0C;&#x65E7;&#x7ED3;&#x679C;&#x65E0;&#x6548;&#x3002;</li>
+          <li><span class="next">&#x6267;&#x884C;&#x5E72;&#x51C0;&#x5F00;&#x53D1;&#x6784;&#x5EFA;&#x3002;</span>&#x5728; Git Bash &#x4E2D;&#x8FD0;&#x884C; <code>rm -rf out release &amp;&amp; pnpm dist:dev</code>&#x3002;<strong>&#x5B8C;&#x6210;&#x5224;&#x5B9A;&#xFF1A;</strong><code>Under Development 2.0.1-master</code> &#x542F;&#x52A8;&#x5E76;&#x8FDB;&#x5165;&#x4E3B;&#x754C;&#x9762;&#x3002;<strong>&#x963B;&#x585E;&#xFF1A;</strong>&#x4F9D;&#x8D56;&#x524D;&#x4E24;&#x9879;&#x3002;<strong>&#x9677;&#x9631;&#xFF1A;</strong>&#x6E05;&#x7406;&#x548C;&#x6784;&#x5EFA;&#x5FC5;&#x987B;&#x662F;&#x540C;&#x4E00;&#x547D;&#x4EE4;&#x3002;</li>
+          <li><span class="next">&#x8FD0;&#x884C; packaged E2E&#x3002;</span>&#x9A8C;&#x8BC1;&#x63D0;&#x793A;&#x53EF;&#x89C1;&#x3001;&#x547D;&#x4EE4;&#x8FDB;&#x5165;&#x5F53;&#x524D; Terminal&#x3001;&#x5931;&#x914D;&#x4E0D;&#x6301;&#x4E45;&#x5316;&#x3001;&#x6210;&#x529F;&#x540E; Git diff &#x6062;&#x590D;&#xFF0C;&#x4EE5;&#x53CA; unsafe-cwd &#x9000;&#x51FA;&#x4F1A;&#x901A;&#x77E5; renderer&#x3002;<strong>&#x5B8C;&#x6210;&#x5224;&#x5B9A;&#xFF1A;</strong>&#x76F4;&#x63A5;&#x901A;&#x8FC7;&#x5E76; repeat 3&#x3002;<strong>&#x963B;&#x585E;&#xFF1A;</strong>&#x4F9D;&#x8D56;&#x6784;&#x5EFA;&#x3002;<strong>&#x9677;&#x9631;&#xFF1A;</strong>&#x540E;&#x53F0;&#x7B49;&#x5F85;&#x8FDB;&#x7A0B;&#x7ED3;&#x675F;&#x540E;&#x53EA;&#x8BFB;&#x53D6;&#x4E00;&#x6B21;&#x65E5;&#x5FD7;&#xFF0C;&#x4E0D;&#x80FD;&#x8F6E;&#x8BE2;&#x3002;</li>
+          <li><span class="next">&#x8FD0;&#x884C;&#x5B8C;&#x6574; regression&#x3002;</span><strong>&#x5B8C;&#x6210;&#x5224;&#x5B9A;&#xFF1A;</strong>&#x65E0; FAIL/TIMEOUT&#xFF0C;&#x4E14;&#x65E0; <code>__autotest_*</code>&#x3001;&#x4E34;&#x65F6; <code>.obj</code>&#x3001;<code>.DS_Store</code> &#x6216;&#x6B8B;&#x7559;&#x6D4B;&#x8BD5;&#x8FDB;&#x7A0B;&#x3002;<strong>&#x963B;&#x585E;&#xFF1A;</strong>&#x4F9D;&#x8D56;&#x4E0A;&#x8FF0;&#x6B65;&#x9AA4;&#x3002;<strong>&#x9677;&#x9631;&#xFF1A;</strong>&#x4E0D;&#x80FD;&#x901A;&#x8FC7;&#x6269;&#x5927;&#x5355; runner &#x7684; 300 &#x79D2;&#x4E0A;&#x9650;&#x9690;&#x85CF;&#x7A0B;&#x5E8F;&#x95EE;&#x9898;&#x3002;</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="reviews-inbox" class="card">
+      <h2>Reviews Inbox</h2>
+      <div class="reviews-empty">&#x6682;&#x65E0; review&#x3002;&#x63A5;&#x624B;&#x540E;&#x53EF;&#x8FD0;&#x884C; <code>/ts_handoff review</code>&#xFF0C;&#x628A;&#x72EC;&#x7ACB;&#x8BC4;&#x5BA1;&#x5199;&#x56DE;&#x672C;&#x9875;&#x3002;</div>
+    </section>
+
+    <section id="changelog" class="card">
+      <h2>Changelog</h2>
+      <table>
+        <thead><tr><th>&#x65F6;&#x95F4;</th><th>&#x53D8;&#x5316;</th><th>&#x4EFB;&#x52A1;</th></tr></thead>
+        <tbody><tr><td class="mono">2026-07-21 14:11:18 +0800</td><td>&#x521D;&#x59CB;&#x5316; HANDOFF.html &#x2014; &#x4EA4;&#x63A5; terminal-cwd-consistency&#xFF0C;&#x5E76;&#x660E;&#x786E;&#x8BB0;&#x5F55;&#x8303;&#x56F4;&#x6269;&#x5927;&#x4E0E;&#x6700;&#x7EC8;&#x9A8C;&#x8BC1;&#x5C1A;&#x672A;&#x5B8C;&#x6210;&#x3002;</td><td><a href="#terminal-cwd-consistency">terminal-cwd-consistency</a></td></tr></tbody>
+      </table>
+    </section>
+
+    <footer>Generated by <code>ts_handoff</code> v0.9.0 &#xB7; &#x7EE7;&#x7EED;&#x6267;&#x884C;&#xFF1A;<code>/ts_handoff continue</code> &#xB7; &#x72EC;&#x7ACB;&#x8BC4;&#x5BA1;&#xFF1A;<code>/ts_handoff review</code></footer>
+  </main>
+
+  <script>
+  (() => {
+    const content = document.getElementById('content');
+    const nav = document.getElementById('toc-nav');
+    if (!content || !nav) return;
+    const used = new Set();
+    const slug = (value) => String(value || '').trim().toLowerCase()
+      .replace(/[\s/\\]+/g, '-').replace(/[^\w\u4e00-\u9fff-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'section';
+    const headings = [...content.querySelectorAll('h1, h2, h3')];
+    for (const heading of headings) {
+      let id = heading.id || slug(heading.textContent);
+      const base = id;
+      let index = 2;
+      while (used.has(id) || (document.getElementById(id) && document.getElementById(id) !== heading)) id = `${base}-${index++}`;
+      heading.id = id;
+      used.add(id);
+      const link = document.createElement('a');
+      link.href = `#${id}`;
+      link.dataset.level = heading.tagName.slice(1);
+      link.textContent = heading.textContent.trim();
+      nav.appendChild(link);
+    }
+    const links = [...nav.querySelectorAll('a')];
+    const activate = (id) => links.forEach((link) => link.classList.toggle('active', link.hash === `#${id}`));
+    if (typeof IntersectionObserver === 'function') {
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]) activate(visible[0].target.id);
+      }, { rootMargin: '0px 0px -72% 0px', threshold: [0, 1] });
+      headings.forEach((heading) => observer.observe(heading));
+    } else if (headings[0]) {
+      activate(headings[0].id);
+    }
+    window.__handoffTocResult = { ok: true, count: headings.length };
+  })();
+  </script>
+</body>
+</html>
