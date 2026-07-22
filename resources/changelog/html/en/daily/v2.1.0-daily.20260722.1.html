@@ -1,0 +1,24 @@
+<h1>Onward Daily Build v2.1.0-daily.20260722.1</h1>
+<p>Changes since <code>v2.1.0-daily.20260713.1</code>.</p>
+<h2>New Features</h2>
+<ul>
+<li>Add Git-to-Editor round-trip navigation: jump from a Git Diff / Git History file straight into the Project Editor and back</li>
+<li>Add a local-ahead / remote-behind Task badge with background auto-fetch, so each Task shows its unpushed / unpulled commit counts at a glance</li>
+<li>Unify modal dismiss behavior across the app: backdrop clicks are inert and ESC consistently cancels</li>
+<li>Git History now shows a click-to-view placeholder instead of auto-expanding the first file of a commit</li>
+<li>Settings polish: aligned sidebar font sizes, renamed the Tasks section, redesigned the apply-to-all icon</li>
+<li>Rebuild the telemetry pipeline on PostHog with an ack-gated outbox for reliable delivery (no user-visible behavior change)</li>
+</ul>
+<h2>Bug Fixes</h2>
+<ul>
+<li>Auto-recover the renderer from GPU process crashes and stagger WebGL teardown — fixes the white screen after closing many terminals at once</li>
+<li>Harden the app against main-process threadpool stalls (the 2026-07-20 freeze incident): infrastructure-failure resilience plus a guarded shutdown telemetry push</li>
+<li>Fix Chinese IME input latency on large Prompt drafts by migrating the editor to contenteditable</li>
+<li>Eliminate the enter / exit CPU storm caused by a soft-closed subpage holding a 40k-symbol outline</li>
+<li>Preserve HTML preview scroll position and zoom across warm subpage round-trips, and reapply zoom on every document load</li>
+<li>Keep HTML surfaces layered below host overlays so menus and dialogs no longer render underneath the preview</li>
+<li>Git Diff: reveal the first change on warm reopen when content changed since the last view, scope single-file revert refresh, and bridge git status for symlinked working directories</li>
+<li>Git History: preserve explicit file selection across async repo / commit reloads</li>
+<li>Keep the Prompt editor context menu open during terminal output auto-scroll</li>
+<li>Forward ESC from EPUB iframes to the host so ESC exits the reader consistently</li>
+</ul>
