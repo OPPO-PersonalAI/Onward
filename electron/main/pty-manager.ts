@@ -14,6 +14,8 @@ import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { performanceTrace } from './performance-trace'
 import { buildColorCapableTerminalEnv, resolveUserZdotdirForShellIntegration } from './terminal-env'
 import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
+import { buildPowerShellInlineIntegrationCommand } from './powershell-inline-integration'
+import { parseOsc633Cwd, parseOsc7Cwd, parseOsc9Cwd } from '../../src/utils/terminal-cwd-osc'
 
 export interface PtyOptions {
   cols?: number
@@ -27,10 +29,19 @@ export interface PtyOptions {
 type PtyExitEvent = { exitCode: number; signal?: number }
 type PtySequencePhase = 'content' | 'enter'
 export type PtyShellKind = 'posix' | 'powershell' | 'cmd' | 'unknown'
+/** How shell integration was injected into a spawned shell (trace field). */
+export type ShellIntegrationMode =
+  | 'ps-inline-command'
+  | 'bash-rcfile'
+  | 'zsh-zdotdir'
+  | 'fish-vendor-conf'
+  | 'cmd-prompt-env'
+  | 'none'
 
 interface PtyRecord {
   pty: pty.IPty
   shellKind: PtyShellKind
+  integrationMode: ShellIntegrationMode
   externalDisposables: pty.IDisposable[]
   exitDisposable: pty.IDisposable
   exitPromise: Promise<PtyExitEvent>
@@ -52,6 +63,11 @@ export class PtyManager {
 
   // OSC 9;9 (ConEmu-style CWD report): \x1b]9;9;PATH\x07 or \x1b]9;9;PATH\x1b\\
   private static readonly OSC_CWD_RE = /\x1b\]9;9;(.+?)(?:\x07|\x1b\\)/
+  // OSC 633;P;Cwd= (VS Code dialect, emitted by the Onward PS inline prompt)
+  private static readonly OSC_633_CWD_RE = /\x1b\]633;P;Cwd=(.+?)(?:\x07|\x1b\\)/
+  // OSC 7 (file:// URI dialect) — capture the full URI for parseOsc7Cwd
+  private static readonly OSC_7_RE = /\x1b\]7;(file:\/\/[^\x07\x1b]*)(?:\x07|\x1b\\)/
+  private oscCwdDetectedHandler: ((id: string, cwd: string) => void) | null = null
 
   private getDefaultShell(): string {
     if (this.cachedShell) return this.cachedShell
@@ -100,13 +116,17 @@ export class PtyManager {
       execArgs = ['-l']
     }
 
-    // Windows PowerShell CWD tracking is handled by the pwsh.ps1 dot-source
-    // injected below (OSC 633 + OSC 7), the same richer path macOS/Linux use.
-    // The old OSC 9;9 `-EncodedCommand` prompt was removed: PowerShell swallows
-    // everything after a `-Command` string as that command's arguments, so when
-    // both were emitted the `-EncodedCommand` was dead AND the two mechanisms
-    // produced a confusing, conflicting arg list. cmd.exe still uses the PROMPT
-    // env var below (it has no .ps1 integration path).
+    // Windows PowerShell CWD tracking is handled by the INLINE -Command
+    // prompt wrapper injected below (OSC 633 + OSC 7), the same richer path
+    // macOS/Linux use. RC-1 (2026-07 bundles): the previous pwsh.ps1
+    // dot-source was blocked by ExecutionPolicy / AppLocker / MOTW on
+    // locked-down machines — an inline -Command string is exempt from every
+    // script-FILE execution gate (see powershell-inline-integration.ts).
+    // The even older OSC 9;9 `-EncodedCommand` prompt was removed before
+    // that: PowerShell swallows everything after a `-Command` string as that
+    // command's arguments, so when both were emitted the `-EncodedCommand`
+    // was dead AND the two mechanisms produced a conflicting arg list.
+    // cmd.exe still uses the PROMPT env var below (no .ps1 involvement).
 
     // Inject Onward Bridge API environment variables
     const apiPort = getApiPort()
@@ -122,9 +142,11 @@ export class PtyManager {
 
     // For cmd.exe on Windows, set PROMPT to emit OSC 9;9 CWD report
     const shellIntegrationEnv: Record<string, string> = {}
+    let integrationMode: ShellIntegrationMode = 'none'
     if (platform() === 'win32' && !command && this.isCmdShell(shell)) {
       // $e = ESC, $P = current path, $e\ = ST (string terminator), $G = >
       shellIntegrationEnv.PROMPT = '$e]9;9;$P$e\\$P$G'
+      integrationMode = 'cmd-prompt-env'
     }
 
     // Onward shell integration: emit OSC 633 + OSC 7 on every prompt so the
@@ -144,6 +166,7 @@ export class PtyManager {
         if (injection.argsPrepend) execArgs = [...injection.argsPrepend, ...execArgs]
         if (injection.argsAppend) execArgs = [...execArgs, ...injection.argsAppend]
         Object.assign(shellIntegrationEnv, injection.env)
+        integrationMode = injection.mode
         // injection.cleanupPath is the temp wrapper dir for bash / fish; it
         // lives under tmpdir() and is cleaned up by the OS on reboot. We
         // don't tear it down on PTY exit because re-spawn after a crash
@@ -190,7 +213,12 @@ export class PtyManager {
         rows,
         platform: platform(),
         durationMs: Date.now() - spawnStartMs,
-        hasShellIntegration: Object.keys(shellIntegrationEnv).length > 0
+        // Field-semantics fix (2026-07 bundles): the old flag counted env
+        // KEYS only, so args-based injection (PowerShell) always reported
+        // false. `hasShellIntegration` now means "any injection happened";
+        // `integrationMode` names the mechanism.
+        hasShellIntegration: integrationMode !== 'none',
+        integrationMode
       })
       performanceTrace.recordComplete('pty.spawn', spawnStartUs, {
         terminalId: id,
@@ -228,6 +256,7 @@ export class PtyManager {
     const record: PtyRecord = {
       pty: ptyProcess,
       shellKind,
+      integrationMode,
       externalDisposables: [],
       exitDisposable: { dispose: () => {} },
       exitPromise,
@@ -439,26 +468,72 @@ export class PtyManager {
     }
     return false
   }
-  // Parse OSC 9;9 CWD reports from PTY data stream
+  // Parse cwd-bearing OSC reports from the PTY data stream (main-side).
+  //
+  // Historically this only understood OSC 9;9 (cmd.exe PROMPT), which left
+  // `cwdMap` permanently stale for PowerShell — the inline integration emits
+  // OSC 633;P;Cwd= and OSC 7, both of which were parsed only in the renderer.
+  // Parsing all three dialects here keeps the main-side fallback cache honest
+  // across renderer reloads. Best-effort by design: a sequence split across
+  // PTY chunks is missed here but still caught by xterm.js's stateful parser
+  // in the renderer, whose pushCwd IPC remains the authoritative path.
+  //
+  // Cost note: three regex execs per PTY chunk, all anchored on rare escape
+  // introducers — no allocation on the (dominant) no-match path.
   detectCwd(id: string, data: string): void {
-    const match = PtyManager.OSC_CWD_RE.exec(data)
-    if (match) {
-      const cwd = resolveExistingTerminalCwd(match[1])
-      if (cwd) {
-        this.cwdMap.set(id, cwd)
-      } else {
-        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_IGNORED, {
-          terminalId: id,
-          reason: 'invalid-pty-osc9-cwd',
-          rawCwd: match[1].slice(0, 512)
-        })
-      }
+    if (!data.includes('\x1b]')) return
+    let rawCwd: string | null = null
+    let dialect: string | null = null
+    const m9 = PtyManager.OSC_CWD_RE.exec(data)
+    if (m9) {
+      rawCwd = parseOsc9Cwd(`9;${m9[1]}`)
+      dialect = 'osc9'
     }
+    const m633 = PtyManager.OSC_633_CWD_RE.exec(data)
+    if (m633) {
+      rawCwd = parseOsc633Cwd(`P;Cwd=${m633[1]}`)
+      dialect = 'osc633'
+    }
+    const m7 = PtyManager.OSC_7_RE.exec(data)
+    if (!m633 && m7) {
+      rawCwd = parseOsc7Cwd(m7[1])
+      dialect = 'osc7'
+    }
+    if (!dialect) return
+    const cwd = rawCwd ? resolveExistingTerminalCwd(rawCwd) : null
+    if (cwd) {
+      this.cwdMap.set(id, cwd)
+      try {
+        this.oscCwdDetectedHandler?.(id, cwd)
+      } catch {
+        // The hook is observability plumbing — never let it break PTY data flow.
+      }
+    } else {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_IGNORED, {
+        terminalId: id,
+        reason: `invalid-pty-${dialect}-cwd`,
+        rawCwd: (rawCwd ?? '').slice(0, 512)
+      })
+    }
+  }
+
+  /**
+   * Register the main-side OSC cwd hook (shell-derived proof). Wired by
+   * ipc-handlers to push into the GitStateMirror router and to feed the
+   * shell-integration liveness tracker.
+   */
+  setOscCwdDetectedHandler(handler: ((id: string, cwd: string) => void) | null): void {
+    this.oscCwdDetectedHandler = handler
   }
 
   // Get tracked CWD for a terminal (set by shell integration or initial spawn)
   getCwd(id: string): string | null {
     return this.cwdMap.get(id) ?? null
+  }
+
+  /** Injection mechanism recorded at spawn (for liveness gating / traces). */
+  getIntegrationMode(id: string): ShellIntegrationMode {
+    return this.instances.get(id)?.integrationMode ?? 'none'
   }
 
   getShellKind(id: string): PtyShellKind {
@@ -589,6 +664,13 @@ export class PtyManager {
      */
     argsReplace?: string[]
     env: Record<string, string>
+    /**
+     * Injection mechanism label for the `main:pty.spawn` trace. The old
+     * `hasShellIntegration` flag counted env KEYS only, so args-based
+     * injection (PowerShell) always reported `false` — a misleading field
+     * that cost real diagnosis time on the 2026-07 bundles.
+     */
+    mode: ShellIntegrationMode
     cleanupPath: string | null
   } | null {
     const integrationDir = this.resolveShellIntegrationDir()
@@ -648,6 +730,7 @@ export class PtyManager {
       return {
         argsReplace: ['--rcfile', wrapperPath],
         env: {},
+        mode: 'bash-rcfile',
         cleanupPath: wrapperDir
       }
     }
@@ -660,7 +743,7 @@ export class PtyManager {
       const env: Record<string, string> = { ZDOTDIR: zdotdir }
       const userZdot = resolveUserZdotdirForShellIntegration(baseEnv, homedir(), zdotdir)
       if (userZdot) env.USER_ZDOTDIR = userZdot
-      return { env, cleanupPath: null }
+      return { env, mode: 'zsh-zdotdir', cleanupPath: null }
     }
 
     if (baseName === 'fish') {
@@ -689,18 +772,26 @@ export class PtyManager {
       const xdg = process.env.XDG_DATA_DIRS || '/usr/local/share:/usr/share'
       return {
         env: { XDG_DATA_DIRS: `${fishVendorRoot}:${xdg}` },
+        mode: 'fish-vendor-conf',
         cleanupPath: fishVendorRoot
       }
     }
 
     if (baseName === 'pwsh' || baseName === 'powershell') {
-      // -NoLogo suppresses the startup banner (previously contributed by the
-      // removed getWindowsShellArgs path). The dot-source installs the
-      // OSC 633 + OSC 7 prompt wrapper from pwsh.ps1.
-      const psScript = join(integrationDir, 'pwsh.ps1')
+      // -NoLogo suppresses the startup banner. The prompt wrapper is passed
+      // INLINE as the -Command string instead of dot-sourcing pwsh.ps1:
+      // ExecutionPolicy (Restricted / AllSigned via GPO), AppLocker script
+      // rules, and Mark-of-the-Web all gate SCRIPT FILES, and the 2026-07
+      // diagnostic bundles proved locked-down machines block the dot-source
+      // with PSSecurityException — killing cwd tracking for the whole
+      // session with no fallback. A -Command string is exempt from every
+      // file-execution gate (verified against powershell.exe with
+      // PSExecutionPolicyPreference=Restricted). pwsh.ps1 stays on disk for
+      // manual installation parity.
       return {
-        argsPrepend: ['-NoLogo', '-NoExit', '-Command', `. '${psScript.replace(/'/g, "''")}'`],
+        argsPrepend: ['-NoLogo', '-NoExit', '-Command', buildPowerShellInlineIntegrationCommand()],
         env: {},
+        mode: 'ps-inline-command',
         cleanupPath: null
       }
     }

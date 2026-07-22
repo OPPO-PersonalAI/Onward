@@ -7050,6 +7050,41 @@ export function GitDiffViewer({
     </div>
   )
 
+  // Repo probe timed out (RC-2, 2026-07 bundles): the cwd may well be a git
+  // repo on a slow/hanging volume (network drive) — rendering the "not a
+  // repo" copy here misled users into blaming their setup. Distinct copy +
+  // a retry that force-clears the timeout-backoff cache entry.
+  const renderProbeTimeout = () => (
+    <div className="git-diff-not-installed">
+      <div className="git-diff-warning-icon">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+          <path
+            d="M12 8v4l2.5 2.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+            stroke="#d7ba7d"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </div>
+      <h3 className="git-diff-warning-title">{t('gitDiff.warning.probeTimeout.title')}</h3>
+      <p className="git-diff-warning-text">{t('gitDiff.warning.probeTimeout.message')}</p>
+      <p className="git-diff-cwd">{diffResult?.cwd}</p>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          className="git-diff-close-btn"
+          disabled={isRefreshingChanges}
+          onClick={() => { void refreshChanges() }}
+        >
+          {t('gitDiff.warning.probeTimeout.retry')}
+        </button>
+        <button className="git-diff-close-btn" onClick={requestClose}>
+          {t('gitDiff.returnToTerminal')}
+        </button>
+      </div>
+    </div>
+  )
+
   // Rendering without change prompt
   const renderNoChanges = () => (
     <div className="git-diff-not-installed">
@@ -7459,6 +7494,10 @@ export function GitDiffViewer({
     }
 
     if (!diffResult.isGitRepo) {
+      // RC-2: timeout ≠ not-a-repo — a killed probe gets its own state.
+      if (diffResult.repoProbe === 'timeout') {
+        return renderProbeTimeout()
+      }
       return renderNotGitRepo()
     }
 

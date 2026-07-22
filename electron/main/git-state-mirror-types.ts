@@ -109,6 +109,14 @@ export interface MirrorState {
    * changes flow through normal React updates without a remount.
    */
   generation: number
+  /**
+   * How the repo probe (`rev-parse`) concluded for this snapshot (RC-2 fix,
+   * 2026-07 bundles). 'timeout' = the probe was KILLED at the exec budget —
+   * the cwd may well be a repo on a slow/hanging volume, so renderers must
+   * NOT present `repoRoot === null` + 'timeout' as "not a repository".
+   * Absent on snapshots from workers predating the field.
+   */
+  repoProbe?: 'ok' | 'not-repo' | 'timeout' | 'error'
 }
 
 /**

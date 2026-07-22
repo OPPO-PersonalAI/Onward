@@ -4,6 +4,12 @@
 #
 # Run the complete PDF/EPUB autotest suite (preview + diff + history).
 #
+# MANUAL UMBRELLA (out of the regression gate since 2026-07-22): everything
+# here is covered in the gate by the three preview group runners
+# (run-pdf-epub-preview-{pdf,pdf-outline,epub}-autotest.sh) plus
+# run-pdf-epub-diff-autotest.sh. Keep for one-session cross-suite runs; its
+# 1200 s requirement cannot fit the 5-minute per-runner budget.
+#
 # Usage:
 #   test/autotest/run-pdf-epub-full-autotest.sh [APP_BIN] [LOG_FILE] [USER_DATA_DIR]
 

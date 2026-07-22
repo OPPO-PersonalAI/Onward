@@ -187,6 +187,20 @@ export interface TerminalInputCapabilities {
 export interface TerminalAPI {
   create: (id: string, options?: TerminalOptions) => Promise<{ success: boolean; id?: string; error?: string }>
   write: (id: string, data: string, traceContext?: PerformanceTraceContext) => Promise<boolean>
+  /**
+   * Verified manual cwd switch (RC-3 fix): resolves success ONLY after the
+   * shell's own cwd report confirms the change. Callers must persist the
+   * returned `cwd` (not the requested path) and persist nothing on failure.
+   */
+  changeWorkDirVerified: (id: string, targetPath: string) => Promise<{
+    success: boolean
+    cwd?: string
+    reason?: 'target-not-found' | 'terminal-not-found' | 'write-failed' | 'verify-timeout'
+  }>
+  /** Shell integration produced no cwd OSC within the liveness window. */
+  onIntegrationSilent: (callback: (id: string, shellKind: string) => void) => () => void
+  /** A shell-derived cwd OSC arrived after the silent signal — clear the hint. */
+  onIntegrationRecovered: (callback: (id: string) => void) => () => void
   resize: (id: string, cols: number, rows: number) => Promise<boolean>
   sendInputSequence: (
     id: string,
@@ -1511,6 +1525,30 @@ const terminalAPI: TerminalAPI = {
       { terminalId: id, bytes: data.length },
       () => ipcRenderer.invoke(IPC.TERMINAL_WRITE, id, data, traceContext)
     )
+  },
+
+  changeWorkDirVerified: (id: string, targetPath: string) => {
+    return ipcRenderer.invoke(IPC.TERMINAL_CHANGE_WORKDIR_VERIFIED, id, targetPath)
+  },
+
+  onIntegrationSilent: (callback: (id: string, shellKind: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, id: string, shellKind: string) => {
+      callback(id, shellKind)
+    }
+    ipcRenderer.on(IPC.TERMINAL_INTEGRATION_SILENT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.TERMINAL_INTEGRATION_SILENT, listener)
+    }
+  },
+
+  onIntegrationRecovered: (callback: (id: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, id: string) => {
+      callback(id)
+    }
+    ipcRenderer.on(IPC.TERMINAL_INTEGRATION_RECOVERED, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.TERMINAL_INTEGRATION_RECOVERED, listener)
+    }
   },
 
   resize: (id: string, cols: number, rows: number) => {

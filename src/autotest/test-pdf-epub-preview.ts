@@ -4,6 +4,7 @@
  */
 
 import type { AutotestContext, TestResult } from './types'
+import { parsePdfEpubPreviewGroup } from './pdf-epub-preview-group'
 
 /**
  * Fixtures live on disk under `test/autotest/fixtures/pdf-epub/` (see CLAUDE.md rule
@@ -79,7 +80,15 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
     log(`exec:${label}`, { command: command.length > 120 ? `${command.slice(0, 120)}…` : command })
   }
 
-  log('pdf-epub-preview:start', { rootPath })
+  // Budget split (5-min gate): three group runners partition the suite;
+  // absent token runs everything (umbrella / standalone). See
+  // pdf-epub-preview-group.ts for the group map + EDR-host sizing rationale.
+  const previewGroup = parsePdfEpubPreviewGroup(window.electronAPI.debug.autotestSuite)
+  const runPdfCore = previewGroup === 'pdf' || previewGroup === 'all'
+  const runPdfOutline = previewGroup === 'pdf-outline' || previewGroup === 'all'
+  const runEpub = previewGroup === 'epub' || previewGroup === 'all'
+
+  log('pdf-epub-preview:start', { rootPath, group: previewGroup })
 
   // Prepare a scratch marker file first so we can reliably switch off the
   // PDF/EPUB view between assertions.
@@ -89,23 +98,33 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
   )
 
   // Copy PDF + EPUB fixtures from the on-disk test fixture directory into the
-  // project's root so the Files panel can pick them up.
-  await termExec(
-    platformBuildCopyCommand(`${FIXTURE_REL_DIR}/${PDF_FIXTURE_SRC}`, TEST_PDF_FILENAME, rootPath),
-    'pdf:copy',
-    1200
-  )
-  await termExec(
-    platformBuildCopyCommand(`${FIXTURE_REL_DIR}/${EPUB_FIXTURE_SRC}`, TEST_EPUB_FILENAME, rootPath),
-    'epub:copy',
-    1200
-  )
+  // project's root so the Files panel can pick them up. Each group copies only
+  // its own fixture (the cleanup delete-command is missing-file tolerant; the
+  // pdf-outline group copies its outlined fixture inside its own section).
+  if (runPdfCore) {
+    await termExec(
+      platformBuildCopyCommand(`${FIXTURE_REL_DIR}/${PDF_FIXTURE_SRC}`, TEST_PDF_FILENAME, rootPath),
+      'pdf:copy',
+      1200
+    )
+  }
+  if (runEpub) {
+    await termExec(
+      platformBuildCopyCommand(`${FIXTURE_REL_DIR}/${EPUB_FIXTURE_SRC}`, TEST_EPUB_FILENAME, rootPath),
+      'epub:copy',
+      1200
+    )
+  }
 
   const pdfPath = joinPath(rootPath, TEST_PDF_FILENAME)
   const epubPath = joinPath(rootPath, TEST_EPUB_FILENAME)
   const markerPath = joinPath(rootPath, TEST_MARKER_FILENAME)
 
   if (cancelled()) return results
+
+  // ── group gate: pdf core (budget split) — original indentation retained to
+  // keep the diff reviewable; the block runs verbatim when gated in. ──
+  if (runPdfCore) {
 
   // ---------- PDF preview ----------
 
@@ -499,6 +518,11 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
       perTrial: observations
     })
   }
+
+  } // ── end group gate: pdf core ──
+
+  // ── group gate: epub (budget split) ──
+  if (runEpub) {
 
   // ---------- EPUB preview ----------
 
@@ -975,6 +999,16 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
     })
   }
 
+  } // ── end group gate: epub ──
+
+  // Hoisted above the pdf gate blocks: referenced by BOTH the outlined-PDF
+  // section and the view-state section below (pure path string, no side
+  // effect when the pdf group is skipped).
+  const outlinedPdfPath = joinPath(rootPath, TEST_PDF_OUTLINE_FILENAME)
+
+  // ── group gate: pdf-outline (outlined fixture + outline panel) ──
+  if (runPdfOutline) {
+
   // ---------- Outlined PDF fixture: unified OutlinePanel integration ----------
   // Copy the outlined PDF fixture next to the other fixtures.
   await termExec(
@@ -982,7 +1016,6 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
     'outlined-pdf:copy',
     1200
   )
-  const outlinedPdfPath = joinPath(rootPath, TEST_PDF_OUTLINE_FILENAME)
   await getApi()?.openFileByPathAsUser?.(outlinedPdfPath)
   await waitFor(
     'pdf-outlined-reader-visible',
@@ -1101,19 +1134,29 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
     await sleep(150)
   }
 
+  } // ── end group gate: pdf-outline (outlined fixture) ──
+
   // ---------- Pinned + Recent Files parity ----------
-  // Recent list should contain every file the user opened above — the
-  // plain PDF, the outlined PDF, and the EPUB — because ProjectEditor's
-  // openFile pushes to recents on user-sourced opens regardless of type.
+  // Recent list should contain every file the user opened above — because
+  // ProjectEditor's openFile pushes to recents on user-sourced opens
+  // regardless of type. Each record is gated to its group so the split
+  // runners only assert on files their own group actually opened.
   const recentLabels = Array.from(document.querySelectorAll('.quick-file-measure-item')).map(el => el.textContent?.trim() ?? '')
-  record('pdf-in-recent-files',
-    recentLabels.some(l => l.toLowerCase().endsWith('.pdf')),
-    { recent: recentLabels.slice(0, 10) }
-  )
-  record('epub-in-recent-files',
-    recentLabels.some(l => l.toLowerCase().endsWith('.epub')),
-    { recent: recentLabels.slice(0, 10) }
-  )
+  if (runPdfCore || runPdfOutline) {
+    record('pdf-in-recent-files',
+      recentLabels.some(l => l.toLowerCase().endsWith('.pdf')),
+      { recent: recentLabels.slice(0, 10) }
+    )
+  }
+  if (runEpub) {
+    record('epub-in-recent-files',
+      recentLabels.some(l => l.toLowerCase().endsWith('.epub')),
+      { recent: recentLabels.slice(0, 10) }
+    )
+  }
+
+  // ── group gate: pdf-outline (view-state memory rides the outlined fixture) ──
+  if (runPdfOutline) {
 
   // ---------- PDF view-state memory ----------
   // Our fixture is single-page and small, so scroll-based memory is hard
@@ -1156,6 +1199,8 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
   record('pdf-state-restored', restored, {
     scaleAfter: getZoomSelect()?.value ?? null
   })
+
+  } // ── end group gate: pdf-outline (view-state memory) ──
 
   // ---------- Cleanup ----------
   await termExec(

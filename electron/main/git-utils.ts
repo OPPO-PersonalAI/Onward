@@ -18,7 +18,7 @@ import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { GitDiffRequestCacheController } from './git-diff-request-cache'
 import { shouldReuseWarmStatus, WARM_STATUS_REUSE_MAX_AGE_MS } from './git-diff-warm-status-gate'
-import { isMetaCacheEntryFresh } from './git-meta-cache-policy'
+import { isMetaCacheEntryFresh, classifyRepoProbeError, type RepoProbeState } from './git-meta-cache-policy'
 import { extractGitSubcommand } from './git-exec-subcommand'
 import { parseGitLogRawNumstat, type ParsedDiffStatus } from './git-log-diff-parse'
 import { parseGitlinkPathsFromLsFilesZ } from './git-submodule-disk-discovery'
@@ -265,6 +265,12 @@ export interface GitDiffResult {
   superprojectRoot?: string
   submodulesLoading?: boolean
   error?: string
+  /**
+   * Probe outcome behind a failed load (RC-2 fix). 'timeout' → the repo
+   * probe was killed at the exec budget (slow/hanging volume) and the UI
+   * must show a "Git timed out here" state with a retry, NOT "not a repo".
+   */
+  repoProbe?: RepoProbeState
 }
 
 export interface GitDiffLoadOptions {
@@ -312,6 +318,8 @@ export interface GitHistoryResult {
   repos?: GitRepoContext[]
   superprojectRoot?: string
   error?: string
+  /** Probe outcome behind a failed load (RC-2 fix) — see GitDiffResult. */
+  repoProbe?: RepoProbeState
 }
 
 export interface GitHistoryFile {
@@ -467,7 +475,7 @@ const terminalCwdCache = new Map<string, { value: string | null; at: number }>()
 const terminalCwdInFlight = new Map<string, Promise<string | null>>()
 const terminalInfoCache = new Map<string, { value: TerminalGitInfo; at: number }>()
 const terminalInfoInFlight = new Map<string, Promise<TerminalGitInfo>>()
-const gitMetaCache = new Map<string, { value: GitRepoMeta; at: number }>()
+const gitMetaCache = new Map<string, { value: GitRepoMeta; at: number; timeoutStrikes?: number }>()
 const gitMetaInFlight = new Map<string, Promise<GitRepoMeta>>()
 // TTL shared by `detectSuperproject`'s cache; the legacy
 // `submoduleCache` was removed when `detectSubmodulesRecursive` migrated
@@ -966,6 +974,12 @@ export type GitRepoMeta = {
   repoRoot: string | null
   gitDir: string | null
   isRepo: boolean
+  /**
+   * How the rev-parse probe concluded (RC-2 fix). 'timeout' means the probe
+   * was KILLED at the EXEC_TIMEOUT budget — the directory may well be a git
+   * repo on a slow volume, so callers must NOT present it as "not a repo".
+   */
+  probeState: RepoProbeState
 }
 
 export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
@@ -989,10 +1003,11 @@ export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
     return inflight
   }
 
-  const task = (async () => {
+  const probeStartMs = Date.now()
+  const task: Promise<GitRepoMeta> = (async () => {
     const gitExecutable = await resolveGitExecutable()
     if (!gitExecutable) {
-      return { gitExecutable: null, repoRoot: null, gitDir: null, isRepo: false }
+      return { gitExecutable: null, repoRoot: null, gitDir: null, isRepo: false, probeState: 'error' as const }
     }
 
     // Run all three rev-parse queries in a single git invocation
@@ -1018,7 +1033,7 @@ export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
       // lines[0] = "true", lines[1] = repo root path, lines[2] = git dir path
       const isRepo = lines[0]?.trim() === 'true'
       if (!isRepo) {
-        return { gitExecutable, repoRoot: null, gitDir: null, isRepo: false }
+        return { gitExecutable, repoRoot: null, gitDir: null, isRepo: false, probeState: 'not-repo' as const }
       }
       const repoRootRaw = lines[1]?.trim() || cwd
       const rawGitDir = lines[2]?.trim() || null
@@ -1026,16 +1041,34 @@ export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
       const gitDir = rawGitDir
         ? (normalizeGitPath(isAbsolute(rawGitDir) ? rawGitDir : resolve(repoRootRaw, rawGitDir)) || rawGitDir)
         : null
-      return { gitExecutable, repoRoot, gitDir, isRepo: true }
-    } catch {
-      return { gitExecutable, repoRoot: null, gitDir: null, isRepo: false }
+      return { gitExecutable, repoRoot, gitDir, isRepo: true, probeState: 'ok' as const }
+    } catch (error) {
+      // RC-2 fix (2026-07 bundles): a probe KILLED at the EXEC_TIMEOUT budget
+      // (network drive hang) is NOT the same statement as "not a repo".
+      // Classify it so callers can present "timed out" and so the cache can
+      // apply the exponential-backoff TTL instead of the short negative TTL.
+      const probeState = classifyRepoProbeError(error as { killed?: boolean; signal?: string | null; code?: string | number | null })
+      return { gitExecutable, repoRoot: null, gitDir: null, isRepo: false, probeState }
     }
   })()
 
   gitMetaInFlight.set(normalizedCwd, task)
   try {
     const value = await task
-    gitMetaCache.set(normalizedCwd, { value, at: Date.now() })
+    const prev = gitMetaCache.get(normalizedCwd)
+    // Consecutive-timeout strikes drive the backoff ladder (30s → 2min → 5min).
+    const timeoutStrikes = value.probeState === 'timeout'
+      ? ((prev?.value.probeState === 'timeout' ? prev.timeoutStrikes ?? 0 : 0) + 1)
+      : undefined
+    gitMetaCache.set(normalizedCwd, { value, at: Date.now(), timeoutStrikes })
+    // Diagnostic breadcrumb (P0 from the 2026-07 bundle analysis): make the
+    // probe outcome — especially timeout-vs-not-repo — visible in user traces.
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_REPO_META_PROBE_RESULT, {
+      cwd: normalizedCwd.slice(0, 512),
+      state: value.probeState,
+      durationMs: Date.now() - probeStartMs,
+      timeoutStrikes: timeoutStrikes ?? 0
+    })
     return value
   } finally {
     gitMetaInFlight.delete(normalizedCwd)
@@ -1055,6 +1088,15 @@ export function clearGitMetaCache(cwd?: string): void {
     gitMetaCache.clear()
     gitMetaInFlight.clear()
   }
+}
+
+/**
+ * Non-spawning read of the cached repo-meta value for a cwd (RC-2 retry
+ * path). Returns whatever is cached regardless of freshness — callers use it
+ * to decide whether a force load should evict a timeout-classified entry.
+ */
+export function peekGitRepoMetaCache(cwd: string): GitRepoMeta | null {
+  return gitMetaCache.get(resolve(cwd))?.value ?? null
 }
 
 /**
@@ -2157,6 +2199,15 @@ export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Pro
 }
 
 async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {
+  // RC-2 retry path: a force load (the user pressed refresh / retry) must be
+  // able to escape a timeout-classified negative that is still inside its
+  // backoff TTL — clear that one entry so the probe actually re-runs.
+  if (options?.force === true) {
+    const cachedMeta = peekGitRepoMetaCache(cwd)
+    if (cachedMeta?.probeState === 'timeout') {
+      clearGitMetaCache(cwd)
+    }
+  }
   // Use getGitRepoMeta (single git process) for install + repo + root checks
   const meta = await getGitRepoMeta(cwd)
   if (!meta.gitExecutable) {
@@ -2166,17 +2217,24 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
       isGitRepo: false,
       gitInstalled: false,
       files: [],
-      error: 'Git is not installed. Install Git first.'
+      error: 'Git is not installed. Install Git first.',
+      repoProbe: meta.probeState
     }
   }
   if (!meta.isRepo || !meta.repoRoot) {
+    // Timeout ≠ not-a-repo (RC-2): surface the distinction so the renderer
+    // shows "Git timed out on this directory (slow volume?)" + retry instead
+    // of the misleading "not a Git repository" empty state.
     return {
       success: false,
       cwd,
       isGitRepo: false,
       gitInstalled: true,
       files: [],
-      error: 'The current directory is not a Git repository.'
+      error: meta.probeState === 'timeout'
+        ? 'Git timed out while probing this directory.'
+        : 'The current directory is not a Git repository.',
+      repoProbe: meta.probeState
     }
   }
   const gitExecutable = meta.gitExecutable
@@ -2339,6 +2397,18 @@ export async function getGitHistory(
   branchOid?: string,
   refsDigest?: string
 ): Promise<GitHistoryResult> {
+  // RC-2 retry path (parity with loadGitDiff's force branch): a first-page
+  // load (skip === 0) only happens on a user action — opening the History
+  // panel, switching repos, or pressing the timeout-state retry button — so
+  // it may escape a timeout-classified negative still inside its backoff
+  // TTL. Pagination loads (skip > 0) can only follow a successful first
+  // page and never hit this.
+  if (skip === 0) {
+    const cachedMeta = peekGitRepoMetaCache(cwd)
+    if (cachedMeta?.probeState === 'timeout') {
+      clearGitMetaCache(cwd)
+    }
+  }
   // Use getGitRepoMeta (single git process) for install + repo + root checks
   const repoMeta = await getGitRepoMeta(cwd)
   if (!repoMeta.gitExecutable) {
@@ -2348,17 +2418,23 @@ export async function getGitHistory(
       isGitRepo: false,
       gitInstalled: false,
       commits: [],
-      error: 'Git is not installed. Install Git first.'
+      error: 'Git is not installed. Install Git first.',
+      repoProbe: repoMeta.probeState
     }
   }
   if (!repoMeta.isRepo || !repoMeta.repoRoot) {
+    // Timeout ≠ not-a-repo (RC-2): let the History surface render the
+    // "probe timed out" state instead of the misleading "not a repo".
     return {
       success: false,
       cwd,
       isGitRepo: false,
       gitInstalled: true,
       commits: [],
-      error: 'The current directory is not a Git repository.'
+      error: repoMeta.probeState === 'timeout'
+        ? 'Git timed out while probing this directory.'
+        : 'The current directory is not a Git repository.',
+      repoProbe: repoMeta.probeState
     }
   }
   const gitExecutable = repoMeta.gitExecutable

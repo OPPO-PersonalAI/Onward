@@ -793,6 +793,34 @@ body.git-history-resizing .git-history-file-resizer::after {
   text-align: center;
 }
 
+/* RC-2 probe-timeout state stacks title / message / retry vertically without
+   touching the base warning layout used by the other states. */
+.git-history-warning--probe-timeout {
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* RC-2 probe-timeout retry (escapes the timeout-backoff cache via a reset load) */
+.git-history-warning-retry {
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: var(--font-sm);
+  cursor: pointer;
+}
+
+.git-history-warning-retry:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text-1);
+}
+
+.git-history-warning-retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Diff-pane empty state (no file selected) now uses the shared
    <DiffEmptyState> component + .diff-empty-state styles in
    src/components/common/DiffEmptyState.css, kept identical to Git Diff. */

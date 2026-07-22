@@ -63,6 +63,7 @@ import { gitignoreToWatchIgnoreGlobs } from './git-gitignore-watch-globs'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { MirrorRecomputeGovernor, type RecomputeAdmitKind } from './git-state-mirror-recompute-governor'
+import { classifyRepoProbeError, repoProbeBackoffTtlMs, type RepoProbeState } from './git-meta-cache-policy'
 
 import type {
   MainToMirrorMessage,
@@ -379,23 +380,53 @@ interface RepoMeta {
   isRepo: boolean
   repoRoot: string | null
   gitDir: string | null
+  probeState: RepoProbeState
 }
 
+// RC-2 backoff (2026-07 bundles): a cwd whose rev-parse was KILLED at the
+// exec budget (hanging network volume) must not be re-probed on every
+// focus/watcher/reconcile trigger — each re-probe stalls this worker for the
+// full EXEC_TIMEOUT_MS. Consecutive timeouts climb the shared backoff ladder
+// (30 s → 2 min → 5 min); any successful or clean-negative probe resets it.
+const repoProbeTimeoutBackoff = new Map<string, { strikes: number; lastAt: number }>()
+
 async function getRepoMeta(cwd: string): Promise<RepoMeta> {
+  const backoff = repoProbeTimeoutBackoff.get(cwd)
+  if (backoff) {
+    const ttl = repoProbeBackoffTtlMs(backoff.strikes)
+    const elapsed = Date.now() - backoff.lastAt
+    if (elapsed < ttl) {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECOMPUTE_DEFERRED, {
+        cwd,
+        reason: 'probe-backoff',
+        retryInMs: ttl - elapsed,
+        trigger: 'repo-meta'
+      })
+      return { isRepo: false, repoRoot: null, gitDir: null, probeState: 'timeout' }
+    }
+  }
   try {
     const out = await spawnGit(['rev-parse', '--is-inside-work-tree', '--show-toplevel', '--git-dir'], cwd)
     const lines = out.trim().split(/\r?\n/)
     const isRepo = lines[0]?.trim() === 'true'
-    if (!isRepo) return { isRepo: false, repoRoot: null, gitDir: null }
+    repoProbeTimeoutBackoff.delete(cwd)
+    if (!isRepo) return { isRepo: false, repoRoot: null, gitDir: null, probeState: 'not-repo' }
     const repoRootRaw = lines[1]?.trim() || cwd
     const gitDirRaw = lines[2]?.trim() || null
     const repoRoot = repoRootRaw.replace(/\\/g, '/')
     const gitDir = gitDirRaw
       ? (isAbsolute(gitDirRaw) ? gitDirRaw : resolvePath(repoRootRaw, gitDirRaw)).replace(/\\/g, '/')
       : null
-    return { isRepo: true, repoRoot, gitDir }
-  } catch {
-    return { isRepo: false, repoRoot: null, gitDir: null }
+    return { isRepo: true, repoRoot, gitDir, probeState: 'ok' }
+  } catch (error) {
+    const probeState = classifyRepoProbeError(error as { killed?: boolean; signal?: string | null; code?: string | number | null })
+    if (probeState === 'timeout') {
+      const prev = repoProbeTimeoutBackoff.get(cwd)
+      repoProbeTimeoutBackoff.set(cwd, { strikes: (prev?.strikes ?? 0) + 1, lastAt: Date.now() })
+    } else {
+      repoProbeTimeoutBackoff.delete(cwd)
+    }
+    return { isRepo: false, repoRoot: null, gitDir: null, probeState }
   }
 }
 
@@ -420,7 +451,10 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       files: [],
       capturedAt,
       changeFingerprint: '',
-      generation
+      generation,
+      // RC-2: 'timeout' rides the snapshot to the renderer so Git surfaces
+      // can render "probe timed out" instead of the misleading "not a repo".
+      repoProbe: meta.probeState
     }
   }
 
@@ -472,7 +506,8 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       files: parsed.files,
       capturedAt,
       changeFingerprint: changeFingerprint.fingerprint,
-      generation
+      generation,
+      repoProbe: 'ok'
     }
   } catch (error) {
     log('warn', 'git status failed; emitting unknown state', {
@@ -488,7 +523,10 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       files: [],
       capturedAt,
       changeFingerprint: 'unknown',
-      generation
+      generation,
+      // The repo probe itself succeeded (we have a repoRoot); only the
+      // status call failed.
+      repoProbe: 'ok'
     }
   }
 }
@@ -575,7 +613,10 @@ async function runRecompute(
     fileCount: next.files.length,
     branch: next.branch,
     status: next.status,
-    durationMs: Date.now() - startedAt
+    durationMs: Date.now() - startedAt,
+    // RC-2 classification: distinguishes "probe answered not-a-repo" from
+    // "probe was killed at the budget" in user-attached traces.
+    repoProbe: next.repoProbe ?? null
   })
   entry.recomputeInFlight = false
   if (entry.recomputeQueued && !entry.detachRequested && !shuttingDown) {

@@ -105,7 +105,22 @@ const WORKER_SHUTDOWN_TIMEOUT_MS = 15_000
 const ACK_TERMINATE_GRACE_MS = 1_000
 
 type MirrorUpdateListener = (cwd: string, state: MirrorState, delta: MirrorDelta) => void
-type CwdChangeListener = (terminalId: string, prevCwd: string | null, nextCwd: string | null) => void
+/**
+ * Where a terminal-cwd push originated (2026-07 bundle fix — the merged
+ * analysis could not tell whether machine 3's Y: switch came from the manual
+ * button or a typed `cd`):
+ *   'osc-renderer'  xterm.js OSC parse → pushCwd IPC (shell-derived proof)
+ *   'osc-main'      pty-manager detectCwd on the raw PTY stream (shell-derived proof)
+ *   'main-probe'    getTerminalCwd probe (attach/lsof/cwdMap — NOT shell proof)
+ *   'unknown'       legacy callers that predate the source field
+ */
+export type TerminalCwdPushSource = 'osc-renderer' | 'osc-main' | 'main-probe' | 'unknown'
+export type CwdChangeListener = (
+  terminalId: string,
+  prevCwd: string | null,
+  nextCwd: string | null,
+  source: TerminalCwdPushSource
+) => void
 
 class GitStateMirrorRouter {
   private worker: Worker | null = null
@@ -608,7 +623,9 @@ class GitStateMirrorRouter {
     })
 
     ipcMain.on(IPC.GIT_STATE_PUSH_CWD, (_event, terminalId: string, rawCwd: string | null) => {
-      this.pushTerminalCwd(terminalId, rawCwd)
+      // The renderer only sends this channel from the xterm OSC parse path —
+      // it is a shell-derived proof of the actual working directory.
+      this.pushTerminalCwd(terminalId, rawCwd, 'osc-renderer')
     })
 
     ipcMain.handle(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY, (_event, rawCwd: string, fileKey: string, force: boolean) => {
@@ -981,11 +998,16 @@ class GitStateMirrorRouter {
     return this.terminalCwds.get(terminalId) ?? null
   }
 
+  /** Snapshot of every terminal's last-pushed cwd (diagnostic bundle input). */
+  getAllTerminalCwds(): Array<{ terminalId: string; cwd: string | null }> {
+    return Array.from(this.terminalCwds.entries()).map(([terminalId, cwd]) => ({ terminalId, cwd }))
+  }
+
   canonicaliseCwd(rawCwd: string): string {
     return canonicalise(rawCwd)
   }
 
-  pushTerminalCwd(terminalId: string, rawCwd: string | null): void {
+  pushTerminalCwd(terminalId: string, rawCwd: string | null, source: TerminalCwdPushSource = 'unknown'): void {
     if (typeof terminalId !== 'string' || !terminalId) return
     const newCwd = rawCwd ? resolveExistingTerminalCwd(rawCwd) : null
     if (rawCwd && !newCwd) {
@@ -1010,14 +1032,15 @@ class GitStateMirrorRouter {
     performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_SWITCHED, {
       terminalId,
       prevCwd,
-      nextCwd: newCwd
+      nextCwd: newCwd,
+      source
     })
     this.postToWorker({ kind: 'switch-cwd', terminalId, newCwd })
     // Notify main-process listeners after worker is informed so the
     // bridge can swap its mirror subscription onto the new cwd.
     for (const listener of this.cwdChangeListeners) {
       try {
-        listener(terminalId, prevCwd, newCwd)
+        listener(terminalId, prevCwd, newCwd, source)
       } catch (error) {
         console.warn('[GitStateMirrorRouter] cwd-change listener threw:', error)
       }

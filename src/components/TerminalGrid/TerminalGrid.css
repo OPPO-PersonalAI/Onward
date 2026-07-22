@@ -662,3 +662,62 @@
     transform: translateY(0);
   }
 }
+
+/* Shell-integration liveness hint (2026-07 bundle fix): shown when the
+   terminal produced no shell-derived cwd OSC within the liveness window.
+   Clicking it opens the verified "Change Working Directory" flow. */
+.terminal-grid-integration-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(240, 198, 116, 0.45);
+  background: rgba(240, 198, 116, 0.16);
+  color: var(--text-2);
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  user-select: none;
+  flex-shrink: 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.terminal-grid-integration-hint:hover {
+  background: rgba(240, 198, 116, 0.28);
+}
+
+/* Verified change-workdir failure notice (RC-3 fix): transient, dismissible,
+   anchored to the top of the grid so it never covers the prompt area. */
+.terminal-grid-workdir-notice {
+  position: absolute;
+  top: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(560px, calc(100% - 32px));
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  background: color-mix(in srgb, var(--bg-2) 88%, rgb(239, 68, 68) 12%);
+  color: var(--text-1);
+  font-size: 12px;
+  box-shadow: var(--shadow-1);
+}
+
+.terminal-grid-workdir-notice-close {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.terminal-grid-workdir-notice-close:hover {
+  color: var(--text-1);
+}

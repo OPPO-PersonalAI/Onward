@@ -14,7 +14,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isMetaCacheEntryFresh } from '../../electron/main/git-meta-cache-policy.ts'
+import {
+  classifyRepoProbeError,
+  isMetaCacheEntryFresh,
+  repoProbeBackoffTtlMs,
+  REPO_PROBE_TIMEOUT_BACKOFF_MS
+} from '../../electron/main/git-meta-cache-policy.ts'
 
 const TTL = 1000
 
@@ -34,4 +39,50 @@ test('the TTL boundary is exclusive on the upper edge for negatives', () => {
   const entry = { value: { isRepo: false }, at: 0 }
   assert.equal(isMetaCacheEntryFresh(entry, 999, TTL), true)
   assert.equal(isMetaCacheEntryFresh(entry, 1000, TTL), false)
+})
+
+// ───── RC-2 (2026-07 bundles): timeout probes get exponential backoff, ─────
+// ───── not the short negative TTL — a hanging network volume must not  ─────
+// ───── stall the git lane 10 s on every focus/watcher trigger.         ─────
+
+test('backoff ladder: strikes map to 30s → 2min → 5min, capped', () => {
+  assert.equal(repoProbeBackoffTtlMs(1), REPO_PROBE_TIMEOUT_BACKOFF_MS[0])
+  assert.equal(repoProbeBackoffTtlMs(2), REPO_PROBE_TIMEOUT_BACKOFF_MS[1])
+  assert.equal(repoProbeBackoffTtlMs(3), REPO_PROBE_TIMEOUT_BACKOFF_MS[2])
+  assert.equal(repoProbeBackoffTtlMs(99), REPO_PROBE_TIMEOUT_BACKOFF_MS[2], 'ladder caps at the last rung')
+  assert.equal(repoProbeBackoffTtlMs(0), REPO_PROBE_TIMEOUT_BACKOFF_MS[0], 'zero strikes clamps to the first rung')
+})
+
+test('a timeout entry stays fresh through the backoff window, then expires', () => {
+  const entry = { value: { isRepo: false, probeState: 'timeout' as const }, at: 0, timeoutStrikes: 1 }
+  assert.equal(isMetaCacheEntryFresh(entry, 29_999, TTL), true, 'inside 30 s → no re-probe')
+  assert.equal(isMetaCacheEntryFresh(entry, 30_000, TTL), false, 'past 30 s → re-probe allowed')
+})
+
+test('consecutive strikes lengthen the freshness window', () => {
+  const strike3 = { value: { isRepo: false, probeState: 'timeout' as const }, at: 0, timeoutStrikes: 3 }
+  assert.equal(isMetaCacheEntryFresh(strike3, 200_000, TTL), true, 'strike 3 holds 5 min')
+  assert.equal(isMetaCacheEntryFresh(strike3, 300_000, TTL), false)
+})
+
+test('a plain not-repo entry is unaffected by the backoff ladder', () => {
+  const entry = { value: { isRepo: false, probeState: 'not-repo' as const }, at: 0 }
+  assert.equal(isMetaCacheEntryFresh(entry, 1500, TTL), false, 'short TTL still applies')
+})
+
+// ───── Probe-error classifier decision table ─────
+
+test('classifier: a timeout kill (killed/SIGTERM, no numeric code) → timeout', () => {
+  assert.equal(classifyRepoProbeError({ killed: true, signal: 'SIGTERM', code: null }), 'timeout')
+  assert.equal(classifyRepoProbeError({ killed: false, signal: 'SIGKILL', code: null }), 'timeout')
+})
+
+test('classifier: a numeric exit code (git answered) → not-repo', () => {
+  assert.equal(classifyRepoProbeError({ killed: false, signal: null, code: 128 }), 'not-repo')
+  assert.equal(classifyRepoProbeError({ code: 1 }), 'not-repo')
+})
+
+test('classifier: spawn failures (string code / nothing) → error', () => {
+  assert.equal(classifyRepoProbeError({ code: 'ENOENT' }), 'error')
+  assert.equal(classifyRepoProbeError({}), 'error')
 })

@@ -4,17 +4,26 @@
  *
  * ConPTY / PTY-level wiring test for shell-integration cwd OSC emission.
  *
- * The bug this locks: on Windows, pwsh.ps1 used to assign to the read-only
- * `$host` automatic variable, which made the prompt function throw. PowerShell
- * then discarded the whole prompt (including the OSC writes) and showed the
- * bare `PS>` fallback, so NOT A SINGLE cwd OSC reached the renderer and the
- * Task status bar never reflected `cd`. The parser unit tests stayed green the
- * whole time because the parser was never the problem — the SHELL never spoke.
+ * Bugs this locks:
+ *   1. (historic) pwsh.ps1 assigned to the read-only `$host` automatic
+ *      variable, which made the prompt function throw and PowerShell fall
+ *      back to the bare `PS>` prompt — zero cwd OSC ever reached the
+ *      renderer.
+ *   2. (RC-1, 2026-07 bundles) the pwsh.ps1 DOT-SOURCE was blocked outright
+ *      by script execution policy on locked-down machines (PSSecurityException
+ *      / UnauthorizedAccess), killing cwd tracking for the whole session.
+ *      The fix passes the prompt wrapper INLINE via `-Command`, which no
+ *      file-execution gate applies to. The Windows matrix here therefore
+ *      runs TWICE: default policy AND PSExecutionPolicyPreference=Restricted
+ *      — the Restricted pass proves the policy immunity.
+ *   3. (RC-3) the verified "change working directory" command must emit its
+ *      own OSC 633 proof even with no integration prompt installed.
  *
- * This test spawns the host's real default shell through node-pty with the same
- * integration the app injects (see electron/main/pty-manager.ts), drives a
- * sequence of real `cd` commands, and asserts the shell emits a cwd-bearing OSC
- * (633 `P;Cwd=`, 7 `file://`, or 9;9) that decodes to each new directory.
+ * The launch args are NOT hand-copied: the inline payload and the verified
+ * cd command are extracted from the REAL production modules
+ * (electron/main/powershell-inline-integration.ts, src/utils/terminal-command.ts)
+ * via a `--experimental-strip-types` child, so a content regression there is
+ * caught here without parity drift.
  *
  * Run under Electron's ABI so node-pty's native binary matches:
  *   ELECTRON_RUN_AS_NODE=1 <electron> test/autotest/test-shell-integration-cwd.mjs
@@ -25,7 +34,7 @@
  */
 
 import { createRequire } from 'node:module'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
@@ -59,6 +68,41 @@ process.on('uncaughtException', (error) => {
 
 function log(msg) { console.log(msg) }
 
+/**
+ * Evaluate a snippet against the PRODUCTION TS modules via a strip-types
+ * child (works under plain node and ELECTRON_RUN_AS_NODE alike; both are
+ * Node ≥ 22.6). stdout carries the single ONWARD_EVAL result line.
+ */
+function evalFromProductionTs(script) {
+  const out = execFileSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], {
+    timeout: 30000,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '' },
+    stdio: ['ignore', 'pipe', 'pipe']
+  }).toString()
+  const lines = out.split(/\r?\n/).filter((l) => l.startsWith('ONWARD_EVAL:'))
+  if (lines.length !== 1) {
+    throw new Error(`strip-types eval produced ${lines.length} result lines; raw: ${out.slice(0, 400)}`)
+  }
+  return JSON.parse(lines[0].slice('ONWARD_EVAL:'.length))
+}
+
+function getInlinePsPayload() {
+  const mod = pathToFileURL(join(REPO_ROOT, 'electron', 'main', 'powershell-inline-integration.ts')).href
+  return evalFromProductionTs(
+    `import { buildPowerShellInlineIntegrationCommand } from '${mod.replace(/'/g, "\\'")}';` +
+    `console.log('ONWARD_EVAL:' + JSON.stringify(buildPowerShellInlineIntegrationCommand()))`
+  )
+}
+
+function getVerifiedCdCommand(platform, directory, shellKind) {
+  const mod = pathToFileURL(join(REPO_ROOT, 'src', 'utils', 'terminal-command.ts')).href
+  return evalFromProductionTs(
+    `import { buildVerifiedChangeDirectoryCommand } from '${mod.replace(/'/g, "\\'")}';` +
+    `console.log('ONWARD_EVAL:' + JSON.stringify(buildVerifiedChangeDirectoryCommand(` +
+    `${JSON.stringify(platform)}, ${JSON.stringify(directory)}, ${JSON.stringify(shellKind)})))`
+  )
+}
+
 // Mirror PtyManager.resolveWindowsShell(): prefer pwsh.exe, then powershell.exe.
 function resolveWindowsShell() {
   for (const candidate of ['pwsh.exe', 'powershell.exe']) {
@@ -71,17 +115,16 @@ function resolveWindowsShell() {
   return process.env.COMSPEC || 'cmd.exe'
 }
 
-// Build (shell, args, env) mirroring electron/main/pty-manager.ts after the
-// getWindowsShellArgs cleanup. Dot-sources / sources the REAL committed scripts
-// so a content regression in pwsh.ps1 / bash.sh is caught here.
-function buildLaunch() {
-  const env = { ...process.env, ONWARD_SHELL_INTEGRATION: '1' }
+// Build (shell, args, env) mirroring electron/main/pty-manager.ts. PowerShell
+// uses the REAL inline -Command payload extracted from the production module
+// (RC-1 fix — the old dot-source form is exactly what policy blocked).
+function buildLaunch(extraEnv = {}) {
+  const env = { ...process.env, ONWARD_SHELL_INTEGRATION: '1', ...extraEnv }
   if (IS_WINDOWS) {
     const shell = resolveWindowsShell()
     const lower = shell.toLowerCase()
     if (lower.includes('powershell') || lower.includes('pwsh')) {
-      const ps1 = join(INTEGRATION_DIR, 'pwsh.ps1')
-      return { shell, args: ['-NoLogo', '-NoExit', '-Command', `. '${ps1.replace(/'/g, "''")}'`], env, kind: 'powershell' }
+      return { shell, args: ['-NoLogo', '-NoExit', '-Command', getInlinePsPayload()], env, kind: 'powershell' }
     }
     // cmd.exe: OSC 9;9 via the PROMPT env var (mirrors create()).
     env.PROMPT = '$e]9;9;$P$e\\$P$G'
@@ -126,20 +169,15 @@ function extractOscCwds(buf) {
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function main() {
-  const launch = buildLaunch()
-  log(`shell-integration-cwd: platform=${process.platform} kind=${launch.kind} shell=${launch.shell}`)
-  log(`shell-integration-cwd: args=${JSON.stringify(launch.args)}`)
+// Any cwd-bearing OSC introducer — used to detect that the integration's
+// first prompt has rendered before we start driving cd commands.
+const FIRST_OSC_RE = /\x1b\](?:633;P;Cwd=|9;9;|7;file:\/\/)/
 
-  // Per-suite scratch under the OS temp dir (CLAUDE.md fixture isolation).
-  const scratch = mkdtempSync(join(tmpdir(), 'onward-si-cwd-'))
-  const targets = []
-  for (let i = 0; i < TRIALS; i++) {
-    const d = join(scratch, `dir${i}`)
-    mkdirSync(d, { recursive: true })
-    targets.push(d)
-  }
-
+/**
+ * Drive one PTY session: cd through `targets` with plain cd commands, then
+ * (when provided) run the verified-cd command. Returns the raw output buffer.
+ */
+async function driveSession(launch, targets, verifiedCommand) {
   let term
   let buf = ''
   try {
@@ -152,11 +190,27 @@ async function main() {
     })
     term.onData((d) => { buf += d })
 
-    // Let the shell finish startup and render its first prompt.
-    await delay(IS_WINDOWS ? 4500 : 2500)
+    // Adaptive startup wait (flake hardening): instead of a blind sleep,
+    // wait until the integration's FIRST prompt has actually emitted a cwd
+    // OSC (bounded at 15 s — mirrors the app's liveness window), then give
+    // the prompt a short settle. A cold ConPTY + EDR-taxed PowerShell start
+    // can exceed any fixed guess under parallel machine load; driving cd
+    // before the first prompt races the shell and loses trials.
+    const startupDeadline = Date.now() + 15_000
+    while (!FIRST_OSC_RE.test(buf) && Date.now() < startupDeadline) {
+      await delay(200)
+    }
+    if (!FIRST_OSC_RE.test(buf)) {
+      log('[AutoTest] WARN first prompt OSC not seen within 15s — proceeding (assertions will tell)')
+    }
+    await delay(IS_WINDOWS ? 800 : 400)
 
-    for (let i = 0; i < TRIALS; i++) {
-      term.write(`cd "${targets[i]}"\r`)
+    for (const target of targets) {
+      term.write(`cd "${target}"\r`)
+      await delay(IS_WINDOWS ? 1600 : 900)
+    }
+    if (verifiedCommand) {
+      term.write(verifiedCommand)
       await delay(IS_WINDOWS ? 1600 : 900)
     }
     // Final settle so the last prompt's OSC lands in the buffer.
@@ -164,36 +218,77 @@ async function main() {
   } finally {
     try { term && term.kill() } catch { /* ignore */ }
   }
+  return buf
+}
 
+function assertTargetsDetected(buf, targets, idPrefix) {
   const detected = new Set(extractOscCwds(buf))
-  const wantedRoot = norm(scratch)
-  log(`shell-integration-cwd: OSC cwds detected=${detected.size} (root=${wantedRoot})`)
-
   let hits = 0
-  for (let i = 0; i < TRIALS; i++) {
-    const want = norm(targets[i])
+  targets.forEach((target, i) => {
+    const want = norm(target)
     const ok = detected.has(want)
     if (ok) hits++
-    log(`[AutoTest] ${ok ? 'PASS' : 'FAIL'} SIC-0${i + 1} cd dir${i} -> cwd OSC ${ok ? 'emitted' : 'MISSING'} (${want})`)
+    log(`[AutoTest] ${ok ? 'PASS' : 'FAIL'} ${idPrefix}-0${i + 1} cd dir${i} -> cwd OSC ${ok ? 'emitted' : 'MISSING'} (${want})`)
+  })
+  return hits
+}
+
+async function main() {
+  // Per-suite scratch under the OS temp dir (CLAUDE.md fixture isolation).
+  const scratch = mkdtempSync(join(tmpdir(), 'onward-si-cwd-'))
+  const targets = []
+  for (let i = 0; i < TRIALS; i++) {
+    const d = join(scratch, `dir${i}`)
+    mkdirSync(d, { recursive: true })
+    targets.push(d)
+  }
+  const verifiedTargetDir = join(scratch, 'verified-target')
+  mkdirSync(verifiedTargetDir, { recursive: true })
+
+  let failed = false
+  try {
+    // ── Scenario A: default policy, integration prompt installed ──
+    const launchA = buildLaunch()
+    log(`shell-integration-cwd: platform=${process.platform} kind=${launchA.kind} shell=${launchA.shell}`)
+    const shellKind = launchA.kind === 'powershell' ? 'powershell' : (launchA.kind === 'cmd' ? 'cmd' : 'posix')
+    const verifiedCmd = getVerifiedCdCommand(process.platform, verifiedTargetDir, shellKind)
+    const bufA = await driveSession(launchA, targets, verifiedCmd)
+    const hitsA = assertTargetsDetected(bufA, targets, 'SIC')
+    if (hitsA < TRIALS) {
+      log(`[AutoTest] FAIL SIC-00 only ${hitsA}/${TRIALS} cd operations produced a cwd OSC`)
+      failed = true
+    } else {
+      log(`[AutoTest] PASS SIC-00 all ${TRIALS}/${TRIALS} cd operations produced a matching cwd OSC`)
+    }
+    // Verified-cd proof (RC-3): the command itself must emit the target cwd.
+    const verifiedOk = new Set(extractOscCwds(bufA)).has(norm(verifiedTargetDir))
+    log(`[AutoTest] ${verifiedOk ? 'PASS' : 'FAIL'} SIC-VC-01 verified change-workdir command emitted its own OSC proof`)
+    if (!verifiedOk) failed = true
+
+    // ── Scenario B (Windows PowerShell only): Restricted execution policy.
+    // The inline -Command payload must be immune — this is THE RC-1 fix
+    // assertion. The old dot-source form dies here with PSSecurityException.
+    if (IS_WINDOWS && launchA.kind === 'powershell') {
+      const launchB = buildLaunch({ PSExecutionPolicyPreference: 'Restricted' })
+      const bufB = await driveSession(launchB, targets, verifiedCmd)
+      const hitsB = assertTargetsDetected(bufB, targets, 'SIC-R')
+      if (hitsB < TRIALS) {
+        log(`[AutoTest] FAIL SIC-R-00 Restricted policy: only ${hitsB}/${TRIALS} cd operations produced a cwd OSC — inline payload lost its policy immunity`)
+        failed = true
+      } else {
+        log(`[AutoTest] PASS SIC-R-00 Restricted policy: all ${TRIALS}/${TRIALS} cd operations produced a cwd OSC (inline -Command is policy-immune)`)
+      }
+      const verifiedOkB = new Set(extractOscCwds(bufB)).has(norm(verifiedTargetDir))
+      log(`[AutoTest] ${verifiedOkB ? 'PASS' : 'FAIL'} SIC-R-VC-01 verified change-workdir proof under Restricted policy`)
+      if (!verifiedOkB) failed = true
+    }
+  } finally {
+    // Cleanup scratch (success or failure).
+    try { rmSync(scratch, { recursive: true, force: true }) } catch { /* ignore */ }
   }
 
-  // Cleanup scratch (success or failure).
-  try { rmSync(scratch, { recursive: true, force: true }) } catch { /* ignore */ }
-
-  if (hits === 0) {
-    log('[AutoTest] FAIL SIC-00 no cwd OSC emitted at all — shell integration is not speaking')
-    log('shell-integration-cwd:complete')
-    process.exit(1)
-  }
-  if (hits < TRIALS) {
-    log(`[AutoTest] FAIL SIC-00 only ${hits}/${TRIALS} cd operations produced a cwd OSC`)
-    log('shell-integration-cwd:complete')
-    process.exit(1)
-  }
-
-  log(`[AutoTest] PASS SIC-00 all ${TRIALS}/${TRIALS} cd operations produced a matching cwd OSC`)
   log('shell-integration-cwd:complete')
-  process.exit(0)
+  process.exit(failed ? 1 : 0)
 }
 
 main().catch((err) => {
