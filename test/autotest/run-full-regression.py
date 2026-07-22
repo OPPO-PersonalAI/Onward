@@ -197,8 +197,16 @@ SCRIPTS: List[str] = [
     "test/autotest/run-mermaid-panzoom-autotest.sh",
     "test/autotest/run-modal-dismiss-autotest.sh",
     "test/autotest/run-pdf-epub-diff-autotest.sh",
-    "test/autotest/run-pdf-epub-full-autotest.sh",
-    "test/autotest/run-pdf-epub-preview-autotest.sh",
+    # Budget split (2026-07-22): the combined preview suite (900 s override)
+    # and the full umbrella (1200 s) were the over-budget backlog. Preview now
+    # runs as three group runners (pdf / pdf-outline / epub — see
+    # src/autotest/pdf-epub-preview-group.ts). run-pdf-epub-full remains on
+    # disk as a MANUAL umbrella (preview all-groups + diff in one session) but
+    # is out of the gate: its assertions are 100% covered by the group runners
+    # plus run-pdf-epub-diff above.
+    "test/autotest/run-pdf-epub-preview-pdf-autotest.sh",
+    "test/autotest/run-pdf-epub-preview-pdf-outline-autotest.sh",
+    "test/autotest/run-pdf-epub-preview-epub-autotest.sh",
     "test/autotest/run-performance-trace-autotest.sh",
     "test/autotest/run-preview-search-autotest.sh",
     "test/autotest/run-project-editor-file-memory-autotest.sh",
@@ -357,17 +365,22 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # < 300s (NOT over-budget backlog), ~25s on a healthy host. Internal fixture ceiling (150s) stays <
     # this timeout so a real fixture-build hang fails the GHMS-04 assertion, not an opaque timeout.
     "test/autotest/run-git-history-multi-terminal-scope-autotest.sh": 280,
-    # PDF / EPUB suites render large binary fixtures through PDF.js; the test
-    # source for pdf-epub-preview alone is 1000+ lines covering font, outline,
-    # search, and state-restore.  Measured: 88 assertions completed in 600s
-    # (pdf-state-scale-changed, near end of suite) — needs ~120s more headroom.
-    "test/autotest/run-pdf-epub-preview-autotest.sh": 900,
-    # pdf-epub-full adds diff + history on top of preview.
-    "test/autotest/run-pdf-epub-full-autotest.sh": 1200,
+    # PDF/EPUB preview budget split (2026-07-22): the combined suite measured
+    # 30.7 s on a healthy Windows host but 600+ s on the EDR-taxed host that
+    # motivated the old 900 s override (~20× tax). Three group runners each
+    # carry ~1/3 of the assertions → ≤ ~240 s worst case; 280 s (< 300 budget)
+    # leaves margin without re-entering the over-budget backlog.
+    "test/autotest/run-pdf-epub-preview-pdf-autotest.sh": 280,
+    "test/autotest/run-pdf-epub-preview-pdf-outline-autotest.sh": 280,
+    "test/autotest/run-pdf-epub-preview-epub-autotest.sh": 280,
     "test/autotest/run-preview-search-autotest.sh": 300,
-    # Longtail suite simulates many keystrokes across 5+ latency scenarios;
-    # 180s default is not enough on Windows dev boxes.
-    "test/autotest/run-prompt-input-longtail-autotest.sh": 360,
+    # Longtail is a SINGLE 72 s statistical sampling window (900 samples ×
+    # 80 ms) + setup/teardown — splitting the window would change what it
+    # measures (long-tail detection needs the long window), so it is not
+    # splittable. Measured 152.7 s end-to-end (2026-07-22, local Windows).
+    # 300 s = the budget ceiling (~2× headroom); the runner's internal marker
+    # deadline is 280 s so it fails cleanly before the orchestrator force-kill.
+    "test/autotest/run-prompt-input-longtail-autotest.sh": 300,
     # markdown-preview-cpu was split by phase. -scroll / -editor fit the default
     # 180s. The -idle phase (15s settle + idle CPU samples, each sample spawns a
     # process taxed 1-13s by EDR on this host) is the heaviest; its wrapper trims

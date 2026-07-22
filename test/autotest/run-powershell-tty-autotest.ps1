@@ -93,11 +93,15 @@ if ($ptyFile -match "cwdMap") {
   Fail "TC-2h" "cwdMap not found"
 }
 
-# TC-2i: EncodedCommand used for PowerShell (avoids quoting issues)
-if ($ptyFile -match "EncodedCommand") {
-  Pass "TC-2i: -EncodedCommand used for PowerShell prompt injection"
+# TC-2i: PowerShell integration is injected INLINE via -Command (RC-1 fix,
+# 2026-07 bundles: the pwsh.ps1 dot-source was blocked by script execution
+# policy on locked-down machines; a -Command string payload is exempt).
+# The previous form of this assertion grepped for "EncodedCommand", which
+# only survived inside a historical comment — assertion rot.
+if ($ptyFile -match "buildPowerShellInlineIntegrationCommand") {
+  Pass "TC-2i: inline -Command payload used for PowerShell prompt injection"
 } else {
-  Fail "TC-2i" "-EncodedCommand not found -- quoting issues likely"
+  Fail "TC-2i" "inline integration builder not referenced -- PS injection may have regressed to a policy-blockable script file"
 }
 
 # TC-2j: USERPROFILE fallback for initial CWD on Windows

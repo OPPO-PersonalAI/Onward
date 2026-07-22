@@ -2,16 +2,14 @@
 # SPDX-FileCopyrightText: 2026 OPPO
 # SPDX-License-Identifier: Apache-2.0
 #
-# Run the PDF/EPUB preview autotest suite against the packaged dev app.
+# EPUB group of the PDF/EPUB preview autotest (budget split).
 #
-# MANUAL UMBRELLA (out of the regression gate since 2026-07-22): runs the
-# suite with group=all. The regression set runs the same assertions as three
-# sub-300 s group runners instead (run-pdf-epub-preview-{pdf,pdf-outline,epub}
-# -autotest.sh) — this combined form measured 600+ s on the EDR-taxed host
-# and carried a 900 s override, the over-budget backlog.
+# See run-pdf-epub-preview-pdf-autotest.sh for the split rationale. This
+# runner covers the EPUB reader sections (open / toc / content / outline
+# panel / font size / search / shortcut + escape forwarding / recent-files).
 #
 # Usage:
-#   test/autotest/run-pdf-epub-preview-autotest.sh [APP_BIN] [LOG_FILE] [USER_DATA_DIR]
+#   test/autotest/run-pdf-epub-preview-epub-autotest.sh [APP_BIN] [LOG_FILE] [USER_DATA_DIR]
 
 set -euo pipefail
 
@@ -19,7 +17,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-}"
-LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/pdf-epub-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/pdf-epub-preview-epub-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
 USER_DATA_DIR="${3:-}"
 
@@ -35,10 +33,10 @@ cleanup() {
       onward_robust_rm "$USER_DATA_DIR"
     fi
   fi
-  # The TS autotest writes __autotest_pdf_preview.{pdf,outlined.pdf},
-  # __autotest_epub_preview.epub, __autotest_pdf_epub_marker.txt into
-  # ONWARD_AUTOTEST_CWD (the repo root). Sweep direct repo-root children
-  # matching `__autotest_*` so a mid-run crash never leaks into the tree.
+  # The TS autotest writes __autotest_epub_preview.epub and
+  # __autotest_pdf_epub_marker.txt into ONWARD_AUTOTEST_CWD (the repo root).
+  # Sweep direct repo-root children matching `__autotest_*` so a mid-run
+  # crash never leaks into the tree.
   shopt -s nullglob
   local leftovers=("$REPO_ROOT"/__autotest_*)
   shopt -u nullglob
@@ -57,7 +55,7 @@ if [[ -z "$APP_BIN" ]]; then
 fi
 
 if [[ -z "$USER_DATA_DIR" ]]; then
-  USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-autotest-pdf-epub-preview.XXXXXXXX")"
+  USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-autotest-pdf-epub-preview-epub.XXXXXXXX")"
   TMP_ROOT_OWNED=1
 fi
 
@@ -68,13 +66,13 @@ fi
 
 rm -f "$LOG_FILE"
 
-echo "Starting PDF/EPUB preview autotest..."
+echo "Starting PDF/EPUB preview autotest (group=epub)..."
 echo "[autotest] tmp dir: $USER_DATA_DIR"
 echo "App bin: $APP_BIN"
 
 ONWARD_DEBUG=1 \
 ONWARD_AUTOTEST=1 \
-ONWARD_AUTOTEST_SUITE=pdf-epub-preview \
+ONWARD_AUTOTEST_SUITE='pdf-epub-preview;group=epub' \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
 ONWARD_TELEMETRY_RESET_CONSENT=1 \
@@ -82,15 +80,15 @@ ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
 if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
-  echo "PDF/EPUB preview autotest failed. Log: $LOG_FILE" >&2
+  echo "PDF/EPUB preview (group=epub) autotest failed. Log: $LOG_FILE" >&2
   tail -n 200 "$LOG_FILE" >&2
   exit 1
 fi
 
 if ! grep -q "suite-done:PdfEpubPreview" "$LOG_FILE"; then
-  echo "PDF/EPUB preview autotest did not complete. Log: $LOG_FILE" >&2
+  echo "PDF/EPUB preview (group=epub) autotest did not complete. Log: $LOG_FILE" >&2
   tail -n 200 "$LOG_FILE" >&2
   exit 1
 fi
 
-echo "PDF/EPUB preview autotest passed. Log: $LOG_FILE"
+echo "PDF/EPUB preview (group=epub) autotest passed. Log: $LOG_FILE"

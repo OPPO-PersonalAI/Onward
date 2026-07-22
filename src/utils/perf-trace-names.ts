@@ -662,6 +662,31 @@ export const PERF_TRACE_EVENT = {
   RENDERER_TERMINAL_OSC_CWD_DETECTED: 'renderer:terminal.osc-cwd-detected',
   MAIN_GIT_STATE_MIRROR_CWD_SWITCHED: 'main:git-state-mirror.cwd-switched',
   MAIN_GIT_STATE_MIRROR_CWD_IGNORED: 'main:git-state-mirror.cwd-ignored',
+  // ───── Shell-integration liveness + verified manual cwd switch (2026-07
+  // bundle fixes: blocked pwsh.ps1 / optimistic change-workdir). All ph='i',
+  // all off-hot-path (once per terminal / once per user action). ─────
+  //
+  // Fired ONCE per terminal when no shell-derived cwd OSC (renderer push or
+  // main-side detectCwd) arrived within the liveness window after spawn.
+  // This is THE missing signal from the 2026-07-17 bundles: it separates
+  // "integration blocked by policy" from "user simply never cd'd".
+  MAIN_TERMINAL_SHELL_INTEGRATION_SILENT: 'main:terminal.shell-integration-silent',
+  // Late recovery: a shell-derived OSC arrived AFTER the silent event fired
+  // (e.g. the user fixed policy mid-session, or a very slow first prompt).
+  MAIN_TERMINAL_SHELL_INTEGRATION_RECOVERED: 'main:terminal.shell-integration-recovered',
+  // Verified manual "change working directory" transaction (RC-3 fix). The
+  // four stages let a user trace answer "did the click happen / was the cd
+  // written / did the shell actually confirm / why did it fail".
+  MAIN_TERMINAL_CHANGE_WORKDIR_REQUESTED: 'main:terminal.change-workdir-requested',
+  MAIN_TERMINAL_CHANGE_WORKDIR_WRITTEN: 'main:terminal.change-workdir-written',
+  MAIN_TERMINAL_CHANGE_WORKDIR_VERIFIED: 'main:terminal.change-workdir-verified',
+  MAIN_TERMINAL_CHANGE_WORKDIR_FAILED: 'main:terminal.change-workdir-failed',
+  // Repo-probe outcome (RC-2 fix): state = ok | not-repo | timeout | error.
+  // 'timeout' = rev-parse KILLED at the exec budget (hanging volume) — the
+  // legacy code silently misfiled this as "not a repo". Emitted once per
+  // uncached probe in main; the worker's recompute-status-done carries the
+  // same classification in its own payload.
+  MAIN_GIT_REPO_META_PROBE_RESULT: 'main:git.repo-meta.probe-result',
   // Diagnostic breadcrumb for the Bug A reject channel: emitted INSIDE
   // `broadcastCwdRejected` when main fans out the reject IPC to every live
   // renderer. Pair with `renderer:terminal.osc-cwd-rolled-back` to verify the

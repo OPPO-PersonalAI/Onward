@@ -22,6 +22,7 @@ import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { inflateRawSync } from 'zlib'
+import { execFileSync } from 'child_process'
 
 export interface DiagnosticBundleAppInfo {
   version: string
@@ -65,6 +66,12 @@ export interface CreateDiagnosticBundleOptions {
    * time. Tests pass a fixed value so README content is reproducible.
    */
   timestamp?: string
+  /**
+   * Live terminal cwds (terminalId → cwd) so system-info can classify the
+   * volume each terminal sits on (2026-07 RC-2: network drives explain the
+   * git probe timeouts). Optional — tests and headless callers omit it.
+   */
+  terminalCwds?: Array<{ terminalId: string; cwd: string | null }>
   /**
    * Autotest-only: drives V10. Production callers must not pass it; the
    * IPC handler refuses to forward this field unless `ONWARD_AUTOTEST=1`.
@@ -243,7 +250,7 @@ export async function createDiagnosticBundle(
     chunkBytes: chunkBytesTotal,
     missingStateFiles: missingFiles
   })
-  const systemInfoContent = renderSystemInfo({ isoTs, appInfo: opts.appInfo })
+  const systemInfoContent = renderSystemInfo({ isoTs, appInfo: opts.appInfo, terminalCwds: opts.terminalCwds })
   const agentGuideContent = renderAgentGuide({
     isoTs,
     appInfo: opts.appInfo,
@@ -621,6 +628,58 @@ function renderReadme(ctx: ReadmeContext): string {
 interface SystemInfoContext {
   isoTs: string
   appInfo?: DiagnosticBundleAppInfo
+  /** Live terminal cwds (terminalId → cwd) for volume classification. */
+  terminalCwds?: Array<{ terminalId: string; cwd: string | null }>
+}
+
+/**
+ * Read a PowerShell ExecutionPolicy value straight from the registry via
+ * `reg.exe` — an ordinary executable, so this NEVER trips the very script
+ * policies it is diagnosing (2026-07 bundles: the analysis could not tell
+ * Restricted from AllSigned-via-GPO from AppLocker without asking the user).
+ */
+function readRegistryExecutionPolicy(keyPath: string): string {
+  try {
+    const out = execFileSync('reg.exe', ['query', keyPath, '/v', 'ExecutionPolicy'], {
+      timeout: 2000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).toString()
+    const match = /ExecutionPolicy\s+REG_SZ\s+(\S+)/i.exec(out)
+    return match ? match[1] : '(value missing)'
+  } catch {
+    return '(not set)'
+  }
+}
+
+/**
+ * Classify the volume a terminal cwd lives on. UNC is a prefix check;
+ * mapped network drives are detected via `net.exe use X:` (exit 0 only for
+ * mapped drives). Both are plain executables — no script policy exposure.
+ */
+function classifyWindowsCwdVolume(
+  cwd: string,
+  mappedDriveCache: Map<string, boolean>
+): 'unc' | 'mapped-network' | 'local-or-unknown' {
+  if (/^\\\\/.test(cwd)) return 'unc'
+  const driveMatch = /^([A-Za-z]):[\\/]/.exec(cwd)
+  if (!driveMatch) return 'local-or-unknown'
+  const drive = driveMatch[1].toUpperCase()
+  let mapped = mappedDriveCache.get(drive)
+  if (mapped === undefined) {
+    try {
+      execFileSync('net.exe', ['use', `${drive}:`], {
+        timeout: 2000,
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'ignore']
+      })
+      mapped = true
+    } catch {
+      mapped = false
+    }
+    mappedDriveCache.set(drive, mapped)
+  }
+  return mapped ? 'mapped-network' : 'local-or-unknown'
 }
 
 function renderSystemInfo(ctx: SystemInfoContext): string {
@@ -656,6 +715,31 @@ function renderSystemInfo(ctx: SystemInfoContext): string {
       // can carry an ingestion key.
       const redacted = isLikelySecretEnv(key) ? '[redacted]' : value
       lines.push(`${key}=${redacted}`)
+    }
+  }
+  if (process.platform === 'win32') {
+    // 2026-07 bundle-analysis P1: the shell-integration RC-1 diagnosis
+    // needed the machine's script-policy environment and the cwd's volume
+    // class (network drives drive the RC-2 timeout) — neither was captured.
+    // All reads go through plain executables (reg.exe / net.exe); no
+    // PowerShell script is ever executed here.
+    lines.push('')
+    lines.push('# PowerShell execution policy (registry read; no script executed)')
+    lines.push(`psPolicy.MachinePolicy=${readRegistryExecutionPolicy('HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\PowerShell')}`)
+    lines.push(`psPolicy.UserPolicy=${readRegistryExecutionPolicy('HKCU\\SOFTWARE\\Policies\\Microsoft\\Windows\\PowerShell')}`)
+    lines.push(`psPolicy.CurrentUser=${readRegistryExecutionPolicy('HKCU\\SOFTWARE\\Microsoft\\PowerShell\\1\\ShellIds\\Microsoft.PowerShell')}`)
+    lines.push(`psPolicy.LocalMachine=${readRegistryExecutionPolicy('HKLM\\SOFTWARE\\Microsoft\\PowerShell\\1\\ShellIds\\Microsoft.PowerShell')}`)
+    if (ctx.terminalCwds && ctx.terminalCwds.length > 0) {
+      lines.push('')
+      lines.push('# Terminal cwd volume classes (unc | mapped-network | local-or-unknown)')
+      const mappedDriveCache = new Map<string, boolean>()
+      for (const { terminalId, cwd } of ctx.terminalCwds) {
+        if (!cwd) {
+          lines.push(`cwdVolume.${terminalId}=(no cwd)`)
+          continue
+        }
+        lines.push(`cwdVolume.${terminalId}=${classifyWindowsCwdVolume(cwd, mappedDriveCache)}`)
+      }
     }
   }
   lines.push('')

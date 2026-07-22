@@ -73,6 +73,8 @@ import {
   installContentCacheInvalidatorOnce
 } from './git-diff-content-cache-wiring'
 import { gitStateMirrorRouter } from './git-state-mirror-router'
+import { shellIntegrationLiveness } from './shell-integration-liveness'
+import { executeVerifiedChangeWorkDir } from './terminal-change-workdir'
 import { gitAutofetchManager } from './git-autofetch-manager'
 import { getUpdateService } from './update-service'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
@@ -545,7 +547,50 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // registers main-process listeners on the router at construction time.
   gitStateMirrorRouter.init(mainWindow)
   setTerminalCwdAuthorityResolver((terminalId) => gitStateMirrorRouter.getTerminalCwd(terminalId))
-  setTerminalCwdDetectedHandler((terminalId, cwd) => gitStateMirrorRouter.pushTerminalCwd(terminalId, cwd))
+  // 'main-probe' = attach-time / lsof-derived pushes — NOT shell-derived
+  // proof; the liveness tracker must ignore these (2026-07 bundle fix).
+  setTerminalCwdDetectedHandler((terminalId, cwd) => gitStateMirrorRouter.pushTerminalCwd(terminalId, cwd, 'main-probe'))
+  // Main-side OSC parse hook (cmd PROMPT 9;9 + PS inline 633/7 seen on the
+  // raw PTY stream): shell-derived proof for the liveness tracker, plus a
+  // router push when the value actually moved (the renderer's own OSC parse
+  // pushes the same value moments later — dedupe here keeps cwd-switched
+  // noise at the pre-fix level).
+  ptyManager.setOscCwdDetectedHandler((terminalId, cwd) => {
+    shellIntegrationLiveness.markShellProof(terminalId)
+    if (gitStateMirrorRouter.getTerminalCwd(terminalId) !== cwd) {
+      gitStateMirrorRouter.pushTerminalCwd(terminalId, cwd, 'osc-main')
+    }
+  })
+  // Renderer OSC pushes are equally valid liveness proof (xterm's stateful
+  // parser also catches sequences the chunk-level main regex missed).
+  gitStateMirrorRouter.onCwdChange((terminalId, _prev, _next, source) => {
+    if (source === 'osc-renderer') shellIntegrationLiveness.markShellProof(terminalId)
+  })
+  // Liveness verdicts → trace breadcrumb + renderer hint (per-terminal).
+  // The hint is the user's bridge to the verified manual switch when
+  // integration is blocked. Trace emission lives HERE (not in the tracker)
+  // so the tracker stays a pure leaf the unit test can load.
+  shellIntegrationLiveness.setCallbacks({
+    onSilent: (terminalId, shellKind, waitedMs) => {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_TERMINAL_SHELL_INTEGRATION_SILENT, {
+        terminalId,
+        shellKind,
+        waitedMs
+      })
+      if (!mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(IPC.TERMINAL_INTEGRATION_SILENT, terminalId, shellKind)
+      }
+    },
+    onRecovered: (terminalId, sinceSpawnMs) => {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_TERMINAL_SHELL_INTEGRATION_RECOVERED, {
+        terminalId,
+        sinceSpawnMs
+      })
+      if (!mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(IPC.TERMINAL_INTEGRATION_RECOVERED, terminalId)
+      }
+    }
+  })
 
   // Bridge replaces the polling GitWatchManager. It subscribes each
   // terminal to the Authority Worker for its current cwd and emits
@@ -1386,6 +1431,19 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
       ptyManager.registerListeners(id, [dataDisposable, exitDisposable])
 
+      // Arm the shell-integration liveness window for default-shell spawns
+      // only — a custom `command` (coding agent, etc.) has no prompt hook
+      // and would always report a false "silent". The command branch must
+      // also DISPOSE any prior entry: CODING_AGENT_LAUNCH re-creates the
+      // same terminalId over a direct ptyManager.dispose (which bypasses
+      // the TERMINAL_DISPOSE cleanup), and a stale waiting-timer from the
+      // pre-takeover shell would otherwise fire a false hint mid-agent.
+      if (!options?.command) {
+        shellIntegrationLiveness.start(id, ptyManager.getShellKind(id))
+      } else {
+        shellIntegrationLiveness.dispose(id)
+      }
+
       return { success: true, id }
     } catch (error) {
       console.error('Failed to create terminal:', error)
@@ -1576,6 +1634,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }, async () => await ptyManager.write(id, data), 'ipc')
   })
 
+  // Verified manual "change working directory" (RC-3 fix): validates the
+  // target, writes the cd + proof-OSC command, and resolves only after the
+  // shell's own cwd report confirms the switch. The renderer persists the
+  // cwd ONLY from a success result — no optimistic state anywhere.
+  ipcMain.handle(IPC.TERMINAL_CHANGE_WORKDIR_VERIFIED, async (_, id: string, targetPath: string) => {
+    if (typeof id !== 'string' || !id || typeof targetPath !== 'string' || !targetPath) {
+      return { success: false, reason: 'target-not-found' }
+    }
+    return executeVerifiedChangeWorkDir(id, targetPath)
+  })
+
   ipcMain.handle(IPC.TERMINAL_SEND_INPUT_SEQUENCE, async (_, id: string, payload: TerminalInputSequencePayload) => {
     const flowId = payload.traceContext?.traceFlowId
     performanceTrace.markTaskInput(id, flowId, {
@@ -1666,6 +1735,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     terminalBracketedPasteState.delete(id)
     terminalScreenModeStates.delete(id)
     ipcDataCounters.delete(id)
+    shellIntegrationLiveness.dispose(id)
     gitWatchManager?.unsubscribe(id)
     const result = ptyManager.dispose(id)
     performanceTrace.recordComplete('ipc.invoke', startUs, {
@@ -1864,6 +1934,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
           },
           timestamp: isoTs,
           expectedMarker,
+          // Volume class per terminal cwd (2026-07 RC-2: network drives
+          // explain git probe timeouts) — collected from the mirror router.
+          terminalCwds: gitStateMirrorRouter.getAllTerminalCwds(),
           // With a stalled libuv threadpool the yazl/zlib zip path deadlocks
           // forever (2026-07-20 incident: "generate log" hung during the
           // exact failure it should have captured) — go straight to the
@@ -2981,6 +3054,9 @@ async function runCleanupIpcHandlers(): Promise<void> {
   // can still resolve async N-API promises, so shutdown must be awaited.
   setTerminalCwdAuthorityResolver(null)
   setTerminalCwdDetectedHandler(null)
+  ptyManager.setOscCwdDetectedHandler(null)
+  shellIntegrationLiveness.setCallbacks(null)
+  shellIntegrationLiveness.disposeAll()
   try {
     await gitStateMirrorRouter.dispose()
   } catch (error) {
@@ -3027,6 +3103,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.UPDATER_DISMISS_BANNER)
   ipcMain.removeHandler(IPC.TERMINAL_CREATE)
   ipcMain.removeHandler(IPC.TERMINAL_WRITE)
+  ipcMain.removeHandler(IPC.TERMINAL_CHANGE_WORKDIR_VERIFIED)
   ipcMain.removeHandler(IPC.TERMINAL_SEND_INPUT_SEQUENCE)
   ipcMain.removeHandler(IPC.TERMINAL_GET_INPUT_CAPABILITIES)
   ipcMain.removeAllListeners(IPC.TERMINAL_SET_BUFFER_FAST_PATH)

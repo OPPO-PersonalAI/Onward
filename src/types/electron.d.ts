@@ -114,6 +114,20 @@ export interface DebugApiTerminalWriteResult {
 export interface TerminalAPI {
   create: (id: string, options?: TerminalOptions) => Promise<{ success: boolean; id?: string; error?: string }>
   write: (id: string, data: string, traceContext?: PerformanceTraceContext) => Promise<boolean>
+  /**
+   * Verified manual cwd switch (RC-3 fix): resolves success ONLY after the
+   * shell's own cwd report confirms the change. Callers must persist the
+   * returned `cwd` (not the requested path) and persist nothing on failure.
+   */
+  changeWorkDirVerified: (id: string, targetPath: string) => Promise<{
+    success: boolean
+    cwd?: string
+    reason?: 'target-not-found' | 'terminal-not-found' | 'write-failed' | 'verify-timeout'
+  }>
+  /** Shell integration produced no cwd OSC within the liveness window. */
+  onIntegrationSilent: (callback: (id: string, shellKind: string) => void) => () => void
+  /** A shell-derived cwd OSC arrived after the silent signal — clear the hint. */
+  onIntegrationRecovered: (callback: (id: string) => void) => () => void
   resize: (id: string, cols: number, rows: number) => Promise<boolean>
   sendInputSequence: (
     id: string,
@@ -293,6 +307,12 @@ export interface GitDiffResult {
   superprojectRoot?: string
   submodulesLoading?: boolean
   error?: string
+  /**
+   * Probe outcome behind a failed load (RC-2 fix). 'timeout' → the repo
+   * probe was killed at the exec budget (slow/hanging volume): show the
+   * "Git timed out here" state with retry, NOT "not a repo".
+   */
+  repoProbe?: 'ok' | 'not-repo' | 'timeout' | 'error'
 }
 
 export interface GitDiffLoadOptions {
@@ -323,6 +343,8 @@ export interface GitHistoryResult {
   repos?: GitRepoContext[]
   superprojectRoot?: string
   error?: string
+  /** Probe outcome behind a failed load (RC-2 fix) — see GitDiffResult. */
+  repoProbe?: 'ok' | 'not-repo' | 'timeout' | 'error'
 }
 
 export interface GitHistoryFile {

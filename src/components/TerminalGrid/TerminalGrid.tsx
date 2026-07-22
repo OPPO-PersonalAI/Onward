@@ -39,7 +39,6 @@ import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { resolveGitDiffInitialCwd } from '../../utils/git-diff-cwd-resolution'
 import { useI18n } from '../../i18n/useI18n'
-import { buildChangeDirectoryCommand, type TerminalShellKind } from '../../utils/terminal-command'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import {
   buildSubpageRouteCommand,
@@ -149,13 +148,15 @@ function getPinnedPromptLabel(prompt: Prompt, fallback: string): string {
   return title || ellipsis(prompt.content || '', 40) || fallback
 }
 
-async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
-  try {
-    return (await window.electronAPI.terminal.getInputCapabilities(terminalId)).shellKind
-  } catch {
-    return undefined
-  }
-}
+// Failure-reason → i18n key map for the verified change-workdir flow (RC-3
+// fix). Module scope: stable identity so hooks don't re-create it.
+const CHANGE_WORKDIR_FAILURE_KEYS = {
+  'target-not-found': 'terminalGrid.changeWorkDir.failed.target-not-found',
+  'terminal-not-found': 'terminalGrid.changeWorkDir.failed.terminal-not-found',
+  'write-failed': 'terminalGrid.changeWorkDir.failed.write-failed',
+  'verify-timeout': 'terminalGrid.changeWorkDir.failed.verify-timeout'
+} as const
+type ChangeWorkDirFailureKey = (typeof CHANGE_WORKDIR_FAILURE_KEYS)[keyof typeof CHANGE_WORKDIR_FAILURE_KEYS]
 
 export const TerminalGrid = memo(function TerminalGrid({
   layoutMode,
@@ -334,6 +335,15 @@ export const TerminalGrid = memo(function TerminalGrid({
   // deterministic against a nested fixture repo whose `cd` cwd report is absent
   // or lagged (e.g. under EDR-instrumented Windows shells).
   const gitDiffCwdOverrideRef = useRef<Record<string, string>>({})
+
+  // Shell-integration liveness (2026-07 bundle fix): terminals whose spawn
+  // produced no shell-derived cwd OSC within the main-process liveness
+  // window. Renders a per-terminal hint pointing at the verified manual
+  // "Change Working Directory" path.
+  const [integrationSilentIds, setIntegrationSilentIds] = useState<ReadonlySet<string>>(() => new Set())
+  // Transient outcome notice for the verified manual cwd switch (RC-3 fix).
+  const [workDirNotice, setWorkDirNotice] = useState<{ terminalId: string; kind: 'error'; messageKey: ChangeWorkDirFailureKey } | null>(null)
+  const workDirNoticeTimerRef = useRef<number | null>(null)
 
   // Coding Agent launch modal state
   const [codingAgentModalOpen, setCodingAgentModalOpen] = useState(false)
@@ -667,6 +677,51 @@ export const TerminalGrid = memo(function TerminalGrid({
     })
     return () => { try { dispose?.() } catch { /* ignore */ } }
   }, [onPersistTerminalCwd])
+
+  // Shell-integration liveness hint lifecycle (2026-07 bundle fix): main
+  // fires `integration-silent` once per terminal whose spawn produced no
+  // shell-derived cwd OSC inside the liveness window (blocked pwsh script,
+  // unsupported shell), and `integration-recovered` if one arrives later.
+  useEffect(() => {
+    const disposeSilent = window.electronAPI?.terminal?.onIntegrationSilent?.((terminalId) => {
+      setIntegrationSilentIds((prev) => {
+        if (prev.has(terminalId)) return prev
+        const next = new Set(prev)
+        next.add(terminalId)
+        return next
+      })
+    })
+    const disposeRecovered = window.electronAPI?.terminal?.onIntegrationRecovered?.((terminalId) => {
+      setIntegrationSilentIds((prev) => {
+        if (!prev.has(terminalId)) return prev
+        const next = new Set(prev)
+        next.delete(terminalId)
+        return next
+      })
+    })
+    return () => {
+      try { disposeSilent?.() } catch { /* ignore */ }
+      try { disposeRecovered?.() } catch { /* ignore */ }
+    }
+  }, [])
+
+  // Auto-dismiss for the manual cwd-switch outcome notice.
+  useEffect(() => {
+    if (!workDirNotice) return
+    if (workDirNoticeTimerRef.current !== null) {
+      window.clearTimeout(workDirNoticeTimerRef.current)
+    }
+    workDirNoticeTimerRef.current = window.setTimeout(() => {
+      workDirNoticeTimerRef.current = null
+      setWorkDirNotice(null)
+    }, 6000)
+    return () => {
+      if (workDirNoticeTimerRef.current !== null) {
+        window.clearTimeout(workDirNoticeTimerRef.current)
+        workDirNoticeTimerRef.current = null
+      }
+    }
+  }, [workDirNotice])
 
   // GitStateMirror update listener — global, single subscription. Merges
   // every incoming delta into mirrorSnapshots keyed by cwd. Subsequent
@@ -2718,19 +2773,30 @@ export const TerminalGrid = memo(function TerminalGrid({
     setCodingAgentTerminalId(null)
   }, [codingAgentTerminalId])
 
-  // Change working directory
+  // Change working directory — verified transaction (RC-3 fix, 2026-07
+  // bundles). The legacy flow wrote a `cd` into the PTY and persisted the
+  // picked path immediately; when the cd silently failed (shell busy under a
+  // coding agent, blocked integration hiding the real cwd) the persisted
+  // state split from the shell's actual directory. Now main writes the cd
+  // WITH a proof emitter and resolves only after the shell's own cwd report
+  // confirms the switch — nothing is persisted on failure.
   const handleChangeWorkDir = useCallback(async (terminalId: string) => {
     const result = await window.electronAPI.dialog.openDirectory()
-    if (result.success && result.path) {
-      const shellKind = await resolveTerminalShellKind(terminalId)
-      const cdCommand = buildChangeDirectoryCommand(window.electronAPI.platform, result.path, shellKind)
-      await window.electronAPI.terminal.write(terminalId, cdCommand)
-      onPersistTerminalCwd(terminalId, result.path)
-      onTerminalFocus(terminalId)
-      window.setTimeout(() => {
-        void window.electronAPI.git.notifyTerminalActivity(terminalId)
-      }, 300)
+    if (!result.success || !result.path) return
+    onTerminalFocus(terminalId)
+    const outcome = await window.electronAPI.terminal.changeWorkDirVerified(terminalId, result.path)
+    if (outcome.success && outcome.cwd) {
+      // Persist the SHELL-CONFIRMED cwd (not the raw picked path) so the
+      // persisted value and the mirror's canonical value stay converged.
+      onPersistTerminalCwd(terminalId, outcome.cwd)
+      setWorkDirNotice(null)
+      return
     }
+    setWorkDirNotice({
+      terminalId,
+      kind: 'error',
+      messageKey: CHANGE_WORKDIR_FAILURE_KEYS[outcome.reason ?? 'verify-timeout']
+    })
   }, [onPersistTerminalCwd, onTerminalFocus])
 
   const handleOpenWorkDir = useCallback(async (terminalId: string) => {
@@ -2855,6 +2921,22 @@ export const TerminalGrid = memo(function TerminalGrid({
   return (
     <>
       <div ref={gridWrapperRef} className={`terminal-grid-wrapper ${hidden ? 'terminal-grid-hidden' : ''}`}>
+        {workDirNotice && (
+          <div className="terminal-grid-workdir-notice" role="alert">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.2A5.8 5.8 0 1 1 8 13.8 5.8 5.8 0 0 1 8 2.2zM7.4 4.5h1.2v4.4H7.4V4.5zm0 5.6h1.2v1.2H7.4v-1.2z"/>
+            </svg>
+            <span>{t('terminalGrid.changeWorkDir.failedTitle')}: {t(workDirNotice.messageKey)}</span>
+            <button
+              type="button"
+              className="terminal-grid-workdir-notice-close"
+              onClick={() => setWorkDirNotice(null)}
+              aria-label={t('common.close')}
+            >
+              ×
+            </button>
+          </div>
+        )}
         <div className="terminal-grid" data-layout={layoutDataAttr(displayLayoutMode)}>
           {visibleTerminals.map((termInfo, index) => {
             const terminalInfo = terminalInfos[termInfo.id]
@@ -3023,6 +3105,24 @@ export const TerminalGrid = memo(function TerminalGrid({
                       repoName={repoName}
                       forceClose={hidden || globalOverlayActive}
                     />
+
+                    {integrationSilentIds.has(termInfo.id) && (
+                      <span
+                        className="terminal-grid-integration-hint"
+                        role="button"
+                        tabIndex={0}
+                        title={t('terminalGrid.integrationSilent.hint')}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void handleChangeWorkDir(termInfo.id)
+                        }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                          <path d="M8 1.5 15 14H1L8 1.5zm0 3.2L3.4 12.7h9.2L8 4.7zM7.4 7h1.2v3H7.4V7zm0 3.8h1.2V12H7.4v-1.2z"/>
+                        </svg>
+                        <span>{t('terminalGrid.integrationSilent.badge')}</span>
+                      </span>
+                    )}
 
                     {branch && (
                       <span

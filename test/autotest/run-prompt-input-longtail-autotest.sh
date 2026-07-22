@@ -80,7 +80,11 @@ APP_PID=$!
 
 MARKER="[PromptInputLongtail:RESULT]"
 FOUND_MARKER=0
-DEADLINE=$((SECONDS + 360))
+# 280 s: stays UNDER the regression override (300 s, the 5-min budget ceiling)
+# so a hung run fails HERE with a readable log instead of being force-killed
+# into an opaque TIMEOUT by the orchestrator. Measured end-to-end 152.7 s
+# (2026-07-22, local Windows) — ~1.8× headroom to this deadline.
+DEADLINE=$((SECONDS + 280))
 while (( SECONDS < DEADLINE )); do
   if [[ -f "$LOG_FILE" ]] && grep -Fq "$MARKER" "$LOG_FILE"; then
     FOUND_MARKER=1

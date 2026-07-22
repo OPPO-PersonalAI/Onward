@@ -254,6 +254,20 @@ export const IPC = {
   TELEMETRY_SET_CONSENT: 'telemetry:set-consent',
   TELEMETRY_TRACK: 'telemetry:track',
   TERMINAL_BUFFER_RESPONSE: 'terminal:buffer-response',
+  // Verified manual "change working directory" transaction (RC-3 fix,
+  // 2026-07 bundles): renderer invokes with (terminalId, targetPath); main
+  // validates the path, writes the shell-appropriate cd + proof-OSC command
+  // into the PTY, and resolves ONLY after the shell's own cwd report
+  // confirms the switch (or a timeout). The renderer persists nothing until
+  // success — the optimistic-persist state split is structurally gone.
+  TERMINAL_CHANGE_WORKDIR_VERIFIED: 'terminal:change-workdir-verified',
+  // Main → renderer: shell integration produced no cwd OSC within the
+  // liveness window after spawn (blocked script / unsupported shell). The
+  // renderer shows a per-terminal hint pointing at the manual switch.
+  TERMINAL_INTEGRATION_SILENT: 'terminal:integration-silent',
+  // Main → renderer: a shell-derived OSC arrived after the silent signal —
+  // clear the hint.
+  TERMINAL_INTEGRATION_RECOVERED: 'terminal:integration-recovered',
   TERMINAL_CONFIG_LOAD: 'terminal-config:load',
   TERMINAL_CONFIG_SAVE: 'terminal-config:save',
   TERMINAL_CONFIG_UPDATE: 'terminal-config:update',

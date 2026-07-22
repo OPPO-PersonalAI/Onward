@@ -173,7 +173,11 @@ $env:ONWARD_USER_DATA_DIR = $UserDataDir
 try {
   $marker = "[PromptInputLongtail:RESULT]"
   $proc = Start-Process -FilePath $AppBin -PassThru -RedirectStandardOutput $LogFile -RedirectStandardError $StdErrFile -NoNewWindow
-  $deadline = (Get-Date).AddMinutes(6)
+  # 280 s (runner parity with the .sh): stays UNDER the regression override
+  # (300 s budget ceiling) so a hung run fails here with a readable log
+  # instead of an opaque orchestrator force-kill. Measured 152.7 s end-to-end
+  # (2026-07-22, local Windows).
+  $deadline = (Get-Date).AddSeconds(280)
   $foundMarker = $false
   while ((Get-Date) -lt $deadline) {
     if (Test-Path $LogFile) {

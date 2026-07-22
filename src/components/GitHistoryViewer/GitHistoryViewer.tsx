@@ -1947,6 +1947,25 @@ export function GitHistoryViewer({
       )
     }
     if (!historyResult.isGitRepo) {
+      // RC-2: a probe killed at the exec budget (slow/hanging volume) gets
+      // its own state + retry — rendering "not a repo" here misled users.
+      // The retry reset-load (skip 0) escapes the timeout-backoff cache.
+      if (historyResult.repoProbe === 'timeout') {
+        return (
+          <div className="git-history-warning git-history-warning--probe-timeout">
+            <div className="git-history-warning-title">{t('gitHistory.warning.probeTimeout.title')}</div>
+            <div className="git-history-warning-text">{t('gitHistory.warning.probeTimeout.message')}</div>
+            <button
+              type="button"
+              className="git-history-warning-retry"
+              disabled={loading}
+              onClick={() => { void loadHistory(true) }}
+            >
+              {t('gitHistory.warning.probeTimeout.retry')}
+            </button>
+          </div>
+        )
+      }
       return (
         <div className="git-history-warning">
           <div className="git-history-warning-title">{t('gitHistory.warning.notRepo.title')}</div>
