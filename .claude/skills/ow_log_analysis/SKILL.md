@@ -13,7 +13,7 @@ When a user hits a problem in Onward, they open the Feedback modal and click
 description into the save dialog, so the filename looks like:
 
 ```
-lanxi-terminal1 中的内容有刷新，但是上划的时候没办法看到完整的信息-onward-diagnostic-2026-07-21_17-36-04.zip
+onward-diagnostic-2026-07-21_17-36-04.zip
 ```
 
 **The leading part of the filename is the user's own first-hand description of
@@ -24,11 +24,59 @@ evidence inside it, and write an HTML report.
 
 ---
 
+## 0.5 Bug-tracking knowledge base (docs/bug-tracking/ — consult before analyzing, archive after)
+
+`docs/bug-tracking/` is the committed diagnostic knowledge base: one
+`BUG-NNNN-<slug>.md` file per root-caused bug plus an `INDEX.md` table
+(columns: ID, status, symptom keywords, root cause, related trace events,
+files involved, link to the bug file). Division of labour with
+`Logs/reports/`: the HTML report is the one-off full evidence statement
+(gitignored); the bug file is the reusable knowledge distillate (committed).
+
+**Before analyzing (mandatory first step):**
+
+1. Read `docs/bug-tracking/INDEX.md` and match the user's symptom against the
+   "symptom keywords" column row by row.
+2. **Known bug hit** → open its bug file and follow its "Repro triage
+   playbook" section: check the already-landed trace events in the NEW bundle
+   first (the file lists the event names and how to interpret them) to
+   confirm or refute the recorded conclusion. Do NOT re-derive the analysis
+   from scratch — skipping that archaeology is exactly why the previous
+   round archived it.
+3. **No hit** → this is a new bug; proceed with the normal flow of this skill.
+
+**After analyzing (HTML report written, before delivering):**
+
+4. New bug → create `docs/bug-tracking/BUG-NNNN-<slug>.md` (number = current
+   index maximum + 1; slug in ASCII kebab-case) and **append** one row to the
+   `INDEX.md` table. The bug file must contain: a metadata table (status /
+   dates / code baseline / bundle and report paths), the symptom (user's own
+   words), the root-cause conclusion with its confidence grade, **the full
+   analysis walk as it actually happened** (key observations, falsified
+   hypotheses WITH their disproving evidence — the dead ends are the most
+   reusable part), the table of trace events added or proposed for it, a
+   repro triage playbook (which events to check first on the next same-symptom
+   report, and how to read them), open questions, and an append-only update
+   history.
+5. Follow-up analysis of a known bug → **update its file incrementally**:
+   append to the update-history table; when a conclusion is overturned, keep
+   the original reasoning chain and state the observation that overturned it
+   (same revision rule as § 5.3b). The "status / root cause" columns of
+   `INDEX.md` may be updated, but the revision trail must remain in the bug
+   file.
+6. Bug files and `INDEX.md` are written in English (user-quoted symptom text
+   may stay verbatim in its original language — it is evidence). **Never**
+   copy unredacted bundle content into them (real absolute paths, raw user
+   input, tokens) — the same masking rules as § 1 item 4 apply.
+
+---
+
 ## 1. Hard constraints (violating any of these = failure)
 
 1. **Read-only analysis. Never modify product code.** Do not edit anything under
    `src/**`, `electron/**`, or `test/**`. The only artifacts this skill writes
-   are the copied bundle under `Logs/` and the report under `Logs/reports/`.
+   are the copied bundle under `Logs/`, the report under `Logs/reports/`, and
+   the bug-tracking knowledge base under `docs/bug-tracking/` (§ 0.5).
    If the analysis concludes that a code change is needed, put the proposed
    change in the report's "Fix recommendations" section and let the user decide
    whether to open a separate round of work for it.
@@ -436,7 +484,7 @@ slug:**
 
 Example:
 ```
-lanxi-terminal1 中的内容有刷新，但是上划的时候没办法看到完整的信息-onward-diagnostic-2026-07-21_17-36-04-scrollback-capacity-overflow.html
+onward-diagnostic-2026-07-21_17-36-04-scrollback-capacity-overflow.html
 ```
 
 After writing it, deliver the report with `SendUserFile` (`display: "render"`).
@@ -551,6 +599,9 @@ Also remind the implementer of three project hard rules:
 ## 7. Execution checklist
 
 - [ ] Resolve the input (user-supplied absolute path wins, else scan `Logs/`)
+- [ ] **Read `docs/bug-tracking/INDEX.md` and match the symptom against known
+      bugs (§ 0.5); on a hit, follow that bug file's repro triage playbook
+      first**
 - [ ] Read the problem description out of the filename
 - [ ] **If the input is outside `Logs/`, copy it into `Logs/` and analyze the copy**
 - [ ] Extract to a temp dir (quote all paths; expect CJK filenames)
@@ -569,6 +620,9 @@ Also remind the implementer of three project hard rules:
 - [ ] Grade conclusions: Confirmed / High-confidence inference / Unverified hypothesis
 - [ ] Write the report to `Logs/reports/<log filename>-<root-cause-slug>.html`
       (dark + fixed left ToC + no-animation jumps + self-contained + SPDX + update history)
+- [ ] **Create or incrementally update the bug archive: new bug →
+      `docs/bug-tracking/BUG-NNNN-<slug>.md` + an appended `INDEX.md` row;
+      known bug → append to its update-history table (§ 0.5)**
 - [ ] Deliver it with `SendUserFile` (`display: "render"`)
 - [ ] Delete the temp dir you created (keep the staged copy under `Logs/`)
 - [ ] Give a short summary in chat: one-line root cause + confidence + the single

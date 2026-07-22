@@ -1016,7 +1016,41 @@ export const PERF_TRACE_EVENT = {
   // frozen state (element-identity bailout while hidden) (ph=i). Payload:
   // { panel: 'editor' | 'diff' | 'history', frozen }. Breadcrumb for "hidden
   // panel kept re-rendering" and for stale-props regressions after reopen.
-  RENDERER_TERMINAL_GRID_SUBPAGE_FREEZE: 'renderer:terminal-grid.subpage-subtree-freeze'
+  RENDERER_TERMINAL_GRID_SUBPAGE_FREEZE: 'renderer:terminal-grid.subpage-subtree-freeze',
+
+  // ───────── 2026-07-22 TUI scrollback diagnostics (BUG-0001, docs/bug-tracking/) ─────────
+  // Root cause cluster: a full-screen TUI (codex) repaints the same viewport
+  // region for hours, so megabytes of PTY output add ~zero scrollback lines
+  // and the user's "scroll up for history" finds nothing. The 2026-07-21
+  // bundle could not decide between the two sub-mechanisms (alternate-screen
+  // episodes vs ConPTY in-place repaint on the normal buffer) because the
+  // buffer mode and the scrollback extent were both structurally invisible.
+  //
+  // Main: the PTY output stream flipped a screen-buffer-relevant VT state
+  // (ph=i, emitted ONLY on transitions / per-chunk aggregates — see
+  // electron/main/terminal-screen-mode.ts). Payload: { terminalId, mode:
+  // 'alt-enter' | 'alt-exit' | 'ed3' | 'ris', count, altScreen,
+  // bracketedPaste }. Answers "was the alternate screen active, did the app
+  // wipe the scrollback" directly from a production bundle.
+  MAIN_TERMINAL_SCREEN_MODE_CHANGED: 'main:terminal.screen-mode-changed',
+  // Renderer: periodic + restore-time snapshot of the xterm buffer extent
+  // (ph=i, diagnostic tier; focused terminal every 60 s + each session once
+  // per surface-restore batch). Payload: { terminalId, bufferType:
+  // 'normal' | 'alternate', baseY, viewportY, rows, cols }. `baseY` IS the
+  // scrollback line count — the single measurement BUG-0001 needed.
+  RENDERER_TERMINAL_SCROLLBACK_EXTENT: 'renderer:terminal.scrollback-extent',
+  // Renderer: wheel input arrived while the alternate buffer was active and
+  // no mouse protocol was on, i.e. xterm converts the wheel into arrow-key
+  // writes to the PTY (ph=i, aggregated per 500 ms per terminal). Payload:
+  // { terminalId, up, down }. Proves "the user's scroll was consumed by the
+  // TUI, not by the viewport" without content capture.
+  RENDERER_TERMINAL_WHEEL_TO_ARROWS: 'renderer:terminal.wheel-to-arrows',
+  // Renderer: trimPendingData actually discarded buffered PTY bytes (hidden
+  // 512 KB cap or visible 8 MB cap) (ph=i, aggregated per ≥1 s per
+  // terminal). Payload: { terminalId, droppedBytes, capBytes, outputActive }.
+  // Today the drop is fully silent in production bundles; this closes the
+  // last unobservable hop of the renderer data path.
+  RENDERER_TERMINAL_PENDING_DATA_TRIMMED: 'renderer:terminal.pending-data-trimmed'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

@@ -117,6 +117,7 @@ point at files under `test/unittest/`.
 | Fit / remount preserves viewport position | `run-terminal-autofollow` (TA-07, TA-08, TA-09, TA-10, TA-11) |
 | Bug fix: focus does not jump viewport (preventScroll) | `run-terminal-autofollow` (TA-12) |
 | Bug fix: inherited no-color environment does not make Task / Coding Agent output monochrome | `run-terminal-autofollow` (TA-14, TA-15) + `test/unittest/terminal-color-env.test.mts` (TCE-U-*) |
+| Screen-buffer-mode classifier behind `main:terminal.screen-mode-changed` (BUG-0001 TUI scrollback diagnostics): alt-screen enter/exit via DECSET/DECRST 1049/1047/47, ED3 / RIS scrollback wipes, per-chunk aggregation, chunk-boundary carry never double-emits | `test/unittest/terminal-screen-mode-classifier.test.mts` (TSM-U-01..TSM-U-12); behavioural autotest (inject 1049 / in-place-repaint / linear streams, assert `buffer.baseY`) is a tracked follow-up in `docs/bug-tracking/BUG-0001-codex-tui-scrollback-invisible.md` § 4 |
 | Terminal focus / activation across shortcuts and restore | `run-terminal-focus-activation` (TFA-01..TFA-08) |
 | Renderer surface restored after a `simulateRendererSurfaceLoss` deactivate (legacy code path) | `run-terminal-focus-activation` (TFA-09) |
 | Bug fix: blank Task + broken-image after macOS Spaces / Win virtual desktop swipe — phantom-blank canvas re-rendered after a host surface event (refresh-only restore + `terminal.refresh`) and real WebGL context loss follows VS Code-aligned DOM fallback semantics | `run-terminal-focus-activation` (TFA-10..TFA-18) |

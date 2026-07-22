@@ -209,11 +209,98 @@ export class TerminalSessionManager {
   // context is lost can return null in Chromium, which would otherwise
   // strand the test in the lost state forever.
   private reproLoseContextExts: Map<string, { restoreContext?: () => void }> = new Map()
+  // BUG-0001 (docs/bug-tracking/): per-terminal aggregation state for the
+  // wheel-to-arrows and pending-data-trimmed diagnostic events. Both emit at
+  // most ~1-2 events/s per terminal; the hot paths only touch integer fields.
+  private wheelToArrowsAgg: Map<string, { up: number; down: number; timerId: number | null }> = new Map()
+  private trimAgg: Map<string, { pendingDroppedBytes: number; lastEmitMs: number }> = new Map()
 
   constructor() {
     this.registerBufferRequestListener()
     this.registerGlobalDataListener()
     this.registerGlobalExitListener()
+    // BUG-0001: 60 s heartbeat of the focused terminal's buffer extent so a
+    // production bundle can answer "how many scrollback lines existed, and
+    // which buffer was active" without a repro. Background-throttled timers
+    // only make this less frequent, never hot.
+    window.setInterval(() => {
+      const focusedId = this.getFocusedTerminalId()
+      if (!focusedId) return
+      const session = this.sessions.get(focusedId)
+      if (session) this.emitScrollbackExtent(session, 'focused-heartbeat')
+    }, 60_000)
+  }
+
+  /**
+   * Diagnostic snapshot of the xterm buffer extent (BUG-0001). `baseY` IS
+   * the scrollback line count; `bufferType === 'alternate'` means nothing
+   * the running TUI prints can ever reach the scrollback.
+   */
+  private emitScrollbackExtent(session: TerminalSession, reason: string): void {
+    if (!session.open || session.status === 'disposed') return
+    try {
+      const buffer = session.terminal.buffer.active
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_TERMINAL_SCROLLBACK_EXTENT, {
+        terminalId: session.id,
+        reason,
+        bufferType: buffer.type,
+        baseY: buffer.baseY,
+        viewportY: buffer.viewportY,
+        rows: session.terminal.rows,
+        cols: session.terminal.cols
+      })
+    } catch {
+      // xterm mid-teardown; a missing snapshot is not worth a crash.
+    }
+  }
+
+  private noteWheelToArrows(id: string, isUp: boolean): void {
+    let agg = this.wheelToArrowsAgg.get(id)
+    if (!agg) {
+      agg = { up: 0, down: 0, timerId: null }
+      this.wheelToArrowsAgg.set(id, agg)
+    }
+    if (isUp) agg.up += 1
+    else agg.down += 1
+    if (agg.timerId !== null) return
+    agg.timerId = window.setTimeout(() => {
+      agg.timerId = null
+      const { up, down } = agg
+      agg.up = 0
+      agg.down = 0
+      if (up === 0 && down === 0) return
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_TERMINAL_WHEEL_TO_ARROWS, {
+        terminalId: id,
+        up,
+        down
+      })
+    }, 500)
+  }
+
+  /**
+   * Aggregated "the renderer really discarded buffered PTY bytes" breadcrumb
+   * (BUG-0001). Emits immediately on the first drop, then at most once per
+   * second while the pressure continues; a sub-second trailing remainder is
+   * deliberately left unsent to keep the path allocation-free.
+   */
+  private noteTrimmedPendingData(session: TerminalSession, droppedBytes: number, capBytes: number): void {
+    let agg = this.trimAgg.get(session.id)
+    if (!agg) {
+      agg = { pendingDroppedBytes: 0, lastEmitMs: 0 }
+      this.trimAgg.set(session.id, agg)
+    }
+    agg.pendingDroppedBytes += droppedBytes
+    const now = performance.now()
+    if (now - agg.lastEmitMs < 1000) return
+    const emitted = agg.pendingDroppedBytes
+    agg.pendingDroppedBytes = 0
+    agg.lastEmitMs = now
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_TERMINAL_PENDING_DATA_TRIMMED, {
+      terminalId: session.id,
+      droppedBytes: emitted,
+      capBytes,
+      outputActive: this.isOutputActive(session)
+    })
   }
 
   /**
@@ -901,6 +988,20 @@ export class TerminalSessionManager {
       })
     }
 
+    // BUG-0001 breadcrumb: xterm only invokes custom wheel handlers when no
+    // mouse protocol claimed the wheel, and on that path a wheel event with
+    // the ALTERNATE buffer active is converted into arrow-key PTY writes
+    // (no scrollback exists to scroll). Recording that conversion proves
+    // "the user's scroll went to the TUI, not the viewport" in a production
+    // bundle. Aggregated per 500 ms in noteWheelToArrows; always returns
+    // true so xterm's own handling is untouched.
+    terminal.attachCustomWheelEventHandler((event) => {
+      if (event.type === 'wheel' && terminal.buffer.active.type === 'alternate') {
+        this.noteWheelToArrows(id, (event as WheelEvent).deltaY < 0)
+      }
+      return true
+    })
+
     terminal.onData((data) => {
       // Record keystroke timestamp for input latency measurement.
       // The matching echo arrives in registerGlobalDataListener.
@@ -1133,16 +1234,22 @@ export class TerminalSessionManager {
   }
 
   private trimPendingData(session: TerminalSession, maxBytes: number): void {
+    const bytesBefore = session.pendingDataBytes
     while (session.pendingDataBytes > maxBytes && session.pendingData.length > 1) {
       const dropped = session.pendingData.shift()!
       session.pendingDataBytes -= dropped.length
     }
 
-    if (session.pendingDataBytes <= maxBytes || session.pendingData.length === 0) return
+    if (session.pendingDataBytes > maxBytes && session.pendingData.length > 0) {
+      const retained = session.pendingData[0].slice(-maxBytes)
+      session.pendingData[0] = retained
+      session.pendingDataBytes = retained.length
+    }
 
-    const retained = session.pendingData[0].slice(-maxBytes)
-    session.pendingData[0] = retained
-    session.pendingDataBytes = retained.length
+    const droppedBytes = bytesBefore - session.pendingDataBytes
+    if (droppedBytes > 0) {
+      this.noteTrimmedPendingData(session, droppedBytes, maxBytes)
+    }
   }
 
   private consumePendingDataChunk(session: TerminalSession, maxBytes: number): string | null {
@@ -1383,6 +1490,13 @@ export class TerminalSessionManager {
       deferredCount,
       durationMs: +(performance.now() - startedAt).toFixed(1)
     })
+    // BUG-0001: piggyback a buffer-extent snapshot on every restore batch —
+    // restores fire at user-action frequency (visibility / focus flips), so
+    // this adds ≤ sessionCount instant events per user action.
+    for (const sessionId of restoredSessionIds) {
+      const restoredSession = this.sessions.get(sessionId)
+      if (restoredSession) this.emitScrollbackExtent(restoredSession, `restore-${reason}`)
+    }
     return restoredSessionIds.length
   }
 
@@ -1607,6 +1721,12 @@ export class TerminalSessionManager {
     this.outputScheduler.unregisterTarget(id)
     this.outputVisibilityState.delete(id)
     this.staggeredDeactivateQueue.delete(id)
+    const wheelAgg = this.wheelToArrowsAgg.get(id)
+    if (wheelAgg?.timerId !== null && wheelAgg?.timerId !== undefined) {
+      window.clearTimeout(wheelAgg.timerId)
+    }
+    this.wheelToArrowsAgg.delete(id)
+    this.trimAgg.delete(id)
     this.clearPendingRestoreAnimationFrame(session)
     this.clearPendingGeometryRefreshAnimationFrame(session)
     if (this.sessions.size === 1) {

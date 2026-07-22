@@ -731,6 +731,22 @@ restore-in-place strategy.
 | `RENDERER_XTERM_RENDERER_GPU_CRASH_RECOVERY` | `renderer:xterm.renderer.gpu-crash-recovery` | `i` | `terminal-session-manager.ts::recoverRendererSurfacesAfterGpuCrash` — force-recreates every visible pane's WebGL after the GPU-gone broadcast (webglcontextlost is NOT delivered on this crash path). Payload `{ sessionCount, recreatedCount, failedCount, reason, simulated }`. |
 | `RENDERER_XTERM_RENDERER_DEACTIVATE_STAGGERED` | `renderer:xterm.renderer.deactivate-staggered` | `i` | `terminal-session-manager.ts::queueStaggeredDeactivation` — hidden-tab WebGL disposal queued for one-per-frame execution (back-to-back context destruction is the ANGLE-Metal crash trigger window). Payload `{ queuedCount }`; the per-terminal `dispose-webgl` timestamps prove the spacing. |
 
+#### TUI scrollback diagnostics (2026-07-22, BUG-0001)
+
+Root cause cluster: a full-screen TUI (codex) repaints the same viewport
+region for hours, so megabytes of PTY output add ~zero scrollback lines and
+"scroll up for history" finds nothing. The 2026-07-21 bundle could not
+decide between alternate-screen episodes and ConPTY in-place repaint because
+the buffer mode and the scrollback extent were both invisible. See
+`docs/bug-tracking/BUG-0001-codex-tui-scrollback-invisible.md`.
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `MAIN_TERMINAL_SCREEN_MODE_CHANGED` | `main:terminal.screen-mode-changed` | `i` (t) | `electron/main/ipc-handlers.ts` pty `onData` via the pure classifier `electron/main/terminal-screen-mode.ts::scanScreenMode` (unit-locked by `terminal-screen-mode-classifier.test.mts` TSM-U-*). Emitted ONLY on transitions / per-chunk aggregates. Payload `{ terminalId, mode: alt-enter \| alt-exit \| ed3 \| ris, count, altScreen, bracketedPaste }`. |
+| `RENDERER_TERMINAL_SCROLLBACK_EXTENT` | `renderer:terminal.scrollback-extent` | `i` | `terminal-session-manager.ts::emitScrollbackExtent` — focused terminal every 60 s (`reason=focused-heartbeat`) + each session once per surface-restore batch (`reason=restore-<surfaceEvent>`). Payload `{ terminalId, reason, bufferType: normal \| alternate, baseY, viewportY, rows, cols }`; `baseY` IS the scrollback line count. Diagnostic tier. |
+| `RENDERER_TERMINAL_WHEEL_TO_ARROWS` | `renderer:terminal.wheel-to-arrows` | `i` | `terminal-session-manager.ts::noteWheelToArrows` via `attachCustomWheelEventHandler` (xterm only calls it when no mouse protocol claimed the wheel; alt-buffer wheel on that path becomes arrow-key PTY writes). Aggregated per 500 ms per terminal. Payload `{ terminalId, up, down }`. Diagnostic tier. |
+| `RENDERER_TERMINAL_PENDING_DATA_TRIMMED` | `renderer:terminal.pending-data-trimmed` | `i` | `terminal-session-manager.ts::noteTrimmedPendingData` (called from `trimPendingData` only when bytes were actually discarded) — first drop emits immediately, then ≥1 s aggregation per terminal. Payload `{ terminalId, droppedBytes, capBytes, outputActive }`. Diagnostic tier. |
+
 #### Background ops
 
 | Constant | Name | Phase | Call site |

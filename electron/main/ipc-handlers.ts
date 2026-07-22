@@ -20,6 +20,7 @@ import { readCurrentChangelog } from './changelog'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { getTelemetryConsent, setTelemetryConsent } from './telemetry/telemetry-consent'
 import { applyTerminalUserEnvVars, buildColorCapableTerminalEnv } from './terminal-env'
+import { createScreenModeState, scanScreenMode, TerminalScreenModeState } from './terminal-screen-mode'
 import {
   getTerminalCwd,
   getTerminalGitInfo,
@@ -364,6 +365,10 @@ const terminalDataBuffers = new Map<string, TerminalDataBuffer>()
 const terminalFastPathState = new Map<string, boolean>()
 const terminalOutputVisibilityState = new Map<string, boolean>()
 const terminalBracketedPasteState = new Map<string, boolean>()
+// Screen-buffer-mode tracker per terminal (alt-screen / ED3 / RIS) — the
+// scrollback-visibility breadcrumb missing from BUG-0001's bundle. Scanned
+// at the same per-chunk site as the bracketed-paste tracker above.
+const terminalScreenModeStates = new Map<string, TerminalScreenModeState>()
 
 // Buffer request waiting queue
 interface TerminalBufferResult {
@@ -1138,6 +1143,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       })
       terminalDataBuffers.set(id, dataBuffer)
       terminalBracketedPasteState.set(id, false)
+      terminalScreenModeStates.set(id, createScreenModeState())
 
       // Apply any fast-path state that arrived before the buffer was created
       // (e.g. setVisibility(id, false) sent before terminal:create completed).
@@ -1155,6 +1161,20 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
         ptyManager.detectCwd(id, data)
         const bracketedPasteMode = terminalBracketedPasteState.get(id) ?? false
         terminalBracketedPasteState.set(id, updateBracketedPasteMode(bracketedPasteMode, data))
+        // Screen-buffer-mode transitions (alt-screen / ED3 / RIS): one scan
+        // per chunk, trace events only on transitions — see BUG-0001.
+        const screenModeState = terminalScreenModeStates.get(id) ?? createScreenModeState()
+        const screenModeScan = scanScreenMode(screenModeState, data)
+        terminalScreenModeStates.set(id, screenModeScan.state)
+        for (const transition of screenModeScan.transitions) {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_TERMINAL_SCREEN_MODE_CHANGED, {
+            terminalId: id,
+            mode: transition.kind,
+            count: transition.count,
+            altScreen: screenModeScan.state.altScreen,
+            bracketedPaste: bracketedPasteMode
+          }, { terminalId: id })
+        }
         performanceTrace.markTaskOutput(id, data.length)
         performanceTrace.recordInstant('pty.output', {
           terminalId: id,
@@ -1458,6 +1478,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     terminalFastPathState.delete(id)
     terminalOutputVisibilityState.delete(id)
     terminalBracketedPasteState.delete(id)
+    terminalScreenModeStates.delete(id)
     ipcDataCounters.delete(id)
     gitWatchManager?.unsubscribe(id)
     const result = ptyManager.dispose(id)
