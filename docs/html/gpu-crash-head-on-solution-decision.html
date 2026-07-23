@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<!--
+  SPDX-FileCopyrightText: 2026 OPPO
+  SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU 崩溃正面解决方案 — 决策文档</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2333; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --accent2: #79c0ff;
+    --good: #3fb950; --warn: #d29922; --bad: #f85149; --purple: #bc8cff;
+    --code-bg: #0a0e14;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; font-size: 15px; }
+  #toc { position: fixed; left: 0; top: 0; bottom: 0; width: 250px; background: var(--panel); border-right: 1px solid var(--border); padding: 20px 12px; overflow-y: auto; }
+  #toc h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  #toc a { display: block; color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 6px; font-size: 13.5px; margin-bottom: 2px; border-left: 2px solid transparent; }
+  #toc a:hover { color: var(--text); background: rgba(88,166,255,.08); }
+  #toc a.active { color: var(--accent); border-left-color: var(--accent); background: rgba(88,166,255,.1); }
+  main { margin-left: 250px; max-width: 1000px; padding: 40px 48px 80px; }
+  h1 { font-size: 24px; margin-bottom: 8px; }
+  h2 { font-size: 21px; margin: 44px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--accent2); }
+  h3 { font-size: 17px; margin: 26px 0 10px; }
+  p { margin: 10px 0; }
+  .sub { color: var(--muted); font-size: 13.5px; }
+  .badge { display: inline-block; padding: 1px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; vertical-align: middle; }
+  .b-rec { background: rgba(63,185,80,.15); color: var(--good); border: 1px solid rgba(63,185,80,.4); }
+  .b-heavy { background: rgba(248,81,73,.15); color: var(--bad); border: 1px solid rgba(248,81,73,.4); }
+  .b-mid { background: rgba(210,153,34,.15); color: var(--warn); border: 1px solid rgba(210,153,34,.4); }
+  .b-info { background: rgba(88,166,255,.15); color: var(--accent); border: 1px solid rgba(88,166,255,.4); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 14px 0; }
+  .callout { border-left: 3px solid var(--accent); background: rgba(88,166,255,.06); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--warn); background: rgba(210,153,34,.06); }
+  .callout.bad { border-left-color: var(--bad); background: rgba(248,81,73,.06); }
+  .callout.good { border-left-color: var(--good); background: rgba(63,185,80,.06); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th { background: var(--panel2); text-align: left; padding: 8px 10px; border: 1px solid var(--border); color: var(--accent2); }
+  td { padding: 7px 10px; border: 1px solid var(--border); vertical-align: top; }
+  code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; color: #a5d6ff; }
+  .flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 12px 0; }
+  .fstep { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; font-size: 13px; }
+  .fstep.hot { border-color: var(--bad); color: var(--bad); }
+  .fstep.ok { border-color: var(--good); color: var(--good); }
+  .farr { color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; }
+  .panel-good { border: 1px solid rgba(63,185,80,.4); border-radius: 10px; padding: 14px 16px; background: rgba(63,185,80,.04); }
+  .panel-bad { border: 1px solid rgba(248,81,73,.4); border-radius: 10px; padding: 14px 16px; background: rgba(248,81,73,.04); }
+  .panel-good h4 { color: var(--good); margin-bottom: 8px; font-size: 14px; }
+  .panel-bad h4 { color: var(--bad); margin-bottom: 8px; font-size: 14px; }
+  @media (max-width: 900px) { #toc { display: none; } main { margin-left: 0; padding: 24px; } .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#s1">1. 问题与证据摘要</a>
+  <a href="#s2">2. 关键事实核查结果</a>
+  <a href="#s3">3. 当前架构 vs 目标架构</a>
+  <a href="#s4">4. 方案分层与选项</a>
+  <a href="#s5">5. 取舍对照表</a>
+  <a href="#s6">6. 推荐组合与实施顺序</a>
+  <a href="#s7">7. 验证方案</a>
+  <a href="#s8">8. 需要拍板的决策点</a>
+</nav>
+<main>
+<h1>GPU 崩溃正面解决方案 — 决策文档</h1>
+<p class="sub">2026-07-23 · 依据:BUG-0002 / BUG-0003 归档 + 三份诊断分析 + 同行调研(带引文)+ 本机实测 · 状态:<b>待用户决策,未写任何产品代码</b></p>
+
+<h2 id="s1">1. 问题与证据摘要</h2>
+<div class="card">
+  <p><b>要解决的问题:</b>macOS Apple Silicon 上 Electron 39 的 ANGLE-Metal GPU 进程崩溃(SIGTRAP,<code>CommandEncoder::reset</code> NSArray 异常)。本机 3 天 3 次(.ips:07-20 15:10、07-23 10:32、07-23 14:27),另一台机器 07-23 05:52 一次。崩溃后果经 BUG-0003 链放大为「花屏且切 tab 无法自救」。</p>
+  <p><b>已确认的触发面:</b>遮挡边界的渲染管线状态翻转 —— 唤醒(+30ms)、watchdog L1 解除节流(+14ms)、历史上的批量 WebGL dispose。均为低概率触发、高确定后果。</p>
+  <p><b>上游根因</b>(electron#49904 讨论定位):ANGLE Metal <code>mPendingSignalEvents</code> 向量中出现 nil 条目,Metal 编码 signal event 时 NSArray 插入抛异常。nil 从何而来上游未完全定案,<b>无已确认的上游修复 CL</b>。</p>
+</div>
+
+<h2 id="s2">2. 关键事实核查结果(决定方案走向)</h2>
+<table>
+  <tr><th>#</th><th>事实</th><th>核查方式</th><th>对方案的影响</th></tr>
+  <tr><td>F1</td><td>electron#49904 已于 2026-03-04 以 Completed 关闭;Cursor 的处方 = Electron ≥39.5.2 + 去掉 <code>--disable-skia-graphite</code></td><td>调研(github issue 原文)</td><td>纠正了我们归档里「关闭无修复」的旧结论</td></tr>
+  <tr><td>F2</td><td><b>我们已经在 Graphite 上</b>:裸 Electron 39.8.5 本机实测 <code>skia_graphite: enabled_on</code> / <code>skiaBackendType: GraphiteDawnMetal</code>;生产 GPU 进程命令行无任何 Graphite 禁用开关</td><td>本机 Electron 探针 + <code>ps</code> 读运行中 GPU Helper 参数</td><td><b>#49904 处方对我们不适用</b> —— Cursor 的崩溃在 Skia-Ganesh 访问路径,我们的崩溃经 WebGL 生产者侧 <code>eglReleaseTexImage</code> 触达同一 nil 缺陷,Graphite 绕不开(终端 6 个 WebGL canvas 是重度用户)</td></tr>
+  <tr><td>F3</td><td>Electron 39 已于 2026-05-05 EOL;最新受支持:41.10.3 / 42.7.1 / 43.2.0(Chromium 146/148/150);39 线最后补丁 39.8.10(我们 39.8.5)</td><td>调研(releases.electronjs.org / endoflife.date)</td><td>大版本升级无论如何都是必做项;它同时是「上游可能已修」的唯一顺风车</td></tr>
+  <tr><td>F4</td><td><code>setBackgroundThrottling(false)</code> 作用于遮挡/最小化窗口造成 visibility 失同步 = Electron 已知 bug(#50250 + PR #39223)</td><td>调研(github issue/PR 原文)</td><td>watchdog L1 干预是已知 bug 触发器 → 撤除遮挡窗口上的干预有上游背书</td></tr>
+  <tr><td>F5</td><td>Chromium 自带 GPU 崩溃次数熔断:约 3 次后逐级降到软件渲染,栈耗尽则浏览器进程主动崩溃(content/browser/gpu/fallback.md)</td><td>调研(Chromium 源码文档)</td><td>我们的恢复设计必须与这个熔断共存;高频崩溃日 Chromium 可能已把用户降到软件渲染</td></tr>
+  <tr><td>F6</td><td>VS Code 阶梯 = WebGL → DOM;context-restored 路径不可信(vscode#263159 复原失败,closed not-planned),dispose+recreate 才可靠;xterm 官方也推荐 onContextLoss → dispose</td><td>调研(vscode issues / xterm README)</td><td>App 层降级方向与同行一致;我们已有的 context-loss 冷却 + DOM 回退基础设施方向正确,可扩展</td></tr>
+  <tr><td>F7</td><td>Electron 默认禁用 <code>MacWebContentsOcclusion</code>(生产 GPU Helper 命令行可见,非我们设置)</td><td><code>ps</code> 实测</td><td>本机 hidden 状态来自 Space 切换/应用隐藏(窗口离屏),是无歧义的合法 hidden → watchdog 误报结论更实</td></tr>
+</table>
+
+<h2 id="s3">3. 当前架构 vs 目标架构</h2>
+<div class="grid2">
+  <div class="panel-bad"><h4>当前(07.22)</h4>
+    <div class="flow"><span class="fstep">Electron 39.8.5(EOL)</span><span class="farr">·</span><span class="fstep hot">ANGLE nil 缺陷在场</span></div>
+    <div class="flow"><span class="fstep hot">watchdog 对遮挡窗口翻状态(L1/L2)= 崩溃触发器 + #50250 失同步触发器</span></div>
+    <div class="flow"><span class="fstep hot">崩溃后:隐藏态重建 → 挂回污染共享图集 → 花屏,切 tab 无效</span></div>
+    <div class="flow"><span class="fstep">降级:仅 context-lost 冷却;GPU 崩溃不触发 DOM 回退</span></div>
+  </div>
+  <div class="panel-good"><h4>目标</h4>
+    <div class="flow"><span class="fstep ok">Electron 受支持大版本(41/42/43)</span><span class="farr">·</span><span class="fstep ok">上游 8 个大版本的 ANGLE 修复顺风车</span></div>
+    <div class="flow"><span class="fstep ok">watchdog 只在「用户能看见窗口」时干预;遮挡=合法态,零状态翻转</span></div>
+    <div class="flow"><span class="fstep ok">崩溃后:换新共享图集 + 重建延迟到可见 + 完好性回读</span></div>
+    <div class="flow"><span class="fstep ok">会话内 GPU 崩溃 ≥N 次 → 终端粘性降级 DOM(VS Code 对齐),提示可重启恢复</span></div>
+  </div>
+</div>
+
+<h2 id="s4">4. 方案分层与选项</h2>
+<h3>层 H — 正面消除崩溃(上游缺陷本体)</h3>
+<table>
+  <tr><th>选项</th><th>内容</th><th>评估</th></tr>
+  <tr><td><b>H-A</b> Electron 大版本升级 <span class="badge b-rec">推荐</span></td><td>39.8.5 → 受支持大版本。候选:41.10.3(最保守)/ 43.2.0(最新稳定,Chromium 150)。升级后用 § 7 的压力验证做 before/after 崩溃率对比。</td><td>唯一现实的「上游修复顺风车」;39 EOL 本来就必须走。成本:native 模块(node-pty/@parcel/watcher)重编、xterm 补丁核对、全量回归。风险:无上游修复 CL 的直接证据,升级后崩溃可能仍在(概率性收益)—— 所以必须配 § 7 验证与 H-C 兜路。</td></tr>
+  <tr><td><b>H-B</b> 自补 ANGLE + 自编 Electron <span class="badge b-heavy">重</span></td><td>在 <code>mtl_command_buffer.mm</code> 对 nil signal event 加防御(跳过/守卫),自维护 Electron 构建。</td><td>最"正面",但要自建并长期维护 macOS arm64/x64 的 Electron 构建流水线(编译数小时、签名、随每次安全更新重打)。仅当 H-A 验证后崩溃仍高频才值得;也可作为向上游提交 patch 的载体(H-D)。</td></tr>
+  <tr><td><b>H-C</b> 收缩应用内 WebGL 崩溃面 <span class="badge b-rec">推荐(与 H-A 并行)</span></td><td>①移除我们自己的触发器(见层 W);②会话内 GPU 崩溃 ≥N 次(建议 N=2)→ 终端粘性降级 DOM 渲染并提示(复用现有 <code>webglFailureCount</code>/冷却/DOM 回退基础设施,VS Code 对齐);③保留 <code>ONWARD_*</code> 强制 DOM 的诊断开关。</td><td>不依赖上游;把「崩溃 → 花屏循环」变成「崩溃 → 稳定的 DOM 渲染」。代价:DOM 渲染的滚动/高吞吐性能低于 WebGL(仅在降级后承受);需一条降级横幅文案(en+zh-CN)。</td></tr>
+  <tr><td><b>H-D</b> 上游反哺 <span class="badge b-info">长线</span></td><td>把我们的 .ips + 遮挡翻转压力复现器整理成 ANGLE/Electron issue,附 nil-signal-event 分析。</td><td>成本低(材料现成),收益慢;与 H-A/B/C 均不冲突。</td></tr>
+</table>
+<h3>层 W — watchdog 语义修复(BUG-0002,双重收益:消误报 + 拆崩溃引信)</h3>
+<p>W1 遮挡/离屏 hidden = 合法态,mismatch 仅当「窗口对用户可见(hasFocus / 前台)而文档 hidden」;W2 <code>win.on('focus'/'show')</code> 触发立即复检 + 冷却失效;W3 非前台窗口禁止一切干预(L1 的 #50250 风险 + L2 的帧驱逐都被移除);W4 渲染侧「输入到达但文档 hidden」即时自报。</p>
+<h3>层 R — 崩溃恢复正确性(BUG-0003)</h3>
+<p>R1 恢复时强制换新共享图集(GPU 侧纹理已全灭,保留旧对象零收益)+ 重建延迟到 document-visible;R2 根治补丁内图集重绑定记账(专项,消除普通 tab 切换的脏引用);R3 恢复后完好性像素回读(P0 插桩)超阈值自动再修一次。注意与 Chromium 崩溃熔断(F5)协同:我们的恢复不应对抗软件渲染回退。</p>
+
+<h2 id="s5">5. 取舍对照表</h2>
+<table>
+  <tr><th>维度</th><th>H-A 升级</th><th>H-B 自编</th><th>H-C 收缩面</th><th>W 层</th><th>R 层</th></tr>
+  <tr><td>消除崩溃本体</td><td>可能(概率性)</td><td>是(若补丁正确)</td><td>否(减少触发+隔离后果)</td><td>拆掉我方引信</td><td>否</td></tr>
+  <tr><td>工作量</td><td>中-大(回归为主)</td><td>很大(基建)</td><td>小-中</td><td>小</td><td>R1 小 / R2 中</td></tr>
+  <tr><td>风险</td><td>大版本行为变化</td><td>维护长尾</td><td>DOM 性能(仅降级后)</td><td>低(收缩行为)</td><td>低 / 补丁回归需 RCS 验证</td></tr>
+  <tr><td>不做的代价</td><td>EOL 裸奔,安全+bug 双欠账</td><td>—</td><td>崩溃继续变花屏</td><td>误报干预继续引爆</td><td>每次崩溃继续花屏</td></tr>
+</table>
+
+<h2 id="s6">6. 推荐组合与实施顺序</h2>
+<div class="callout good">
+  <b>推荐:H-A + H-C + W + R1(先行)→ R2(专项)→ H-D(顺手)。H-B 暂缓,仅当升级后崩溃率不降再评估。</b>
+  <ol style="margin-left:20px">
+    <li><b>第一批(小、快、独立于升级)</b>:W1–W4 + R1 + P0 插桩(崩溃相关性字段、图集回读)。当前 39.8.5 上即可发,立刻止血「花屏 + 黑屏」两条用户可见链。</li>
+    <li><b>第二批</b>:H-C 的粘性 DOM 降级(N=2)+ 降级横幅(en+zh-CN)。</li>
+    <li><b>第三批(专项)</b>:Electron 升级(候选版本待定)+ § 7 A/B 验证;R2 图集根治随 xterm 补丁核对一并做。</li>
+  </ol>
+</div>
+
+<h2 id="s7">7. 验证方案(升级/修复的 before/after 都用它)</h2>
+<ul style="margin-left:20px">
+  <li><b>压力复现器(新增,amend 现有 RCS runner)</b>:遮挡翻转风暴 —— 脚本驱动窗口 hide/show/Space 等价切换 + <code>setBackgroundThrottling</code> 开关 ×N(N≥200),计数 <code>main:gpu.process-gone</code>。当前构建先取基线,任何修复/升级后同参数复跑。崩溃是概率事件 → 用次数换统计功效;N 与判定阈值按首轮基线定。</li>
+  <li><b>生产遥测</b>:<code>error/gpuProcessCrash</code>(已有)按版本分桶,升级灰度后看崩溃率曲线;P0 相关性字段(msSinceLastThrottleToggle / msSinceLastUnocclude / msSinceLastNudge)让每次崩溃自带归因。</li>
+  <li><b>正确性门</b>:RCS 全套(ATLAS/EPOCH/TRANSIENT/STAG)+ 新增 RCS-GPU-01(模拟崩溃 → 恢复 → 逐单元格 ground-truth → tab 往返复查);W 层配 VHM 单元用例 + IWD autotest 断言(N=5 内部聚合)。</li>
+</ul>
+
+<h2 id="s8">8. 需要拍板的决策点</h2>
+<table>
+  <tr><th>#</th><th>决策</th><th>选项</th></tr>
+  <tr><td>D1</td><td>正面路线</td><td>推荐组合(H-A+H-C+W+R1) / 仅应用层先行(H-C+W+R1,升级另议) / 直接评估 H-B</td></tr>
+  <tr><td>D2</td><td>Electron 目标版本</td><td>41.10.3(保守) / 43.2.0(最新稳定) / 待第一批止血后再定</td></tr>
+  <tr><td>D3</td><td>GPU 崩溃 N 次后粘性 DOM 降级</td><td>N=2 / N=1(激进) / 不要自动降级(仅手动开关)</td></tr>
+  <tr><td>D4</td><td>R2(图集根治)时机</td><td>随第三批 / 独立尽快 / 等 xterm 上游 stable(0.20 stable 后弃本地补丁)</td></tr>
+</table>
+
+<hr style="border:none;border-top:1px solid var(--border);margin:48px 0 16px">
+<div class="sub">
+  <b>文档元数据</b><br>
+  生成分支:master · 反映应用版本:v2.1.0-daily.20260722.1(tag 提交 93e5f60)· 文档版本:v1.0<br>
+  引文与出处:BUG-0002/BUG-0003 归档、三份诊断报告(Logs/reports/)、调研引文(electron#49904、electron#50250、PR#39223、releases.electronjs.org、endoflife.date、Chromium content/browser/gpu/fallback.md、vscode#120393/#106202/#263159、xterm addon-webgl README、issues.chromium.org/40063538)<br><br>
+  <b>更新历史(仅追加)</b>
+  <table>
+    <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+    <tr><td>v1.0</td><td>2026-07-23</td><td>master</td><td>初版:事实核查(Graphite 已默认在用,#49904 处方不适用)+ 四层方案(H/W/R/验证)+ 推荐组合 + 4 个决策点。</td></tr>
+  </table>
+</div>
+</main>
+<script>
+(function(){
+  var links = document.querySelectorAll('#toc a');
+  var secs = [];
+  links.forEach(function(a){ var s = document.querySelector(a.getAttribute('href')); if (s) secs.push({a:a, s:s}); });
+  function onScroll(){
+    var y = window.scrollY + 90, cur = secs[0];
+    secs.forEach(function(x){ if (x.s.offsetTop <= y) cur = x; });
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if (cur) cur.a.classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+})();
+</script>
+</body>
+</html>
