@@ -56,6 +56,32 @@ export const PERF_TRACE_EVENT = {
   MAIN_VISIBILITY_WATCHDOG_MISMATCH: 'main:visibility-watchdog.mismatch-detected',
   MAIN_VISIBILITY_WATCHDOG_NUDGE: 'main:visibility-watchdog.nudge-applied',
   MAIN_VISIBILITY_WATCHDOG_RECOVERED: 'main:visibility-watchdog.recovered',
+  // Every non-healthy watchdog check verdict (ph=i). BUG-0002/0003: the
+  // silent observation stretch between mismatch-detected events (cooldown
+  // counting 3..14) was invisible, and hasFocus flips could not be dated.
+  // Emitted only when verdict==='mismatch' or status!=='ok' — the routine
+  // background not-applicable stream stays silent. Payload: { reason,
+  // verdict, windowVisible, windowFocused, visibilityState, rafAlive,
+  // hasFocus, consecutiveMismatches, status }.
+  MAIN_VISIBILITY_WATCHDOG_CHECK_VERDICT: 'main:visibility-watchdog.check-verdict',
+  // Post-nudge recheck outcome pairing a nudge with its direct effect
+  // (ph=i). Payload: { level, verdictAfter, status }. BUG-0002: nudge
+  // efficacy was previously only inferable from later mismatch/recovered.
+  MAIN_VISIBILITY_WATCHDOG_NUDGE_OUTCOME: 'main:visibility-watchdog.nudge-outcome',
+  // Preload reported user input landing on a hidden document (ph=i) — the
+  // strongest "user is looking at a dead window" signal; triggers an
+  // immediate cooldown-bypassing check. Throttled to 1/5s in the preload.
+  // Payload: { hasFocus }.
+  MAIN_VISIBILITY_WATCHDOG_INPUT_REPORT: 'main:visibility-watchdog.input-report',
+  // Main-side window lifecycle breadcrumbs (ph=i, state transitions only).
+  // BUG-0002 open question #1: a renderer window.focus at nudge time could
+  // not be attributed to the nudge's show() vs the user. Payload: { event,
+  // isVisible, isFocused, isMinimized, trigger: 'user'|'watchdog-nudge' }.
+  MAIN_WINDOW_LIFECYCLE: 'main:window.lifecycle',
+  // Updater phase transition (ph=i, hourly-scale). BUG-0002/0003: the
+  // "after upgrade" correlation in user reports could not be checked
+  // against trace time. Payload: { fromPhase, toPhase, targetVersion }.
+  MAIN_UPDATER_STATE_CHANGED: 'main:updater.state-changed',
 
   // ───────── Main process — Git subsystem ─────────
   MAIN_GIT_RUNTIME_SUMMARY: 'main:git-runtime-summary',
@@ -984,6 +1010,18 @@ export const PERF_TRACE_EVENT = {
   // simulated }. Chromium does not deliver webglcontextlost on this crash
   // path, so this is the ONLY recovery breadcrumb.
   RENDERER_XTERM_RENDERER_GPU_CRASH_RECOVERY: 'renderer:xterm.renderer.gpu-crash-recovery',
+  // Renderer: the GPU-gone broadcast arrived while the document was hidden;
+  // the rebuild was deferred to the next document-visible (ph=i). Rebuilding
+  // on a frozen-rAF window cannot be paint-verified (BUG-0003, 2026-07-23
+  // compound episode: recovery ran entirely on a hidden document). Payload:
+  // { reason, simulated }.
+  RENDERER_XTERM_RENDERER_GPU_CRASH_RECOVERY_DEFERRED: 'renderer:xterm.renderer.gpu-crash-recovery-deferred',
+  // Renderer: two-phase crash recovery disposed ALL webgl addons before
+  // recreating any, so the shared glyph-atlas owner count hit zero and the
+  // (potentially poisoned) atlas cache entry was evicted (ph=i). Payload:
+  // { disposedCount }. BUG-0003: the old interleaved dispose/ensure kept
+  // >=1 owner alive so the poisoned atlas survived every rebuild.
+  RENDERER_XTERM_ATLAS_RECOVERY_RENEWAL: 'renderer:xterm.atlas.recovery-renewal',
   // Renderer: a batch of hidden-tab WebGL disposals was queued for staggered
   // (one-per-frame) execution instead of back-to-back teardown (ph=i).
   // Payload: { queuedCount }. Back-to-back context destruction is the

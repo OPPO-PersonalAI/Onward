@@ -233,6 +233,7 @@ export const IPC = {
   SYSTEM_VISIBILITY_PROBE: 'system:visibility-probe',
   SYSTEM_VISIBILITY_PROBE_RESULT: 'system:visibility-probe-result',
   SYSTEM_VISIBILITY_RECOVERY_PUSH: 'system:visibility-recovery-push',
+  SYSTEM_VISIBILITY_INPUT_WHILE_HIDDEN: 'system:visibility-input-while-hidden',
   SETTINGS_CHECK_SHORTCUT_CONFLICT: 'settings:check-shortcut-conflict',
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_REGISTER_SHORTCUTS: 'settings:register-shortcuts',

@@ -1392,6 +1392,16 @@ export class TerminalSessionManager {
   }
 
   notifyHostSurfaceEvent(reason: TerminalRendererSurfaceEvent): void {
+    // A GPU crash that arrived while the document was hidden deferred its
+    // rebuild (BUG-0003): run it now, before the ordinary refresh-only
+    // restore batch touches addons that no longer have a live GPU behind
+    // them. Guard on actual visibility — window-focus events can arrive
+    // while the document is still hidden (the 2026-07-23 stuck episodes).
+    if (this.pendingGpuCrashRecovery && document.visibilityState !== 'hidden') {
+      const pending = this.pendingGpuCrashRecovery
+      this.pendingGpuCrashRecovery = null
+      this.executeGpuCrashRecovery(pending, true)
+    }
     this.scheduleVisibleRendererSurfaceRestore(reason)
   }
 
@@ -1412,14 +1422,59 @@ export class TerminalSessionManager {
    * against the respawned GPU process instead of recovering by luck.
    */
   recoverRendererSurfacesAfterGpuCrash(info: { reason: string; simulated?: boolean }): number {
-    let sessionCount = 0
-    let recreatedCount = 0
-    let failedCount = 0
+    // Rebuilding on a hidden document cannot be paint-verified (rAF frozen,
+    // no BeginFrames — the 2026-07-23 compound episode ran its whole
+    // recovery invisibly). Defer to the next document-visible restore; the
+    // pending flag is consumed by notifyHostSurfaceEvent('document-visible').
+    if (document.visibilityState === 'hidden') {
+      this.pendingGpuCrashRecovery = { reason: info.reason, simulated: Boolean(info.simulated) }
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_GPU_CRASH_RECOVERY_DEFERRED, {
+        reason: info.reason,
+        simulated: Boolean(info.simulated)
+      })
+      return 0
+    }
+    return this.executeGpuCrashRecovery(info, false)
+  }
+
+  private pendingGpuCrashRecovery: { reason: string; simulated: boolean } | null = null
+
+  /**
+   * Two-phase rebuild (BUG-0003): dispose EVERY affected addon first so the
+   * shared glyph-atlas owner count reaches zero and the poisoned cache
+   * entry is evicted, THEN recreate all — the first ensure allocates a
+   * brand-new atlas and the rest attach to it. The old per-session
+   * dispose+ensure interleave kept >=1 owner alive, so the corrupted atlas
+   * survived every rebuild and tab switching could never self-heal.
+   */
+  private executeGpuCrashRecovery(
+    info: { reason: string; simulated?: boolean },
+    wasDeferred: boolean
+  ): number {
+    const targets: TerminalSession[] = []
     for (const session of this.sessions.values()) {
       if (!session.visible || !session.open || session.status === 'disposed') continue
-      sessionCount += 1
+      targets.push(session)
+    }
+
+    let disposedCount = 0
+    for (const session of targets) {
       try {
-        const result = session.renderer.forceRecreateWebgl('gpu-process-gone')
+        session.renderer.prepareGpuCrashRecovery('gpu-process-gone')
+        disposedCount += 1
+      } catch (error) {
+        console.warn('[GpuCrashRecovery] dispose phase threw', session.id, error)
+      }
+    }
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_ATLAS_RECOVERY_RENEWAL, {
+      disposedCount
+    })
+
+    let recreatedCount = 0
+    let failedCount = 0
+    for (const session of targets) {
+      try {
+        const result = session.renderer.completeGpuCrashRecovery('gpu-process-gone')
         if (result.webglActive) recreatedCount += 1
         else failedCount += 1
         this.forceFit(session.id)
@@ -1429,11 +1484,13 @@ export class TerminalSessionManager {
       }
     }
     perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_GPU_CRASH_RECOVERY, {
-      sessionCount,
+      sessionCount: targets.length,
       recreatedCount,
       failedCount,
       reason: info.reason,
-      simulated: Boolean(info.simulated)
+      simulated: Boolean(info.simulated),
+      twoPhase: true,
+      wasDeferred
     })
     return recreatedCount
   }

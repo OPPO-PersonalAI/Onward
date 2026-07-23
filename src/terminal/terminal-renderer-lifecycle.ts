@@ -193,7 +193,12 @@ export class TerminalRendererLifecycle {
         perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_REFRESH_AFTER_RESTORE, {
           terminalId: this.terminalId,
           reason,
-          action
+          action,
+          // BUG-0002: a refresh issued while the document is hidden lands on
+          // a frozen rAF pipeline and paints nothing — without these fields
+          // the event reads as a successful repaint.
+          visibilityState: document.visibilityState,
+          documentHasFocus: document.hasFocus()
         })
         return { ...this.buildResult(false, false), action }
       }
@@ -234,13 +239,26 @@ export class TerminalRendererLifecycle {
    * clear loss/cooldown bookkeeping (the crash was not a WebGL failure of
    * ours), and attach a fresh addon against the respawned GPU process.
    */
-  forceRecreateWebgl(reason: TerminalRendererLifecycleReason): TerminalRendererLifecycleResult {
+  /**
+   * Phase 1 of two-phase crash recovery: drop the dead addon and clear
+   * loss/cooldown bookkeeping WITHOUT recreating yet. The session manager
+   * runs this phase across ALL terminals first so the shared glyph-atlas
+   * owner count reaches zero and the (potentially poisoned) cache entry is
+   * evicted — the interleaved dispose/ensure of the old single-call path
+   * kept >=1 owner alive, so a corrupted atlas survived every rebuild
+   * (BUG-0003).
+   */
+  prepareGpuCrashRecovery(reason: TerminalRendererLifecycleReason): void {
     this.markLifecycle(reason)
     this.detachContextListeners()
     this.disposeWebgl(reason)
     this.contextLost = false
     this.webglFailureCount = 0
     this.webglDisabledUntil = null
+  }
+
+  /** Phase 2: attach a fresh addon against the respawned GPU process. */
+  completeGpuCrashRecovery(reason: TerminalRendererLifecycleReason): TerminalRendererLifecycleResult {
     const result = this.ensureWebgl(reason)
     this.refreshTerminalIfActive()
     return result

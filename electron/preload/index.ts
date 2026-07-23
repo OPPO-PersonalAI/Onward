@@ -2652,6 +2652,28 @@ ipcRenderer.on(IPC.SYSTEM_VISIBILITY_PROBE, (_event, probeId: string) => {
   setTimeout(() => reply(false), 250)
 })
 
+// Input-while-hidden self-report (BUG-0002). User input landing on a
+// document that believes it is hidden is a contradiction the 30 s watchdog
+// interval is too slow for — report it so the main process can run an
+// immediate cooldown-bypassing check. Lives in the preload (same rationale
+// as the probe responder above: keeps working when the app bundle is
+// wedged). Per-keystroke budget: one string compare on the healthy path,
+// IPC only in the broken state, throttled to one report per 5 s.
+{
+  let lastInputWhileHiddenReport = 0
+  const reportInputWhileHidden = () => {
+    if (document.visibilityState !== 'hidden') return
+    const now = Date.now()
+    if (now - lastInputWhileHiddenReport < 5_000) return
+    lastInputWhileHiddenReport = now
+    ipcRenderer.send(IPC.SYSTEM_VISIBILITY_INPUT_WHILE_HIDDEN, {
+      hasFocus: document.hasFocus()
+    })
+  }
+  window.addEventListener('keydown', reportInputWhileHidden, { capture: true, passive: true })
+  window.addEventListener('mousedown', reportInputWhileHidden, { capture: true, passive: true })
+}
+
 const systemAPI: SystemAPI = {
   onGpuProcessGone: (callback) => {
     const listener = (

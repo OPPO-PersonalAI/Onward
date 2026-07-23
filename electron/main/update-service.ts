@@ -818,9 +818,20 @@ export class UpdateService {
   }
 
   private setStatus(patch: Partial<UpdateStatus>): UpdateStatus {
+    const fromPhase = this.status.phase
     this.status = {
       ...this.status,
       ...patch
+    }
+    // Updater phase breadcrumb (BUG-0002/0003 P1): user reports correlate
+    // rendering incidents with "after upgrading", but traces carried no
+    // updater state at all. Hourly-scale frequency; transitions only.
+    if (patch.phase !== undefined && patch.phase !== fromPhase) {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_STATE_CHANGED, {
+        fromPhase,
+        toPhase: patch.phase,
+        targetVersion: this.status.targetVersion ?? null
+      })
     }
     this.emitStatus()
     return this.getStatus()

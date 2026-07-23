@@ -25,6 +25,7 @@ import { BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { getWindowActivitySnapshot } from './visibility-watchdog'
 
 export interface GpuProcessGoneInfo {
   reason: string
@@ -37,10 +38,19 @@ export interface GpuProcessGoneInfo {
  * windows notified (0 when all windows are gone, e.g. during quit).
  */
 export function broadcastGpuProcessGone(info: GpuProcessGoneInfo): number {
+  // Crash-antecedent correlation (BUG-0003 P0): the 2026-07-23 episodes
+  // needed manual timeline reconstruction to discover that one crash
+  // followed a wake by 30 ms and another followed a watchdog throttle
+  // toggle by 14 ms. Carry the adjacency in the crash event itself.
+  const activity = getWindowActivitySnapshot()
   performanceTrace.record(PERF_TRACE_EVENT.MAIN_GPU_PROCESS_GONE, {
     reason: info.reason,
     exitCode: info.exitCode,
-    simulated: Boolean(info.simulated)
+    simulated: Boolean(info.simulated),
+    msSinceLastWindowShow: activity.msSinceLastWindowShow,
+    msSinceLastWindowFocus: activity.msSinceLastWindowFocus,
+    msSinceLastThrottleToggle: activity.msSinceLastThrottleToggle,
+    msSinceLastNudge: activity.msSinceLastNudge
   })
 
   let notified = 0

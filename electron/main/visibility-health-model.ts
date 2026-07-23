@@ -27,28 +27,51 @@ export interface VisibilityProbeReply {
 export interface VisibilityCheckInput {
   /** Main-side truth: window exists, isVisible() and not minimized. */
   windowVisible: boolean
+  /** Main-side truth: win.isFocused() at probe time. */
+  windowFocused: boolean
   /** Renderer reply, or 'timeout' when no reply arrived in time. */
   probe: VisibilityProbeReply | 'timeout'
 }
 
 export type VisibilityVerdict = 'healthy' | 'not-applicable' | 'mismatch'
 
+/**
+ * A mismatch is only judged when the user can actually see the window
+ * (main-side focus or renderer-side document focus). On macOS,
+ * `isVisible()` stays true for windows that are fully covered, on another
+ * Space, or behind a hidden app — for those, a hidden document and a
+ * parked rAF are the CORRECT states, and the 2026-07-23 incidents proved
+ * that nudging them is actively harmful: `setBackgroundThrottling(false)`
+ * on an occluded window is a known Electron visibility-desync trigger
+ * (electron#50250), one L1 nudge preceded a GPU-process crash by 14 ms,
+ * and the L2 hide()/showInactive() evicts the compositor frame and twice
+ * jammed the document into the very stuck-hidden state the watchdog was
+ * built to cure (BUG-0002). A wedged renderer in a background window is
+ * picked up by the focus-event immediate check the moment it matters.
+ */
 export function judgeVisibilityProbe(input: VisibilityCheckInput): VisibilityVerdict {
   if (!input.windowVisible) {
     // Window legitimately hidden/minimized — a hidden renderer is correct.
     return 'not-applicable'
   }
   if (input.probe === 'timeout') {
-    // No reply at all: the preload responder is wedged too. Treat as
-    // mismatch — the nudge ladder is the only lever we have.
-    return 'mismatch'
+    // No reply at all: the preload responder is wedged too. Only actionable
+    // when the user is looking at the window; a background window's wedged
+    // renderer waits for the focus-event check.
+    return input.windowFocused ? 'mismatch' : 'not-applicable'
+  }
+  const userCanSee = input.windowFocused || input.probe.hasFocus
+  if (!userCanSee) {
+    // Occluded / other-Space / hidden-app window: hidden document and dead
+    // rAF are legitimate. Never judge, never nudge.
+    return 'not-applicable'
   }
   if (input.probe.visibilityState !== 'visible') {
     return 'mismatch'
   }
   if (!input.probe.rafAlive) {
-    // Correct visibility but no frames: paint-dead (GPU-side freeze
-    // overlaps this symptom); the same nudges apply.
+    // Correct visibility but no frames while the user is looking:
+    // paint-dead (GPU-side freeze overlaps this symptom).
     return 'mismatch'
   }
   return 'healthy'
@@ -88,10 +111,22 @@ export function initialVisibilityWatchState(): VisibilityWatchState {
   return { status: 'ok', consecutiveMismatches: 0, nudgeLevel: 0, gaveUpAt: null, recoveries: 0 }
 }
 
+export interface VisibilityReduceOptions {
+  /**
+   * Skip the gave-up cooldown gate for this check. Set by focus-event and
+   * input-report checks: when the user just brought the window forward (or
+   * is typing into it), a stuck renderer must be re-nudged NOW — the
+   * 2026-07-23 episodes showed users staring at a dead window for 3.5-5.5
+   * minutes because the cooldown had no user-presence override (BUG-0002).
+   */
+  bypassCooldown?: boolean
+}
+
 export function reduceVisibilityCheck(
   state: VisibilityWatchState,
   verdict: VisibilityVerdict,
-  nowMs: number
+  nowMs: number,
+  options?: VisibilityReduceOptions
 ): VisibilityTransition {
   if (verdict === 'not-applicable') {
     // Legitimate hidden window resets the mismatch run but does not count
@@ -128,7 +163,9 @@ export function reduceVisibilityCheck(
   const consecutiveMismatches = state.consecutiveMismatches + 1
 
   if (state.status === 'gave-up') {
-    if (state.gaveUpAt !== null && nowMs - state.gaveUpAt < VISIBILITY_NUDGE_COOLDOWN_MS) {
+    const coolingDown =
+      state.gaveUpAt !== null && nowMs - state.gaveUpAt < VISIBILITY_NUDGE_COOLDOWN_MS
+    if (coolingDown && !options?.bypassCooldown) {
       // Still cooling down: keep observing, do not re-nudge.
       return { next: { ...state, consecutiveMismatches }, actions: [] }
     }
