@@ -83,7 +83,17 @@ export const SNAPSHOT_QUERIES = {
   // the model can extract the dynamic fu_* feature-use counters without a
   // parallel feature-ID list living outside the app registry.
   dailySummariesRaw:
-    "select toDate(timestamp) as d, distinct_id, properties from events where event = 'daily/summary' order by d"
+    "select toDate(timestamp) as d, distinct_id, properties from events where event = 'daily/summary' order by d",
+  // 2026-07-23 GPU-crash observability (appended per the append-only rule):
+  // splits GPU crashes from renderer crashes per app version + reason —
+  // crashPairs conflates the two classes, and the Electron-upgrade A/B is
+  // judged on exactly this series.
+  gpuCrashesByVersion:
+    "select toDate(timestamp) as d, properties.appVersion, properties.reason, count() from events where event = 'error/gpuProcessCrash' group by d, properties.appVersion, properties.reason order by d",
+  // Recovery health per version: 'sticky-fallback' rows = the N=2 session
+  // fuse engaged (terminals degraded to the DOM renderer until restart).
+  gpuRecoveryOutcomes:
+    "select toDate(timestamp) as d, properties.appVersion, properties.outcome, count() from events where event = 'error/gpuCrashRecovery' group by d, properties.appVersion, properties.outcome order by d"
 }
 
 async function runQuery(host, projectId, apiKey, sql) {

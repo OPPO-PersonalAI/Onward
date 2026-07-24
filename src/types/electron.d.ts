@@ -1114,6 +1114,28 @@ export interface DebugAPI {
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
   simulateGpuProcessGone: () => Promise<{ success: boolean; notified?: number; error?: string }>
+  runOcclusionFlipStress: (cycles?: number) => Promise<{
+    success: boolean
+    cycles?: number
+    requestedCycles?: number
+    gpuCrashes?: number
+    firstCrashAtCycle?: number | null
+    durationMs?: number
+    error?: string
+  }>
+  killGpuProcess: () => Promise<{ success: boolean; pid?: number; killed?: boolean; error?: string }>
+  runGpuWakeParkSoak: () => Promise<{
+    success: boolean
+    cycles?: number
+    requestedCycles?: number
+    gpuCrashes?: number
+    firstCrashAtCycle?: number | null
+    parkMsAtCrash?: number | null
+    perCycle?: Array<{ cycle: number; parkMs: number; crashed: boolean }>
+    params?: { parkMinSec: number; parkMaxSec: number; throttleFlip: boolean; stopOnFirstCrash: boolean }
+    durationMs?: number
+    error?: string
+  }>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
   getMainWorkMetrics: () => Promise<Record<string, unknown>>

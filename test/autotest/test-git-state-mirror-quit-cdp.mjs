@@ -144,7 +144,11 @@ async function waitForPageTarget(connection, child) {
         signal: child.signalCode
       })
     }
-    const result = await connection.send('Target.getTargets')
+    // Chromium 150 (Electron 43) tightened the default target filter for
+    // browser-protocol Target.getTargets and page targets stopped appearing;
+    // an explicit match-everything filter restores the pre-150 behaviour and
+    // is accepted by older Chromium too.
+    const result = await connection.send('Target.getTargets', { filter: [{}] })
     lastTargets = Array.isArray(result.targetInfos) ? result.targetInfos : []
     const page = lastTargets.find((target) => target.type === 'page' && target.targetId)
     if (page) return page

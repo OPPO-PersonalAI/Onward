@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import {
   isGitStateMirrorQuiescent,
   awaitWatcherQuiescence,
+  awaitWatcherQuiescenceWithSettle,
   shouldRespawnGitStateMirrorWorker
 } from '../../electron/main/git-state-mirror-teardown.ts'
 
@@ -39,6 +40,83 @@ test('isGitStateMirrorQuiescent is true only at zero subscriptions AND zero pend
 test('isGitStateMirrorQuiescent treats negative (leaked) counters as quiescent so a bug cannot hard-wedge teardown', () => {
   assert.equal(isGitStateMirrorQuiescent(-1, 0), true)
   assert.equal(isGitStateMirrorQuiescent(0, -2), true)
+})
+
+test('isGitStateMirrorQuiescent also requires zero in-flight native ops (call-time subscribe tracking, 2026-07-23 SIGABRT hole)', () => {
+  assert.equal(isGitStateMirrorQuiescent(0, 0, 0), true)
+  assert.equal(isGitStateMirrorQuiescent(0, 0, 1), false)
+  assert.equal(isGitStateMirrorQuiescent(0, 0, -1), true)
+})
+
+// ---------------------------------------------------------------------------
+// awaitWatcherQuiescence + pendingOps / awaitWatcherQuiescenceWithSettle
+// ---------------------------------------------------------------------------
+
+test('awaitWatcherQuiescence waits for an in-flight native op invisible to the two legacy counters', async () => {
+  const clock = fakeClock()
+  let ops = 1
+  let settledOps = 0
+  const result = await awaitWatcherQuiescence({
+    getActive: () => 0,
+    getPending: () => 0,
+    settlePending: async () => {},
+    getPendingOps: () => ops,
+    settlePendingOps: async () => {
+      settledOps += 1
+      // The in-flight subscribe resolves on the second settle attempt.
+      if (settledOps >= 2) ops = 0
+    },
+    delay: clock.delay,
+    now: clock.now
+  })
+  assert.equal(result.deadlineHit, false)
+  assert.equal(ops, 0)
+  assert.ok(settledOps >= 2)
+})
+
+test('awaitWatcherQuiescenceWithSettle re-enters when an op appears during the settle window (H2) and reports requiesceCount', async () => {
+  const clock = fakeClock()
+  let ops = 0
+  let opInjected = false
+  const result = await awaitWatcherQuiescenceWithSettle({
+    getActive: () => 0,
+    getPending: () => 0,
+    settlePending: async () => {},
+    getPendingOps: () => ops,
+    settlePendingOps: async () => { ops = 0 },
+    delay: async (ms: number) => {
+      await clock.delay(ms)
+      // Simulate a subscribe resolving mid-settle and queueing its
+      // compensating unsubscribe: an op appears during the settle window.
+      if (ms >= 100 && !opInjected) {
+        opInjected = true
+        ops = 1
+      }
+    },
+    now: clock.now,
+    settleMs: 100
+  })
+  assert.equal(result.deadlineHit, false)
+  assert.equal(result.requiesceCount, 1)
+  assert.equal(ops, 0)
+})
+
+test('awaitWatcherQuiescenceWithSettle is bounded by the overall deadline when ops never drain', async () => {
+  const clock = fakeClock()
+  const result = await awaitWatcherQuiescenceWithSettle({
+    getActive: () => 0,
+    getPending: () => 0,
+    settlePending: async () => {},
+    getPendingOps: () => 1,
+    settlePendingOps: async () => {},
+    delay: clock.delay,
+    now: clock.now,
+    deadlineMs: 200,
+    settleMs: 50
+  })
+  assert.equal(result.deadlineHit, true)
+  // Overall deadline = 2*deadlineMs + 2*settleMs = 500; must not spin forever.
+  assert.ok(result.spunMs <= 700)
 })
 
 // ---------------------------------------------------------------------------

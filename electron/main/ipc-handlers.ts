@@ -78,6 +78,7 @@ import { getUpdateService } from './update-service'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 import { broadcastGpuProcessGone } from './gpu-crash-recovery'
+import { findGpuProcessMetric } from './gpu-process-metrics'
 import { performanceTrace, TraceContext } from './performance-trace'
 import { traceStore } from './trace-store'
 
@@ -815,12 +816,197 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     if (process.env.ONWARD_AUTOTEST !== '1') {
       return { success: false, error: 'debug:simulate-gpu-process-gone requires ONWARD_AUTOTEST=1' }
     }
-    const notified = broadcastGpuProcessGone({
+    const { notified } = broadcastGpuProcessGone({
       reason: 'crashed',
       exitCode: 5,
       simulated: true
     })
     return { success: true, notified }
+  })
+  // Autotest-only: REALLY kill the GPU process (SIGKILL by real pid from
+  // app.getAppMetrics). Unlike the simulate hook above, this exercises
+  // Chromium's genuine child-process-gone -> respawn -> recovery chain:
+  // real context death, real texture loss, real respawn timing. reason will
+  // be 'killed' (not 'crashed'); the recovery path treats any GPU gone the
+  // same. Callers must stay under Chromium's ~3-crash software-raster
+  // ladder per session — the GRK suite kills at most twice.
+  ipcMain.handle(IPC.DEBUG_KILL_GPU_PROCESS, () => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:kill-gpu-process requires ONWARD_AUTOTEST=1' }
+    }
+    const target = findGpuProcessMetric(app.getAppMetrics())
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_DEBUG_GPU_PROCESS_KILL, {
+      pid: target?.pid ?? null,
+      found: target !== null,
+      gpuEntryCount: target?.gpuEntryCount ?? 0
+    })
+    if (!target) {
+      return { success: false, error: 'gpu-process-not-found' }
+    }
+    try {
+      process.kill(target.pid, 'SIGKILL')
+      return { success: true, pid: target.pid, killed: true }
+    } catch (error) {
+      return { success: false, pid: target.pid, error: String(error) }
+    }
+  })
+  // Autotest-only: wake-park GPU-crash SOAK (BUG-0003, evidence-derived).
+  // Replays the PROVEN 3/3 incident recipe the 90 ms flip stress is
+  // structurally blind to: park the window HIDDEN for 15-45 s while live
+  // PTY output keeps flowing (renderer suites start the emitters), then
+  // wake with show+focus — all three real crashes landed 4-30 ms after
+  // exactly this flip. Optional mid-park throttle toggle covers the
+  // machine-1 antecedent. Stop-on-first-crash is the default: post-crash
+  // cycles measure a crippled pipeline (session fuse + Chromium crash
+  // ladder), so cycles-to-first-crash is the metric. Env-tunable:
+  // ONWARD_GPU_SOAK_CYCLES / _PARK_MIN_SEC / _PARK_MAX_SEC /
+  // _THROTTLE_FLIP / _STOP_ON_FIRST_CRASH.
+  ipcMain.handle(IPC.DEBUG_RUN_GPU_WAKE_PARK_SOAK, async (event) => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:run-gpu-wake-park-soak requires ONWARD_AUTOTEST=1' }
+    }
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) {
+      return { success: false, error: 'no live window for the soak loop' }
+    }
+    const cycles = Math.max(1, Math.min(200, Math.floor(Number(process.env.ONWARD_GPU_SOAK_CYCLES)) || 20))
+    const parkMinSec = Math.max(1, Math.floor(Number(process.env.ONWARD_GPU_SOAK_PARK_MIN_SEC)) || 15)
+    const parkMaxSec = Math.max(parkMinSec, Math.floor(Number(process.env.ONWARD_GPU_SOAK_PARK_MAX_SEC)) || 45)
+    const throttleFlip = process.env.ONWARD_GPU_SOAK_THROTTLE_FLIP !== '0'
+    const stopOnFirstCrash = process.env.ONWARD_GPU_SOAK_STOP_ON_FIRST_CRASH !== '0'
+    let gpuCrashes = 0
+    let firstCrashAtCycle: number | null = null
+    let parkMsAtCrash: number | null = null
+    let cyclesCompleted = 0
+    const perCycle: Array<{ cycle: number; parkMs: number; crashed: boolean }> = []
+    const onChildGone = (_e: unknown, details: { type?: string }) => {
+      if (details?.type === 'GPU') gpuCrashes += 1
+    }
+    app.on('child-process-gone', onChildGone)
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+    const startedAt = Date.now()
+    try {
+      for (let i = 0; i < cycles; i++) {
+        if (win.isDestroyed()) break
+        const crashesBefore = gpuCrashes
+        // Deterministic per-cycle jitter (no Math.random needed): sweep the
+        // park range across cycles so every duration tier gets coverage.
+        const parkMs = (parkMinSec + ((i * 7) % (parkMaxSec - parkMinSec + 1))) * 1000
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GPU_SOAK_CYCLE, {
+          cycle: i + 1,
+          parkMs,
+          throttleFlip
+        })
+        win.hide()
+        if (throttleFlip) {
+          await wait(Math.floor(parkMs / 2))
+          if (win.isDestroyed()) break
+          if (!win.webContents.isDestroyed()) {
+            performanceTrace.record(PERF_TRACE_EVENT.MAIN_GPU_SOAK_THROTTLE_FLIP, { cycle: i + 1 })
+            win.webContents.setBackgroundThrottling(false)
+            await wait(2_000)
+            if (!win.webContents.isDestroyed()) win.webContents.setBackgroundThrottling(true)
+          }
+          await wait(Math.max(0, parkMs - Math.floor(parkMs / 2) - 2_000))
+        } else {
+          await wait(parkMs)
+        }
+        if (win.isDestroyed()) break
+        // All three incident crashes had focus at wake — show + focus, not
+        // showInactive.
+        win.show()
+        win.focus()
+        await wait(3_000)
+        cyclesCompleted = i + 1
+        const crashed = gpuCrashes > crashesBefore
+        perCycle.push({ cycle: cyclesCompleted, parkMs, crashed })
+        if (crashed && firstCrashAtCycle === null) {
+          firstCrashAtCycle = cyclesCompleted
+          parkMsAtCrash = parkMs
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_GPU_SOAK_CRASH_OBSERVED, {
+            cycle: cyclesCompleted,
+            parkMs
+          })
+          if (stopOnFirstCrash) break
+        }
+      }
+    } finally {
+      app.removeListener('child-process-gone', onChildGone)
+      try {
+        if (!win.isDestroyed()) win.show()
+      } catch { /* teardown */ }
+    }
+    return {
+      success: true,
+      cycles: cyclesCompleted,
+      requestedCycles: cycles,
+      gpuCrashes,
+      firstCrashAtCycle,
+      parkMsAtCrash,
+      perCycle,
+      params: { parkMinSec, parkMaxSec, throttleFlip, stopOnFirstCrash },
+      durationMs: Date.now() - startedAt
+    }
+  })
+  // Autotest-only: occlusion-boundary flip stress (BUG-0003 Electron-upgrade
+  // baseline). Drives REAL window hide/showInactive cycles plus periodic
+  // backgroundThrottling toggles — the two render-pipeline state flips that
+  // preceded the observed ANGLE-Metal GPU crashes (wake +30 ms, throttle
+  // toggle +14 ms) — and counts genuine GPU child-process-gone events during
+  // the run. This is a MEASUREMENT harness: callers assert completion and
+  // report the crash count; a non-zero count is data, not a failure.
+  ipcMain.handle(IPC.DEBUG_RUN_OCCLUSION_FLIP_STRESS, async (event, rawCycles: number) => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:run-occlusion-flip-stress requires ONWARD_AUTOTEST=1' }
+    }
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) {
+      return { success: false, error: 'no live window for the stress loop' }
+    }
+    const envCycles = Number(process.env.ONWARD_GPU_FLIP_STRESS_CYCLES)
+    const cycles = Math.max(1, Math.min(1000, Math.floor(rawCycles) || Math.floor(envCycles) || 150))
+    let gpuCrashes = 0
+    let firstCrashAtCycle: number | null = null
+    let cyclesCompleted = 0
+    const onChildGone = (_event: unknown, details: { type?: string }) => {
+      if (details?.type === 'GPU') gpuCrashes += 1
+    }
+    app.on('child-process-gone', onChildGone)
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+    const startedAt = Date.now()
+    try {
+      for (let i = 0; i < cycles; i++) {
+        if (win.isDestroyed()) break
+        win.hide()
+        await wait(90)
+        if (win.isDestroyed()) break
+        win.showInactive()
+        await wait(90)
+        if (i % 3 === 2 && !win.webContents.isDestroyed()) {
+          win.webContents.setBackgroundThrottling(false)
+          await wait(40)
+          if (!win.webContents.isDestroyed()) win.webContents.setBackgroundThrottling(true)
+          await wait(40)
+        }
+        cyclesCompleted = i + 1
+        if (firstCrashAtCycle === null && gpuCrashes > 0) firstCrashAtCycle = cyclesCompleted
+      }
+    } finally {
+      app.removeListener('child-process-gone', onChildGone)
+      try {
+        if (!win.isDestroyed()) win.show()
+      } catch {
+        // Window torn down mid-cleanup; the suite is ending anyway.
+      }
+    }
+    return {
+      success: true,
+      cycles: cyclesCompleted,
+      requestedCycles: cycles,
+      gpuCrashes,
+      firstCrashAtCycle,
+      durationMs: Date.now() - startedAt
+    }
   })
   // Autotest-only: force the threadpool-watchdog degraded state so the
   // downstream wiring (renderer toast, telemetry drop path, diagnostic
@@ -2745,10 +2931,28 @@ export function cleanupIpcHandlers(): Promise<void> {
 }
 
 async function runCleanupIpcHandlers(): Promise<void> {
-  // Dispose all terminal data buffers
-  for (const [, buf] of terminalDataBuffers) {
-    buf.dispose()
+  // One throwing dispose must never skip the rest of the chain: everything
+  // below it — including the awaited GitStateMirror worker drain — would be
+  // silently dropped, leaving the worker alive and hanging the quit until
+  // the debug-quit hard-exit floor. Log + trace the failure and continue.
+  const safeDispose = (step: string, run: () => void): void => {
+    try {
+      run()
+    } catch (error) {
+      console.warn(`[Quit] cleanup step '${step}' failed:`, error)
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_QUIT_CLEANUP_STEP_FAILED, {
+        step,
+        error: String(error).slice(0, 256)
+      })
+    }
   }
+
+  // Dispose all terminal data buffers
+  safeDispose('terminal-data-buffers', () => {
+    for (const [, buf] of terminalDataBuffers) {
+      buf.dispose()
+    }
+  })
   terminalDataBuffers.clear()
   terminalFastPathState.clear()
   terminalOutputVisibilityState.clear()
@@ -2757,27 +2961,35 @@ async function runCleanupIpcHandlers(): Promise<void> {
     terminalIpcDiagTimer = null
   }
 
-  gitWatchManager?.dispose()
+  safeDispose('git-watch-manager', () => gitWatchManager?.dispose())
   gitWatchManager = null
-  gitIpcWorkerClient.dispose()
-  sqliteWorkerClient.dispose()
-  getAppStateStorage().dispose()
-  projectFsWorkerClient.dispose()
-  ripgrepSearchManager?.dispose()
+  safeDispose('git-ipc-worker', () => gitIpcWorkerClient.dispose())
+  safeDispose('sqlite-worker', () => sqliteWorkerClient.dispose())
+  safeDispose('app-state-storage', () => getAppStateStorage().dispose())
+  safeDispose('project-fs-worker', () => projectFsWorkerClient.dispose())
+  safeDispose('ripgrep-search', () => ripgrepSearchManager?.dispose())
   ripgrepSearchManager = null
-  fileWatchManager?.dispose()
+  safeDispose('file-watch-manager', () => fileWatchManager?.dispose())
   fileWatchManager = null
-  imageWatchManager?.dispose()
+  safeDispose('image-watch-manager', () => imageWatchManager?.dispose())
   imageWatchManager = null
-  projectTreeWatchManager?.dispose()
+  safeDispose('project-tree-watch-manager', () => projectTreeWatchManager?.dispose())
   projectTreeWatchManager = null
-  gitDiffCacheInvalidator.dispose()
+  safeDispose('git-diff-cache-invalidator', () => gitDiffCacheInvalidator.dispose())
   // Tear down the GitStateMirror worker thread and parcel-watchers before
   // Electron starts tearing down Node worker isolates. Native watcher cleanup
   // can still resolve async N-API promises, so shutdown must be awaited.
   setTerminalCwdAuthorityResolver(null)
   setTerminalCwdDetectedHandler(null)
-  await gitStateMirrorRouter.dispose()
+  try {
+    await gitStateMirrorRouter.dispose()
+  } catch (error) {
+    console.warn("[Quit] cleanup step 'git-state-mirror-router' failed:", error)
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_QUIT_CLEANUP_STEP_FAILED, {
+      step: 'git-state-mirror-router',
+      error: String(error).slice(0, 256)
+    })
+  }
   // Breadcrumb: the GitStateMirror worker has fully drained + exited on the
   // cooperative path BEFORE the runtime frees worker isolates (the will-quit
   // fire-and-forget fix). Its absence in a teardown-crash trace points at an
@@ -2937,6 +3149,9 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.TELEMETRY_SET_CONSENT)
   ipcMain.removeHandler(IPC.DEBUG_GET_APP_METRICS)
   ipcMain.removeHandler(IPC.DEBUG_SIMULATE_GPU_PROCESS_GONE)
+  ipcMain.removeHandler(IPC.DEBUG_RUN_OCCLUSION_FLIP_STRESS)
+  ipcMain.removeHandler(IPC.DEBUG_KILL_GPU_PROCESS)
+  ipcMain.removeHandler(IPC.DEBUG_RUN_GPU_WAKE_PARK_SOAK)
   ipcMain.removeHandler(IPC.DEBUG_SIMULATE_THREADPOOL_STALL)
   ipcMain.removeHandler(IPC.SYSTEM_RELAUNCH_APP)
   ipcMain.removeHandler(IPC.DEBUG_GET_INFRA_HEALTH)

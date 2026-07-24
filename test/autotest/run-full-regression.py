@@ -184,6 +184,8 @@ SCRIPTS: List[str] = [
     # visibility-watchdog probe transport. Real-stall harness lives at the
     # unit layer (threadpool-stall-probe.test.mts, POSIX fifo).
     "test/autotest/run-infra-watchdog-autotest.sh",
+    "test/autotest/run-gpu-occlusion-flip-stress-autotest.sh",
+    "test/autotest/run-gpu-real-kill-recovery-autotest.sh",
     "test/autotest/run-markdown-latex-preview-autotest.sh",
     # Split by CPU phase (idle / post-scroll / editor): the whole 4-phase suite's
     # settle+sampling overran the 300s budget (class-2). Shared body stays in
@@ -489,6 +491,139 @@ def classify_after_retry(first_status: str, retry_status: str) -> str:
     return first_status  # still broken on isolation retry → a real failure
 
 
+# ---------------------------------------------------------------------------
+# Quit-crash gate (2026-07-23): native crashes at app exit must FAIL suites.
+#
+# The hole this closes: most runners launch the app as `"$APP_BIN" … || true`
+# and gate only on grep tokens, so a SIGABRT during quit teardown (e.g. the
+# @parcel/watcher PromiseRunner napi_fatal_error class) happened AFTER the
+# done-marker printed and never turned anything red — while
+# ~/Library/Logs/DiagnosticReports accumulated .ips evidence. The orchestrator
+# now sweeps crash reports written during each runner's window and fails the
+# runner on evidence; crash evidence also BYPASSES the FLAKY reclassification
+# (a retry cannot un-crash a process).
+# ---------------------------------------------------------------------------
+
+CRASH_REPORT_DIR = Path.home() / "Library" / "Logs" / "DiagnosticReports"
+# Clock slack between the orchestrator's wall clock and ReportCrash mtimes.
+CRASH_REPORT_SLACK_SEC = 5.0
+# Suites allowed to crash specific HELPER processes as the thing under test
+# (measurement harnesses). The main app process is never allowlisted.
+CRASH_ALLOWED_HELPER_SUFFIXES = {
+    "test/autotest/run-gpu-occlusion-flip-stress-autotest.sh": ("Helper (GPU)",),
+    "test/autotest/run-gpu-real-kill-recovery-autotest.sh": ("Helper (GPU)",),
+}
+# The quit hard floor does NOT abort (app.exit(0), no .ips) — it is detected
+# via these unconditional log tokens instead. Policy: a tripped floor means
+# quit teardown HUNG past its ceiling; that is a real defect, so it FAILs.
+HARD_FLOOR_LOG_TOKENS = ("[Quit] teardown exceeded", "debug-quit:hard-exit-floor")
+
+
+def match_crash_report_filename(filename: str, app_name: str) -> Optional[str]:
+    """Return the crashing process name when `filename` is a macOS crash
+    report for `app_name` or one of its helper processes, else None.
+    Format: '<proc name>-YYYY-MM-DD-HHMMSS.ips'. Exact-name discipline: a
+    different branch's build ('… 2.0.1-other') must NOT match."""
+    if not filename.endswith(".ips"):
+        return None
+    m = re.match(r"^(.*)-\d{4}-\d{2}-\d{2}-\d{6}\.ips$", filename)
+    if not m:
+        return None
+    proc = m.group(1)
+    if proc == app_name or proc.startswith(app_name + " Helper"):
+        return proc
+    return None
+
+
+def parse_ips_summary(text: str) -> dict:
+    """Best-effort parse of a macOS .ips (header JSON line + body JSON).
+    Returns bug_type / termination indicator / faulting thread name / top
+    symbol frames; missing fields stay None (a parse failure is still
+    treated as evidence by the sweep — unparseable is not innocent)."""
+    out: dict = {"bug_type": None, "termination": None,
+                 "faulting_thread_name": None, "top_frames": []}
+    try:
+        header_line, _, rest = text.partition("\n")
+        header = json.loads(header_line)
+        out["bug_type"] = str(header.get("bug_type")) if header.get("bug_type") is not None else None
+        body = json.loads(rest)
+        term = body.get("termination") or {}
+        out["termination"] = term.get("indicator") or term.get("code")
+        ft = body.get("faultingThread", 0)
+        threads = body.get("threads") or []
+        if isinstance(ft, int) and 0 <= ft < len(threads):
+            thr = threads[ft]
+            out["faulting_thread_name"] = thr.get("name")
+            frames = thr.get("frames") or []
+            out["top_frames"] = [
+                (f.get("symbol") or f"+0x{f.get('imageOffset', 0):x}") for f in frames[:8]
+            ]
+    except Exception:  # noqa: BLE001 — best-effort; unparseable stays suspicious
+        pass
+    return out
+
+
+def sweep_crash_reports(app_name: str, since_epoch: float, script: str, emit) -> List[str]:
+    """macOS: describe crash reports written for the app since `since_epoch`
+    that are not allowlisted for `script`. Non-darwin returns []."""
+    if sys.platform != "darwin" or not CRASH_REPORT_DIR.is_dir():
+        return []
+    allowed = CRASH_ALLOWED_HELPER_SUFFIXES.get(script, ())
+    violations: List[str] = []
+    try:
+        entries = list(CRASH_REPORT_DIR.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        proc = match_crash_report_filename(entry.name, app_name)
+        if proc is None:
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < since_epoch - CRASH_REPORT_SLACK_SEC:
+            continue
+        if proc != app_name and any(sfx in proc for sfx in allowed):
+            emit(f"  ℹ crash report allowlisted for {Path(script).stem}: {entry.name}")
+            continue
+        try:
+            info = parse_ips_summary(entry.read_text(errors="replace"))
+        except OSError:
+            info = {"bug_type": None, "termination": "unreadable",
+                    "faulting_thread_name": None, "top_frames": []}
+        # bug_type 309 = crash. Other known types (hang/spin analytics) are
+        # not process deaths; unknown/unparseable stays included.
+        if info.get("bug_type") not in (None, "309"):
+            continue
+        frames = " <- ".join(str(f)[:60] for f in (info.get("top_frames") or [])[:5])
+        violations.append(
+            f"{entry.name}: {info.get('termination')} "
+            f"thread={info.get('faulting_thread_name')} [{frames}]"
+        )
+    return violations
+
+
+def sweep_crash_dumps(user_data_dir: str) -> List[str]:
+    """Cross-platform layer: Electron crashReporter (started under
+    ONWARD_AUTOTEST=1) writes minidumps below the per-runner userData dir.
+    Only consulted off-macOS to avoid double-counting the .ips sweep."""
+    if sys.platform == "darwin":
+        return []
+    root = Path(user_data_dir)
+    if not root.is_dir():
+        return []
+    return [str(p.relative_to(root)) for p in root.glob("**/*.dmp")]
+
+
+def scan_hard_floor_tokens(log_path: Path) -> List[str]:
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        return []
+    return [t for t in HARD_FLOOR_LOG_TOKENS if t in text]
+
+
 def _run_flake_classify_self_test() -> int:
     """Assert the pure Lever-3 helpers. Run via `--self-test`; returns 0/1."""
     cases = [
@@ -515,6 +650,44 @@ def _run_flake_classify_self_test() -> int:
         if got != expected:
             ok = False
         print(f"  [{mark}] status_from_rc({rc}) = {got!r} (want {expected!r})")
+
+    # Quit-crash gate pure helpers.
+    app = "Under Development 2.0.1-master"
+    match_cases = [
+        (f"{app}-2026-07-23-142008.ips", app),                        # main process
+        (f"{app} Helper (GPU)-2026-07-23-142704.ips", f"{app} Helper (GPU)"),  # helper
+        (f"{app} Helper (Renderer)-2026-07-23-000000.ips", f"{app} Helper (Renderer)"),
+        (f"{app}-other-2026-07-23-142008.ips", None),                 # branch-prefix trap
+        ("Onward 2-2026-07-23-115555.ips", None),                     # different app
+        (f"{app}-2026-07-23-142008.txt", None),                       # wrong extension
+        (f"{app}.ips", None),                                          # no timestamp
+    ]
+    for filename, expected_proc in match_cases:
+        got_proc = match_crash_report_filename(filename, app)
+        mark = "ok" if got_proc == expected_proc else "MISMATCH"
+        if got_proc != expected_proc:
+            ok = False
+        print(f"  [{mark}] match_crash_report_filename({filename!r}) = {got_proc!r} (want {expected_proc!r})")
+
+    ips_sample = (
+        '{"app_name":"X","bug_type":"309"}\n'
+        '{"termination":{"indicator":"Abort trap: 6"},"faultingThread":1,'
+        '"threads":[{"name":"main","frames":[]},'
+        '{"name":"WorkerThread","frames":[{"symbol":"abort"},{"imageOffset":4096}]}]}'
+    )
+    parsed = parse_ips_summary(ips_sample)
+    ips_ok = (parsed["bug_type"] == "309" and parsed["termination"] == "Abort trap: 6"
+              and parsed["faulting_thread_name"] == "WorkerThread"
+              and parsed["top_frames"] == ["abort", "+0x1000"])
+    if not ips_ok:
+        ok = False
+    print(f"  [{'ok' if ips_ok else 'MISMATCH'}] parse_ips_summary structured fields = {parsed!r}")
+    garbage = parse_ips_summary("not json at all")
+    garbage_ok = garbage["bug_type"] is None and garbage["top_frames"] == []
+    if not garbage_ok:
+        ok = False
+    print(f"  [{'ok' if garbage_ok else 'MISMATCH'}] parse_ips_summary tolerates garbage input")
+
     print("SELF-TEST: " + ("ALL PASS" if ok else "FAILED"))
     return 0 if ok else 1
 
@@ -767,13 +940,20 @@ def _check_native_modules(repo_root: Path) -> Optional[str]:
     installed = list(repo_root.glob("node_modules/.pnpm/better-sqlite3@*"))
     if not installed:
         return None  # dependency absent from this tree — nothing to assert
+    # better-sqlite3 <= 12 builds an Electron-ABI module via electron-rebuild
+    # into build/Release/; >= 13 ships Node-API prebuilds (prebuilds/
+    # <platform>-<arch>.node, ABI-stable across Electron versions) and needs
+    # no rebuild at all. Accept either layout.
     built = list(repo_root.glob(
         "node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    )) or list(repo_root.glob(
+        "node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3/prebuilds/*.node"
     ))
     if not built:
         return (
-            "better_sqlite3.node is missing — the project postinstall "
-            "(electron-rebuild) did not produce the Electron-ABI native module "
+            "better_sqlite3.node is missing — neither an electron-rebuild "
+            "output (build/Release/, v12-) nor a Node-API prebuild "
+            "(prebuilds/, v13+) is present "
             "(SQLite suites will fail at runtime with a module-load error)"
         )
     return None
@@ -1430,6 +1610,7 @@ def main() -> int:
                 runner_internal_log.parent.mkdir(parents=True, exist_ok=True)
                 extra_args = [str(runner_internal_log), dsm_repo or ""]
 
+            runner_started_epoch = time.time()
             try:
                 rc, elapsed = run_one(
                     script=script,
@@ -1479,10 +1660,25 @@ def main() -> int:
             # dissolves the "shifting flake set" (a different ~2 of ~85 red each
             # full run) into an honest, non-blocking signal — retry + REPORT, not
             # retry-to-hide.
+            # Quit-crash gate: crash reports / minidumps / hard-floor tokens in
+            # this runner's window are hard evidence — force FAIL even on a
+            # green exit code, and skip the flake retry (a retry cannot
+            # un-crash a process; FLAKY reclassification is bypassed).
+            crash_evidence: List[str] = []
+            crash_evidence += sweep_crash_reports(app_name, runner_started_epoch, script, emit)
+            crash_evidence += [f"minidump {d}" for d in sweep_crash_dumps(user_data)]
+            crash_evidence += [f"hard-floor token '{t}'" for t in scan_hard_floor_tokens(log_path)]
+            if crash_evidence:
+                for v in crash_evidence:
+                    emit(f"  ✗ CRASH EVIDENCE during {Path(script).stem}: {v}")
+                if status == "PASS":
+                    emit(f"  ✗ {script} reclassified PASS → FAIL (quit-crash gate)")
+                status = "FAIL"
+
             first_status = status
             retried = False
             retry_rc: Optional[int] = None
-            if status in ("FAIL", "TIMEOUT") and not args.no_flake_retry:
+            if status in ("FAIL", "TIMEOUT") and not args.no_flake_retry and not crash_evidence:
                 emit(f"  ↻ isolation retry: re-running {Path(script).stem} alone "
                      "to classify flake vs real ...")
                 kill_app(app_name)
@@ -1490,6 +1686,7 @@ def main() -> int:
                 retry_user_data = tempfile.mkdtemp(prefix="onward-regression-userdata.")
                 user_data_temp_dirs.append(retry_user_data)
                 retry_elapsed = 0.0
+                retry_started_epoch = time.time()
                 try:
                     retry_rc, retry_elapsed = run_one(
                         script=script, bash=bash, node=node, app_bin=app_bin,
@@ -1505,6 +1702,16 @@ def main() -> int:
                 if retry_rc is not None:
                     retried = True
                     status = classify_after_retry(first_status, status_from_rc(retry_rc))
+                    # The retry run can itself crash at quit — same gate applies,
+                    # and it overrides a would-be FLAKY reclassification.
+                    retry_evidence: List[str] = []
+                    retry_evidence += sweep_crash_reports(app_name, retry_started_epoch, script, emit)
+                    retry_evidence += [f"minidump {d}" for d in sweep_crash_dumps(retry_user_data)]
+                    if retry_evidence:
+                        for v in retry_evidence:
+                            emit(f"  ✗ CRASH EVIDENCE during {Path(script).stem} (isolation retry): {v}")
+                        crash_evidence += retry_evidence
+                        status = "FAIL"
                     if status == "FLAKY":
                         emit(f"  ⚑ FLAKY {script}: failed then PASSED on isolation retry "
                              f"({retry_elapsed:.0f}s) — NOT counted as a failure.")
@@ -1521,6 +1728,7 @@ def main() -> int:
                 retried=retried,
                 first_status=first_status if retried else None,
                 retry_exit_code=retry_rc if retried else None,
+                note=("; ".join(crash_evidence)[:500] if crash_evidence else ""),
             ))
             if interrupted:
                 break

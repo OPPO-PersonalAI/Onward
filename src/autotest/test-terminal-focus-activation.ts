@@ -4,6 +4,13 @@
  */
 
 import type { AutotestContext, TestResult } from './types'
+import {
+  escapeCssIdent,
+  findWebglSurface,
+  readWebglPixels,
+  hasRenderablePixels,
+  type WebglPixelStats
+} from './webgl-probe-utils'
 
 const POINTER_SUPPRESS_SETTLE_MS = 180
 const POINTER_STALE_WAIT_MS = 520
@@ -14,31 +21,6 @@ const SURFACE_LOSS_TIMEOUT_MS = 1000
 const SURFACE_RESTORE_TIMEOUT_MS = 1500
 const CONTEXT_LOSS_FALLBACK_TIMEOUT_MS = 12000
 
-type WebglContext = WebGLRenderingContext | WebGL2RenderingContext
-
-interface WebglSurfaceProbe {
-  canvas: HTMLCanvasElement
-  gl: WebglContext
-}
-
-interface WebglPixelStats {
-  width: number
-  height: number
-  sampledPixels: number
-  nonZeroPixels: number
-  alphaPixels: number
-  maxChannel: number
-  checksum: number
-  nonZeroRatio: number
-  intensityMean: number
-  intensityVariance: number
-}
-
-const escapeCssIdent = (value: string) => {
-  const css = window.CSS as (typeof window.CSS & { escape?: (value: string) => string }) | undefined
-  return css?.escape ? css.escape(value) : value.replace(/["\\]/g, '\\$&')
-}
-
 const nextFrame = () => new Promise<void>((resolve) => {
   window.requestAnimationFrame(() => resolve())
 })
@@ -47,87 +29,6 @@ const waitForFrames = async (count: number) => {
   for (let index = 0; index < count; index += 1) {
     await nextFrame()
   }
-}
-
-const findWebglSurface = (terminalId: string): WebglSurfaceProbe | null => {
-  const cell = document.querySelector<HTMLElement>(`.terminal-grid-cell[data-terminal-id="${escapeCssIdent(terminalId)}"]`)
-  if (!cell) return null
-
-  const canvases = Array.from(cell.querySelectorAll<HTMLCanvasElement>('.xterm-screen canvas'))
-  for (const canvas of canvases) {
-    const rect = canvas.getBoundingClientRect()
-    if (rect.width <= 1 || rect.height <= 1 || canvas.width <= 1 || canvas.height <= 1) {
-      continue
-    }
-
-    const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
-    if (gl && !gl.isContextLost()) {
-      return { canvas, gl }
-    }
-  }
-
-  return null
-}
-
-const readWebglPixels = (gl: WebglContext): WebglPixelStats => {
-  const width = gl.drawingBufferWidth
-  const height = gl.drawingBufferHeight
-  const pixels = new Uint8Array(width * height * 4)
-
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-  gl.finish()
-  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
-
-  let nonZeroPixels = 0
-  let alphaPixels = 0
-  let maxChannel = 0
-  let checksum = 0
-  let intensitySum = 0
-  let intensitySquaredSum = 0
-
-  for (let index = 0; index < pixels.length; index += 4) {
-    const r = pixels[index]
-    const g = pixels[index + 1]
-    const b = pixels[index + 2]
-    const a = pixels[index + 3]
-    const pixelMax = Math.max(r, g, b, a)
-    const intensity = r + g + b
-    intensitySum += intensity
-    intensitySquaredSum += intensity * intensity
-    if (pixelMax > 8) {
-      nonZeroPixels += 1
-      checksum = ((checksum * 31) + r + (g * 3) + (b * 7) + (a * 11)) >>> 0
-    }
-    if (a > 8) {
-      alphaPixels += 1
-    }
-    if (pixelMax > maxChannel) {
-      maxChannel = pixelMax
-    }
-  }
-
-  const sampledPixels = width * height
-  const intensityMean = sampledPixels > 0 ? intensitySum / sampledPixels : 0
-  const intensityVariance = sampledPixels > 0
-    ? Math.max(0, (intensitySquaredSum / sampledPixels) - (intensityMean * intensityMean))
-    : 0
-
-  return {
-    width,
-    height,
-    sampledPixels,
-    nonZeroPixels,
-    alphaPixels,
-    maxChannel,
-    checksum,
-    nonZeroRatio: sampledPixels > 0 ? nonZeroPixels / sampledPixels : 0,
-    intensityMean,
-    intensityVariance
-  }
-}
-
-const hasRenderablePixels = (stats: WebglPixelStats) => {
-  return stats.maxChannel > 8 && stats.intensityVariance > 0.05
 }
 
 // Used by the TFA-10..17 phantom-blank cases. After `phantomBlank()` paints
@@ -436,7 +337,9 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
   //   TFA-18 restoring the old canvas context does not disturb DOM fallback
   //   TFA-19 document-hidden keeps WebGL alive (occlusion keep-alive contract, 5-trial aggregate)
   //   TFA-20 surface-restore latency budget: >=1 of 3 trials within SURFACE_RESTORE_BUDGET_MS
-  //   TFA-21 GPU-process-gone broadcast force-recreates WebGL (3-trial aggregate)
+  //   TFA-21 GPU crash while hidden defers rebuild, recovers on document-visible (two-phase, fresh atlas)
+  //   TFA-22 second GPU crash blows the session fuse: sticky DOM renderer + TabBar banner
+  //   TFA-23 third crash stays DOM (fuse is one-way for the session)
   // ───────────────────────────────────────────────────────────────────
   const repro = window.__blankTaskRepro
   if (!repro) {
@@ -858,22 +761,16 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
           }
         )
 
-        // ---- TFA-21: GPU-process-gone broadcast force-recreates WebGL ----
-        // 2026-07-14 phase-2 fix: the Electron 39 ANGLE-Metal GPU crash on
-        // Space switches never delivers webglcontextlost, so the main
-        // process broadcasts child-process-gone and the session manager
-        // must force-recreate every visible pane's WebGL. Drives the REAL
-        // IPC roundtrip via the autotest-gated simulate hook. Recovery is
-        // boolean correctness -> 3-trial aggregate, all must succeed.
+        // ---- TFA-21/22/23: GPU-crash recovery contract (batch-1 + batch-2 fixes) ----
+        // Crash #1 while HIDDEN: recovery must DEFER (a hidden-document
+        // rebuild cannot be paint-verified) and execute on the next
+        // document-visible with a fresh shared atlas (two-phase rebuild).
+        // Crash #2: the session fuse blows (N=2 product decision) — every
+        // terminal sticks to the DOM renderer, the TabBar banner appears.
+        // Crash #3: stays DOM; no WebGL is ever recreated this session.
+        // Deterministic staged sequence (the fuse is one-way, identical
+        // trials are impossible); waitFor timeouts absorb scheduling jitter.
         {
-          const GPU_RECOVERY_TRIALS = 3
-          const gpuTrials: Array<{
-            simulateOk: boolean
-            notified: number
-            addonReplaced: boolean
-            webglActiveAfter: boolean
-            renderable: boolean
-          }> = []
           const getAddonRef = () => {
             const mgr = (window as unknown as {
               __terminalSessionManager?: { getSession?: (id: string) => { renderer?: { } } | undefined }
@@ -881,40 +778,94 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
             const session = mgr?.getSession?.(terminalId) as { webglAddon?: object; renderer?: unknown } | undefined
             return (session as { renderer?: { webglAddon?: object } } | undefined)?.renderer?.webglAddon ?? null
           }
-          for (let trial = 0; trial < GPU_RECOVERY_TRIALS; trial++) {
-            const addonBefore = getAddonRef()
-            const simulateResult = await window.electronAPI.debug.simulateGpuProcessGone()
-            const recovered = await waitFor(
-              `tfa-21-recovered-trial-${trial}`,
-              () => {
-                const addonAfter = getAddonRef()
-                if (!addonAfter || addonAfter === addonBefore) return false
-                const state = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
-                if (state?.webglActive !== true) return false
-                const surface = findWebglSurface(terminalId)
-                return Boolean(surface && hasRenderablePixels(readWebglPixels(surface.gl)))
-              },
-              RESTORE_TIMEOUT_MS,
-              RESTORE_POLL_MS
-            )
-            const stateAfter = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
-            gpuTrials.push({
-              simulateOk: Boolean(simulateResult?.success),
-              notified: simulateResult?.notified ?? 0,
-              addonReplaced: recovered,
-              webglActiveAfter: stateAfter?.webglActive === true,
-              renderable: recovered
-            })
-            await sleep(150)
-          }
-          const gpuAllGreen =
-            gpuTrials.length === GPU_RECOVERY_TRIALS &&
-            gpuTrials.every((t) => t.simulateOk && t.notified >= 1 && t.addonReplaced && t.webglActiveAfter)
-          _assert('TFA-21-gpu-process-gone-force-recreates-webgl', gpuAllGreen, {
-            trials: gpuTrials,
-            bugHypothesisFix:
-              'child-process-gone(GPU) broadcast must reach the session manager and force-recreate WebGL, because webglcontextlost is never delivered on this crash path'
-          })
+
+          // -- Crash #1, document hidden → deferred, then executed on visible --
+          const addonBeforeCrash1 = getAddonRef()
+          setDocumentHiddenForTest(true)
+          const simulate1 = await window.electronAPI.debug.simulateGpuProcessGone()
+          await sleep(250)
+          const addonWhileHidden = getAddonRef()
+          const deferredWhileHidden = addonWhileHidden === addonBeforeCrash1
+          setDocumentHiddenForTest(false)
+          const recovered1 = await waitFor(
+            'tfa-21-deferred-recovery-on-visible',
+            () => {
+              const addonAfter = getAddonRef()
+              if (!addonAfter || addonAfter === addonBeforeCrash1) return false
+              const state = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+              if (state?.webglActive !== true) return false
+              const surface = findWebglSurface(terminalId)
+              return Boolean(surface && hasRenderablePixels(readWebglPixels(surface.gl)))
+            },
+            RESTORE_TIMEOUT_MS,
+            RESTORE_POLL_MS
+          )
+          _assert(
+            'TFA-21-gpu-crash-hidden-defers-then-recovers-on-visible',
+            Boolean(simulate1?.success) && (simulate1?.notified ?? 0) >= 1 && deferredWhileHidden && recovered1,
+            {
+              simulate1,
+              deferredWhileHidden,
+              recovered1,
+              bugHypothesisFix:
+                'a GPU crash arriving on a hidden document must defer its rebuild to the next document-visible (frozen rAF cannot paint-verify), then two-phase recreate with a fresh shared atlas'
+            }
+          )
+
+          // -- Crash #2 → session fuse: sticky DOM fallback + banner --
+          const simulate2 = await window.electronAPI.debug.simulateGpuProcessGone()
+          const stuckToDom = await waitFor(
+            'tfa-22-sticky-dom-after-second-crash',
+            () => {
+              const state = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+              return state?.webglActive === false
+            },
+            RESTORE_TIMEOUT_MS,
+            RESTORE_POLL_MS
+          )
+          const fuseCell = document.querySelector<HTMLElement>(
+            `.terminal-grid-cell[data-terminal-id="${escapeCssIdent(terminalId)}"]`
+          )
+          const domRowsAfterFuse =
+            fuseCell?.querySelector<HTMLElement>('.xterm-rows')?.textContent ?? ''
+          // A surface event must NOT resurrect WebGL while the fuse is blown.
+          terminalApi?.notifyHostSurfaceEvent('document-visible')
+          await sleep(250)
+          const stateAfterSurfaceEvent = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+          const banner = document.querySelector<HTMLElement>('[data-testid="gpu-fallback-banner"]')
+          const bannerText = banner?.textContent ?? ''
+          _assert(
+            'TFA-22-second-crash-blows-fuse-sticky-dom-plus-banner',
+            Boolean(simulate2?.success) &&
+              stuckToDom &&
+              domRowsAfterFuse.trim().length > 0 &&
+              stateAfterSurfaceEvent?.webglActive === false &&
+              bannerText.includes('compatibility rendering'),
+            {
+              simulate2,
+              stuckToDom,
+              domRowsLength: domRowsAfterFuse.trim().length,
+              webglAfterSurfaceEvent: stateAfterSurfaceEvent?.webglActive,
+              bannerText: bannerText.slice(0, 140),
+              bugHypothesisFix:
+                'the second GPU crash of a session must switch terminals to the DOM renderer for the rest of the session (VS Code-aligned fuse) and raise the TabBar banner'
+            }
+          )
+
+          // -- Crash #3 → fuse stays blown, still DOM --
+          const simulate3 = await window.electronAPI.debug.simulateGpuProcessGone()
+          await sleep(400)
+          const stateAfterThird = repro.getSessionDebugState(terminalId) as { webglActive?: boolean } | null
+          _assert(
+            'TFA-23-third-crash-stays-dom',
+            Boolean(simulate3?.success) && stateAfterThird?.webglActive === false,
+            {
+              simulate3,
+              webglAfterThird: stateAfterThird?.webglActive,
+              bugHypothesisFix:
+                'the sticky fallback is one-way for the session: later crashes must not flap the renderer back to WebGL'
+            }
+          )
         }
       }
     }

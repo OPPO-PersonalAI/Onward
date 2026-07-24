@@ -37,11 +37,17 @@ export interface GpuProcessGoneInfo {
  * Record the crash and notify every live renderer. Returns the number of
  * windows notified (0 when all windows are gone, e.g. during quit).
  */
-export function broadcastGpuProcessGone(info: GpuProcessGoneInfo): number {
+export interface GpuProcessGoneBroadcastResult {
+  notified: number
+  activity: ReturnType<typeof getWindowActivitySnapshot>
+}
+
+export function broadcastGpuProcessGone(info: GpuProcessGoneInfo): GpuProcessGoneBroadcastResult {
   // Crash-antecedent correlation (BUG-0003 P0): the 2026-07-23 episodes
   // needed manual timeline reconstruction to discover that one crash
   // followed a wake by 30 ms and another followed a watchdog throttle
-  // toggle by 14 ms. Carry the adjacency in the crash event itself.
+  // toggle by 14 ms. Carry the adjacency in the crash event itself — and
+  // return it so trace and telemetry share IDENTICAL values.
   const activity = getWindowActivitySnapshot()
   performanceTrace.record(PERF_TRACE_EVENT.MAIN_GPU_PROCESS_GONE, {
     reason: info.reason,
@@ -70,5 +76,5 @@ export function broadcastGpuProcessGone(info: GpuProcessGoneInfo): number {
       // recovery broadcast.
     }
   }
-  return notified
+  return { notified, activity }
 }

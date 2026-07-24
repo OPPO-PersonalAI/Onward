@@ -20,12 +20,14 @@ import { TerminalOutputScheduler } from './terminal-output-scheduler'
 import {
   TerminalRendererLifecycle,
   createTerminalRendererPolicy,
+  setGlobalWebglSuppression,
   type TerminalRendererLifecycleReason,
   type TerminalRendererLifecycleResult,
   type TerminalRendererMode,
   type TerminalRendererPolicy,
   type TerminalRendererSurfaceEvent
 } from './terminal-renderer-lifecycle'
+import { shouldStickToDomAfterGpuCrash } from './terminal-renderer-surface-policy'
 import { performanceTrace } from '../utils/performance-trace'
 
 export type { TerminalRendererSurfaceEvent } from './terminal-renderer-lifecycle'
@@ -1422,6 +1424,16 @@ export class TerminalSessionManager {
    * against the respawned GPU process instead of recovering by luck.
    */
   recoverRendererSurfacesAfterGpuCrash(info: { reason: string; simulated?: boolean }): number {
+    this.gpuCrashCount += 1
+
+    // Fuse (batch 2, N=2 product decision): a second GPU crash in one
+    // session means this GPU session is hostile — stop recreating WebGL,
+    // stick every terminal to the DOM renderer until app restart. No
+    // visibility gating here: the DOM path needs no live GPU surface.
+    if (shouldStickToDomAfterGpuCrash(this.gpuCrashCount)) {
+      return this.engageGpuCrashStickyFallback(info)
+    }
+
     // Rebuilding on a hidden document cannot be paint-verified (rAF frozen,
     // no BeginFrames — the 2026-07-23 compound episode ran its whole
     // recovery invisibly). Defer to the next document-visible restore; the
@@ -1432,12 +1444,64 @@ export class TerminalSessionManager {
         reason: info.reason,
         simulated: Boolean(info.simulated)
       })
+      if (!info.simulated) {
+        window.electronAPI?.telemetry?.track('error/gpuCrashRecovery', {
+          outcome: 'deferred',
+          crashCount: String(this.gpuCrashCount)
+        })
+      }
       return 0
     }
     return this.executeGpuCrashRecovery(info, false)
   }
 
   private pendingGpuCrashRecovery: { reason: string; simulated: boolean } | null = null
+  private gpuCrashCount = 0
+  private gpuStickyFallbackEngaged = false
+
+  /**
+   * Dispose every live WebGL addon (evicting the shared atlas on the way,
+   * same as phase 1 of the two-phase recovery), suppress WebGL for the
+   * rest of the session, and surface the TabBar banner. Idempotent: later
+   * crashes only bump the counter.
+   */
+  private engageGpuCrashStickyFallback(info: { reason: string; simulated?: boolean }): number {
+    this.pendingGpuCrashRecovery = null
+    if (!this.gpuStickyFallbackEngaged) {
+      this.gpuStickyFallbackEngaged = true
+      setGlobalWebglSuppression('gpu-crash-sticky')
+      let disposedCount = 0
+      for (const session of this.sessions.values()) {
+        if (!session.open || session.status === 'disposed') continue
+        try {
+          session.renderer.prepareGpuCrashRecovery('gpu-process-gone')
+          disposedCount += 1
+          this.forceFit(session.id)
+        } catch (error) {
+          console.warn('[GpuCrashRecovery] sticky-fallback dispose threw', session.id, error)
+        }
+      }
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_GPU_CRASH_STICKY_FALLBACK, {
+        crashCount: this.gpuCrashCount,
+        disposedCount,
+        reason: info.reason,
+        simulated: Boolean(info.simulated)
+      })
+      window.dispatchEvent(
+        new CustomEvent('onward:gpu-renderer-fallback', {
+          detail: { active: true, crashCount: this.gpuCrashCount }
+        })
+      )
+      if (!info.simulated) {
+        window.electronAPI?.telemetry?.track('error/gpuCrashRecovery', {
+          outcome: 'sticky-fallback',
+          crashCount: String(this.gpuCrashCount),
+          disposedCount: String(disposedCount)
+        })
+      }
+    }
+    return 0
+  }
 
   /**
    * Two-phase rebuild (BUG-0003): dispose EVERY affected addon first so the
@@ -1451,6 +1515,7 @@ export class TerminalSessionManager {
     info: { reason: string; simulated?: boolean },
     wasDeferred: boolean
   ): number {
+    const recoveryStartedAt = performance.now()
     const targets: TerminalSession[] = []
     for (const session of this.sessions.values()) {
       if (!session.visible || !session.open || session.status === 'disposed') continue
@@ -1492,6 +1557,18 @@ export class TerminalSessionManager {
       twoPhase: true,
       wasDeferred
     })
+    // Fleet observability (never for simulated autotest crashes): outcome of
+    // this recovery pass, so PostHog can prove per-version recovery health.
+    if (!info.simulated) {
+      const outcome = failedCount === 0 ? 'recreated' : recreatedCount > 0 ? 'partial' : 'failed'
+      window.electronAPI?.telemetry?.track('error/gpuCrashRecovery', {
+        outcome,
+        crashCount: String(this.gpuCrashCount),
+        sessionCount: String(targets.length),
+        failedCount: String(failedCount),
+        durationMs: String(Math.round(performance.now() - recoveryStartedAt))
+      })
+    }
     return recreatedCount
   }
 

@@ -86,6 +86,8 @@ class TelemetryService {
   private remediationInFlight = false
   /** True once any renderer/GPU crash was tracked in this app run. */
   private sessionHadCrash = false
+  private sessionGpuCrashCount = 0
+  private sessionRendererCrashCount = 0
   /** Lazily loaded set of feature IDs whose first-use event already fired. */
   private firstUseFired: Set<string> | null = null
   private droppedLocalWrites = 0
@@ -110,6 +112,8 @@ class TelemetryService {
       this.sessionId = randomUUID()
       this.instanceId = instanceId
       this.sessionHadCrash = false
+      this.sessionGpuCrashCount = 0
+      this.sessionRendererCrashCount = 0
       this.setupLocalLog()
       this.buildCommonProperties(instanceId)
       this.startUploadClient()
@@ -149,11 +153,19 @@ class TelemetryService {
       enriched = {
         ...(enriched ?? {}),
         durationMs: roundDurationMs(Number(enriched?.durationMs) || 0),
-        crashFree: !this.sessionHadCrash
+        // crashFree stays derived from BOTH counters for series continuity
+        // (the sessionEnds HogQL query and crashFreeRate depend on it); the
+        // split counts enable crashes-per-session-hour normalization per
+        // crash class (2026-07-23 GPU observability).
+        crashFree: !this.sessionHadCrash,
+        gpuCrashCount: this.sessionGpuCrashCount,
+        rendererCrashCount: this.sessionRendererCrashCount
       }
     }
     if (name === TELEMETRY_EVENT.ERROR_RENDERER_CRASH || name === TELEMETRY_EVENT.ERROR_GPU_PROCESS_CRASH) {
       this.sessionHadCrash = true
+      if (name === TELEMETRY_EVENT.ERROR_GPU_PROCESS_CRASH) this.sessionGpuCrashCount += 1
+      else this.sessionRendererCrashCount += 1
     }
     const sanitized = enriched
       ? clampEnumProperties(name, this.sanitizeProperties(enriched))

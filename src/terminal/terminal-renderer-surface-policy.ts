@@ -70,3 +70,19 @@ export function decideSurfaceRestoreAction(state: SurfaceRestoreState): SurfaceR
 export function decideDocumentHiddenAction(): 'keep-alive' {
   return 'keep-alive'
 }
+
+/**
+ * Session-scoped GPU-crash fuse (BUG-0003 batch 2, VS Code-aligned
+ * WebGL→DOM ladder): after this many GPU-process crashes in one app
+ * session, terminals stick to the DOM renderer for the rest of the
+ * session. One crash gets the automatic WebGL recovery a chance to work;
+ * a second crash means this GPU/driver session is hostile — trading
+ * scroll throughput for "never garbles again" is the right default.
+ * N=2 was an explicit product decision (2026-07-23); Chromium's own
+ * crash-limit fallback (~3 crashes → software raster) sits behind it.
+ */
+export const GPU_CRASH_STICKY_FALLBACK_THRESHOLD = 2
+
+export function shouldStickToDomAfterGpuCrash(sessionCrashCount: number): boolean {
+  return sessionCrashCount >= GPU_CRASH_STICKY_FALLBACK_THRESHOLD
+}

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<!--
+  SPDX-FileCopyrightText: 2026 OPPO
+  SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU 崩溃正面解决方案 — 设计说明</title>
+<style>
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --bg3: #1c2129; --panel: #21262d;
+    --fg: #e6edf3; --fg-dim: #9da7b3; --fg-faint: #6e7681;
+    --accent: #58a6ff; --accent2: #79c0ff; --green: #3fb950; --red: #f85149;
+    --amber: #d29922; --purple: #bc8cff; --border: #30363d;
+    --mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.75 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  /* ===== 左侧固定 ToC ===== */
+  nav#toc {
+    position: fixed; top: 0; left: 0; width: 264px; height: 100vh;
+    background: var(--bg2); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 20px 0 40px; z-index: 10;
+  }
+  nav#toc .toc-title {
+    padding: 0 20px 12px; font-size: 13px; font-weight: 700;
+    color: var(--fg-faint); text-transform: uppercase; letter-spacing: .08em;
+  }
+  nav#toc a {
+    display: block; padding: 6px 20px; color: var(--fg-dim);
+    text-decoration: none; font-size: 13.5px; border-left: 3px solid transparent;
+  }
+  nav#toc a:hover { color: var(--fg); background: var(--bg3); }
+  nav#toc a.active { color: var(--accent2); border-left-color: var(--accent); background: var(--bg3); }
+  nav#toc a.lv2 { padding-left: 36px; font-size: 12.5px; }
+  main { margin-left: 264px; max-width: 980px; padding: 44px 48px 80px; }
+  @media (max-width: 900px) { nav#toc { display: none; } main { margin-left: 0; } }
+
+  h1 { font-size: 28px; line-height: 1.3; margin-bottom: 6px; }
+  .subtitle { color: var(--fg-dim); margin-bottom: 28px; font-size: 15px; }
+  h2 {
+    font-size: 21px; margin: 44px 0 14px; padding-top: 18px;
+    border-top: 1px solid var(--border);
+  }
+  h3 { font-size: 16.5px; margin: 26px 0 10px; color: var(--accent2); }
+  p { margin: 10px 0; color: var(--fg); }
+  .dim { color: var(--fg-dim); }
+  ul, ol { margin: 8px 0 8px 22px; }
+  li { margin: 4px 0; }
+  code {
+    font-family: var(--mono); font-size: 12.5px; background: var(--bg3);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px;
+  }
+  pre {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; margin: 12px 0;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--bg3); font-weight: 600; }
+  tr:nth-child(even) td { background: var(--bg2); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; margin: 14px 0;
+  }
+  .card h4 { font-size: 14.5px; margin-bottom: 6px; }
+  .callout { border-left: 4px solid var(--accent); background: var(--bg2); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--amber); }
+  .callout.danger { border-left-color: var(--red); }
+  .callout.ok { border-left-color: var(--green); }
+  .badge {
+    display: inline-block; font-size: 11.5px; font-weight: 700; border-radius: 20px;
+    padding: 1px 10px; vertical-align: 1px; margin-right: 4px;
+  }
+  .b-red { background: rgba(248,81,73,.15); color: var(--red); border: 1px solid rgba(248,81,73,.4); }
+  .b-green { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid rgba(63,185,80,.4); }
+  .b-amber { background: rgba(210,153,34,.15); color: var(--amber); border: 1px solid rgba(210,153,34,.4); }
+  .b-blue { background: rgba(88,166,255,.15); color: var(--accent2); border: 1px solid rgba(88,166,255,.4); }
+  .b-purple { background: rgba(188,140,255,.15); color: var(--purple); border: 1px solid rgba(188,140,255,.4); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+  /* 流程图节点 */
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0; margin: 16px 0; }
+  .fnode {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 14px; font-size: 12.5px; text-align: center; align-self: center;
+    min-width: 110px;
+  }
+  .fnode b { display: block; font-size: 13px; }
+  .fnode.bad { border-color: rgba(248,81,73,.55); }
+  .fnode.good { border-color: rgba(63,185,80,.55); }
+  .farrow { align-self: center; color: var(--fg-faint); padding: 0 8px; font-size: 16px; }
+  .meta-table td { font-family: var(--mono); font-size: 12px; }
+  footer { margin-top: 60px; border-top: 1px solid var(--border); padding-top: 18px; }
+  footer h2 { border: none; margin-top: 0; }
+</style>
+</head>
+<body>
+<nav id="toc">
+  <div class="toc-title">目录</div>
+  <a href="#overview">1 · 方案总览</a>
+  <a href="#symptom" class="lv2">1.1 问题与症状</a>
+  <a href="#rootcause">2 · 根因链</a>
+  <a href="#recipe" class="lv2">2.1 测得的崩溃配方</a>
+  <a href="#architecture">3 · 修复架构(四层)</a>
+  <a href="#upgrade" class="lv2">3.1 第一层:Electron 43 升级</a>
+  <a href="#recovery" class="lv2">3.2 第二层:两阶段恢复 + 熔断</a>
+  <a href="#watcher" class="lv2">3.3 第三层:watcher 退出崩溃修复</a>
+  <a href="#quitchain" class="lv2">3.4 第四层:退出链容错</a>
+  <a href="#testing">4 · 测试证明体系</a>
+  <a href="#gate" class="lv2">4.1 崩溃门禁</a>
+  <a href="#grk" class="lv2">4.2 真杀 GPU 恢复测试</a>
+  <a href="#soak" class="lv2">4.3 wake-park 浸泡</a>
+  <a href="#regression" class="lv2">4.4 全量回归结果</a>
+  <a href="#telemetry">5 · 遥测设计(PostHog)</a>
+  <a href="#ab">6 · A/B 对照方法</a>
+  <a href="#risks">7 · 残留风险与后续</a>
+  <a href="#meta">8 · 文档元数据</a>
+</nav>
+<main>
+
+<h1>GPU 崩溃正面解决方案 — 设计说明</h1>
+<p class="subtitle">终端花屏 / 白屏(ANGLE-Metal GPU 进程崩溃)的根因、四层修复架构、三层测试证明与舰队遥测闭环</p>
+
+<h2 id="overview">1 · 方案总览</h2>
+<p>本方案的目标不是"缓解花屏",而是<b>正面消除 GPU 进程崩溃</b>这一根源,并用可复现实验证明消除有效。设计分四层防线 + 三层证明 + 一条遥测闭环:</p>
+<div class="grid2">
+  <div class="card"><h4><span class="badge b-blue">防线</span>四层修复</h4>
+    <ul>
+      <li><b>消除源头</b>:Electron 43.2.0 升级(带走 ANGLE-Metal 缺陷)</li>
+      <li><b>崩溃自愈</b>:两阶段恢复(共享图集重建)+ N=2 会话熔断</li>
+      <li><b>退出安全</b>:watcher 原生操作记账 + 静默屏障</li>
+      <li><b>链路容错</b>:退出清理链逐步容错,单点异常不再截断</li>
+    </ul>
+  </div>
+  <div class="card"><h4><span class="badge b-green">证明</span>三层测试</h4>
+    <ul>
+      <li><b>崩溃门禁</b>:全量回归零 .ips / 零退出超时才算过</li>
+      <li><b>真杀恢复</b>:SIGKILL 真实 GPU 进程,验证恢复与熔断</li>
+      <li><b>配方浸泡</b>:按事故日志测得的配方高强度复现压测</li>
+    </ul>
+  </div>
+</div>
+<div class="callout ok"><b>最终验证状态(2026-07-24)</b>:103 个 runner 全量回归 — 101 过 / 1 跳过 / 1 无关偶发(standalone 2/2 过);<b>整轮零崩溃证据、零退出超时</b>。39 vs 43 A/B 浸泡对照进行中。</div>
+
+<h3 id="symptom">1.1 问题与症状</h3>
+<p>生产版本 v2.1.0-daily.20260722.1(Electron 39.8.5,macOS arm64)上,用户在<b>升级后 + 应用从后台不可见拉回前台</b>时高概率出现:终端内容花屏或整块变黑(文本仍可选中,说明 DOM 活着、WebGL 纹理死了),切换 tab 无法恢复,必须重启。三份诊断包(两台机器)+ 一次活体复现均指向同一条链:<b>GPU 进程在"隐藏→可见"翻转瞬间崩溃</b>,而共享字形图集在崩溃后持有脏引用,导致渲染永不自愈(BUG-0003)。</p>
+
+<h2 id="rootcause">2 · 根因链</h2>
+<div class="flow">
+  <div class="fnode"><b>occlusion 翻转</b>隐藏 ≥17.6s 后唤醒</div><div class="farrow">→</div>
+  <div class="fnode"><b>渲染管线重配</b>eglReleaseTexImage</div><div class="farrow">→</div>
+  <div class="fnode bad"><b>ANGLE-Metal 缺陷</b>mPendingSignalEvents 含 nil</div><div class="farrow">→</div>
+  <div class="fnode bad"><b>NSArray insert 抛出</b>mtl_command_buffer.mm:1158</div><div class="farrow">→</div>
+  <div class="fnode bad"><b>GPU 进程崩溃</b>白屏/花屏</div>
+</div>
+<ul>
+  <li>崩溃点:<code>CommandEncoder::reset</code> 向 <code>NSMutableArray</code> 插入 nil(<code>mtl_command_buffer.mm:1158</code>),经 <code>eglReleaseTexImage → IOSurfaceImageBacking EndAccess</code> 到达;</li>
+  <li>缺陷由 2026-04-08 的 Electron 35.7.5 → 39.8.5 升级(提交 <code>532fe49</code>)引入;上游 electron#49904 已关闭(Completed),修复进入更高版本;</li>
+  <li>放大器(BUG-0002):不可见窗口卡死 + watchdog 在不可见窗口上误触发(electron#50250 佐证),已在 <code>f84b481</code> 修复;</li>
+  <li>崩溃后果(BUG-0003):共享字形图集脏引用 → 切 tab 也无法自愈 → 两阶段恢复修复。</li>
+</ul>
+
+<h3 id="recipe">2.1 测得的崩溃配方(三起事故共同特征)</h3>
+<table>
+  <tr><th>要素</th><th>测量值</th><th>说明</th></tr>
+  <tr><td>隐藏驻留时长</td><td>≥ 17.6 s</td><td>三起事故的最小驻留;短驻留从未崩溃</td></tr>
+  <tr><td>驻留期间 PTY 输出</td><td>必须持续流动</td><td><b>零输出驻留从未崩溃</b> — 配方的承重要素</td></tr>
+  <tr><td>触发瞬间</td><td>唤醒(show+focus)或驻留中节流翻转</td><td>崩溃发生在翻转后 4–30 ms</td></tr>
+  <tr><td>GPU 进程状态</td><td>老化(长会话)</td><td>6 个保活 WebGL 会话在场</td></tr>
+</table>
+<p class="dim">该配方直接转译为 §4.3 的浸泡测试参数 —— 修复"不是猜的"的证据由它提供。</p>
+
+<h2 id="architecture">3 · 修复架构(四层)</h2>
+
+<h3 id="upgrade">3.1 第一层:Electron 43.2.0 升级(消除源头)</h3>
+<ul>
+  <li>ANGLE-Metal 的 nil-insert 缺陷在 Chromium 上游已修,43.2.0 携带修复;</li>
+  <li>升级适配:<code>node-abi 4.33.0</code> override、<code>better-sqlite3 13.0.1</code>、Electron 二进制下载分支;</li>
+  <li>Chromium 150 行为变化逐一处理:occlusion 检测默认启用(autotest 窗口保持不被遮挡)、CDP <code>Target.getTargets</code> 需要 filter、iframe 脱离/重挂时滚动位置重置。</li>
+</ul>
+<div class="callout warn"><b>红线约束</b>:43 升级在 watcher 退出崩溃被证明修复(零崩溃全量回归)之前不得提交 —— 该证明已于 2026-07-24 达成(§4.4)。</div>
+
+<h3 id="recovery">3.2 第二层:两阶段恢复 + N=2 会话熔断(崩溃自愈)</h3>
+<div class="flow">
+  <div class="fnode"><b>GPU 进程 gone</b>child-process-gone</div><div class="farrow">→</div>
+  <div class="fnode"><b>阶段一:全部 dispose</b>图集 owner 归零 → 脏缓存驱逐</div><div class="farrow">→</div>
+  <div class="fnode good"><b>阶段二:全部重建</b>首个 ensure 分配全新图集</div><div class="farrow">→</div>
+  <div class="fnode good"><b>渲染恢复</b></div>
+</div>
+<ul>
+  <li>旧实现按会话"边 dispose 边重建",共享图集始终有 ≥1 个 owner,脏图集永远存活 —— 两阶段化是 BUG-0003 的根修;</li>
+  <li>页面不可见时崩溃 → 恢复<b>推迟到可见</b>(<code>pendingGpuCrashRecovery</code>),避免在 hidden 状态下做无效 WebGL 工作;</li>
+  <li><b>N=2 熔断</b>:同一会话第二次 GPU 崩溃后,永久切换 DOM 渲染器(sticky fallback)+ TabBar 横幅提示 —— 降级但绝不再花屏;Chromium 自身 ~3 次崩溃后也会降软件光栅,熔断先于它到达稳定态。</li>
+</ul>
+
+<h3 id="watcher">3.3 第三层:watcher 退出崩溃修复(退出安全)</h3>
+<p>用户报告的第二类崩溃:退出时 <code>@parcel/watcher</code> 的 <code>napi_fatal_error</code>(worker_threads 环境销毁时 uv 工作落入已死环境)。2.6.0 升级<b>不能</b>修复(UUID 实证)。修复为结构性三件套:</p>
+<ul>
+  <li><b>原生操作记账收口</b>:所有 <code>subscribe/unsubscribe</code> 经 <code>trackNativeWatcherOp</code>(调用时记账)/<code>runGatedNativeWatcherOp</code>(关停闸门 + 拒绝痕迹)进入 <code>pendingNativeWatcherOps</code> 集合 —— 在途 subscribe 对屏障不可见的缺口被关闭;</li>
+  <li><b>静默屏障扩展</b>:<code>awaitWatcherQuiescenceWithSettle</code> — 屏障 + 沉降 + 复验循环,总时限有界(2×deadline + 2×settle);</li>
+  <li><b>兜住未捕获异常</b>:worker 侧 <code>drainThenExit</code>(10 s 封顶后 <code>process.exit(1)</code>),异常路径也先排干再退。</li>
+</ul>
+
+<h3 id="quitchain">3.4 第四层:退出链容错(2026-07-24 由门禁逼出)</h3>
+<div class="callout danger"><b>门禁第一天就付了自己的成本</b>:hard-floor 检测抓到 3 个套件退出悬置 20 s,追查发现 <code>RipgrepSearchManager.dispose()</code> 在"有过搜索的会话"退出时同步抛异常,把 <code>cleanupIpcHandlers</code> 拦腰截断 —— <b>GitStateMirror drain 在这条路径上数周从未执行</b>(昨日日志证实异常早已发生,只是无人可见)。这几乎确定就是用户所贴 watcher SIGABRT 的暴露路径。</div>
+<ul>
+  <li>ripgrep <code>dispose()</code> 幂等化、不再抛(terminate 本身已取消一切,dispose 不再绕道 cancel→request);</li>
+  <li><code>request()</code> 同步异常改为 rejected promise,<code>.catch()</code> 真正能接住;</li>
+  <li>清理链逐步容错(<code>safeDispose</code>):任何子系统 dispose 异常 → 记录 <code>main:app.quit-cleanup-step-failed</code> 事件并继续,<b>永不再跳过 watcher drain</b>。</li>
+</ul>
+
+<h2 id="testing">4 · 测试证明体系</h2>
+
+<h3 id="gate">4.1 崩溃门禁(每轮全量回归强制)</h3>
+<table>
+  <tr><th>检测面</th><th>机制</th><th>失败判定</th></tr>
+  <tr><td>macOS 崩溃报告</td><td>DiagnosticReports <code>.ips</code> 清扫(bug_type 309,精确应用名)</td><td>任何主进程/Helper 报告 = FAIL(仅两个杀 GPU 套件白名单 <code>Helper (GPU)</code>)</td></tr>
+  <tr><td>本地 minidump</td><td>autotest 模式启用 <code>crashReporter</code>(不上传),按 runner userData 清扫 <code>*.dmp</code></td><td>非 darwin 平台等价物</td></tr>
+  <tr><td>退出悬置</td><td>hard-floor 日志令牌(<code>debug-quit:hard-exit-floor</code> 等)</td><td>出现即 FAIL,且跳过 flake 重试</td></tr>
+</table>
+
+<h3 id="grk">4.2 真杀 GPU 恢复测试(GRK-01..07)</h3>
+<div class="flow">
+  <div class="fnode"><b>GRK-01</b>基线可渲染</div><div class="farrow">→</div>
+  <div class="fnode"><b>杀 #1</b>SIGKILL 真实 GPU pid</div><div class="farrow">→</div>
+  <div class="fnode good"><b>GRK-03/04</b>重生 + 恢复渲染</div><div class="farrow">→</div>
+  <div class="fnode"><b>杀 #2</b></div><div class="farrow">→</div>
+  <div class="fnode good"><b>GRK-05/06</b>熔断 + 横幅</div><div class="farrow">→</div>
+  <div class="fnode good"><b>GRK-07</b>熔断保持</div>
+</div>
+<ul>
+  <li>杀的是<b>真实 GPU 进程</b>(<code>process.kill(pid, SIGKILL)</code>,pid 来自 <code>app.getAppMetrics()</code> 纯选择器,有单测),不是模拟事件;</li>
+  <li>试次聚合在<b>启动层</b>:K=3 次全新 app 启动,全绿才过(每会话熔断是单向的,无法会话内重复);</li>
+  <li>已注册进全量回归 <code>SCRIPTS</code>,3/3 绿。</li>
+</ul>
+
+<h3 id="soak">4.3 wake-park 浸泡(配方复现器)</h3>
+<pre><code># 每会话:live PTY 输出持续流动(配方承重要素)
+#   park(隐藏)15–45 s 扫描 → 中途节流翻转 → show+focus 唤醒 → 3 s 停留
+#   遇崩即停(cycles-to-first-crash 为度量),.ips ANGLE 签名核验
+ONWARD_GPU_SOAK_SESSIONS=1 ONWARD_GPU_SOAK_CYCLES=20 \
+ONWARD_GPU_SOAK_PARK_MIN_SEC=15 ONWARD_GPU_SOAK_PARK_MAX_SEC=45 \
+bash test/autotest/run-gpu-wake-park-soak.sh "&lt;APP_BIN&gt;"</code></pre>
+<ul>
+  <li>结果以 JSONL 行落盘(<code>traces/test-logs/gpu-wake-park-soak-results.jsonl</code>),含 electronVersion / cycles / crashes / firstCrashAtCycle / 签名匹配;</li>
+  <li>每会话独立 userData + 会话级超时看门狗(挂死必被回收);</li>
+  <li>是<b>测量仪器</b>而非门禁:门禁是"完成度",崩溃数是 A/B 的因变量,故不进全量回归 SCRIPTS。</li>
+</ul>
+
+<h3 id="regression">4.4 全量回归结果(2026-07-24)</h3>
+<table>
+  <tr><th>指标</th><th>结果</th></tr>
+  <tr><td>runner 总数</td><td>103(含 GRK、单测套件、trace 自检)</td></tr>
+  <tr><td>判定</td><td><span class="badge b-green">101 PASS</span> <span class="badge b-blue">1 SKIP</span> <span class="badge b-amber">1 FAIL(无关偶发,standalone 2/2 过)</span></td></tr>
+  <tr><td>崩溃证据(.ips / minidump)</td><td><b>0</b> — watcher 修复的全量口径证明</td></tr>
+  <tr><td>退出悬置(hard-floor)</td><td><b>0</b>(修复前同轮曾抓到 3 个,见 §3.4)</td></tr>
+</table>
+
+<h2 id="telemetry">5 · 遥测设计(PostHog 舰队观测)</h2>
+<p>目标:升级发布后,无需用户回报即可在全网数据里回答 —— <b>崩溃率是否下降、恢复是否有效、熔断是否在触发、哪个版本最健康</b>。</p>
+<table>
+  <tr><th>事件</th><th>触发点</th><th>关键属性</th><th>通道</th></tr>
+  <tr>
+    <td><code>error/gpuProcessCrash</code></td>
+    <td>主进程 <code>child-process-gone</code>(type=GPU)</td>
+    <td><code>reason</code>、<code>exitCode</code>、<code>msSinceLastWindowShow / Focus / ThrottleToggle / Nudge</code>(把每起崩溃分类为 wake-crash / throttle-crash / organic)</td>
+    <td>Tier-2 live</td>
+  </tr>
+  <tr>
+    <td><code>error/gpuCrashRecovery</code></td>
+    <td>渲染器恢复各出口(模拟崩溃一律不上报)</td>
+    <td><code>outcome</code> ∈ recreated / partial / failed / deferred / sticky-fallback(枚举钳制),<code>crashCount</code>、<code>sessionCount</code>、<code>failedCount</code>、<code>durationMs</code></td>
+    <td>Tier-2 live</td>
+  </tr>
+  <tr>
+    <td><code>session/end</code> 增强</td>
+    <td>会话结束</td>
+    <td><code>gpuCrashCount</code>、<code>rendererCrashCount</code>(会话累计,crashFree 推导保留)</td>
+    <td>Tier-2 live</td>
+  </tr>
+  <tr>
+    <td><code>error/recovered</code>(既有)</td>
+    <td>WebGL 降级等恢复类事件</td>
+    <td><code>kind</code> ∈ unresponsive / webgl-fallback / watcher-degraded</td>
+    <td>Tier-2 live</td>
+  </tr>
+</table>
+<ul>
+  <li>Tier-2 live 通道 = 低频高信号事件<b>原样批量上传</b>(确认门控),不等日报聚合 —— 崩溃类事件天然属于此类;</li>
+  <li>快照脚本 <code>scripts/metrics/pull-posthog-snapshot.mjs</code> 已追加 <code>gpuCrashesByVersion</code>、<code>gpuRecoveryOutcomes</code> 两条 HogQL 查询(append-only);</li>
+  <li>发布后的判读路径:按 <code>appVersion</code> 分组的崩溃率曲线(39 舰队 vs 43 舰队)→ <code>outcome</code> 分布(recreated 占比应 ≫ sticky-fallback)→ <code>msSince*</code> 直方图(wake-crash 是否随 43 消失)。</li>
+</ul>
+
+<h2 id="ab">6 · A/B 对照方法(39.8.5 vs 43.2.0)</h2>
+<div class="grid2">
+  <div class="card"><h4>变量控制</h4>
+    <ul>
+      <li>两个构建<b>只差 Electron 本体</b>(39 基线 = 当前全部代码修复 + electron 39.8.5 / better-sqlite3 12.8.0;watcher 2.6.0 为 NAPI 模块,两侧同版);</li>
+      <li>同一台机器、同日交错运行(热状态 / 系统负载对照);</li>
+      <li>每会话独立 userData,配方参数完全一致。</li>
+    </ul>
+  </div>
+  <div class="card"><h4>统计口径</h4>
+    <ul>
+      <li>度量:<b>会话是否出现 ANGLE 签名 GPU 崩溃</b>(遇崩即停,cycles-to-first-crash 为强度参考);</li>
+      <li>每版本 5 会话交错(39→43→39→…);</li>
+      <li>单侧 Fisher 精确检验:4/5 vs 0/5 → p ≈ 0.024,足以在小样本下下结论;</li>
+      <li>.ips 必须命中 ANGLE 帧签名(CommandEncoder / mtl_command_buffer / insertObject)才计数 —— 排除无关崩溃污染。</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="risks">7 · 残留风险与后续</h2>
+<table>
+  <tr><th>项</th><th>等级</th><th>说明</th></tr>
+  <tr><td>主进程 project-tree watcher 孪生问题</td><td><span class="badge b-amber">P1</span></td><td>fire-and-forget subscribe/unsubscribe 与 worker 侧同类缺口,待同样收口</td></tr>
+  <tr><td>向上游 parcel-watcher 提 issue</td><td><span class="badge b-blue">P2</span></td><td>napi_fatal_error 的最小复现与修复建议</td></tr>
+  <tr><td>冷点击就绪竞态</td><td><span class="badge b-blue">加固</span></td><td><code>SNJ-HTML-DIFF-COLD-5X</code> 满负载窗口偶发(jumpClicked 竞态),测试侧待加就绪等待</td></tr>
+  <tr><td>图集像素读回验证</td><td><span class="badge b-purple">R2</span></td><td>需 xterm patch 级导出,随图集根修(R2)一起做</td></tr>
+  <tr><td>clean-exit 计入熔断?</td><td><span class="badge b-amber">待决策</span></td><td>目前任何 GPU 进程 gone(含 clean-exit)都广播计数;是否仅真崩溃计入 N=2</td></tr>
+</table>
+
+<footer id="meta">
+  <h2>8 · 文档元数据</h2>
+  <table class="meta-table">
+    <tr><td>生成分支</td><td>master</td></tr>
+    <tr><td>反映版本</td><td>app 2.0.1(dev)/ 基线提交 9d4a7a8 + 未提交工作集(GPU 崩溃专项批次)</td></tr>
+    <tr><td>文档版本</td><td>1.0</td></tr>
+  </table>
+  <h3>更新历史(append-only)</h3>
+  <table class="meta-table">
+    <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+    <tr><td>1.0</td><td>2026-07-24</td><td>master</td><td>首版:根因链、四层修复架构、三层测试证明、遥测设计、A/B 方法、残留风险</td></tr>
+  </table>
+</footer>
+</main>
+<script>
+  // Current-section highlight; jumps are instant (scroll-behavior: auto).
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('nav#toc a'));
+    var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+    function onScroll() {
+      var y = window.scrollY + 90, idx = 0;
+      for (var i = 0; i < targets.length; i++) {
+        if (targets[i] && targets[i].offsetTop <= y) idx = i;
+      }
+      links.forEach(function (a, i) { a.classList.toggle('active', i === idx); });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+</body>
+</html>

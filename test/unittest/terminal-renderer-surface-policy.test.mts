@@ -18,6 +18,8 @@ import assert from 'node:assert/strict'
 import {
   decideSurfaceRestoreAction,
   decideDocumentHiddenAction,
+  shouldStickToDomAfterGpuCrash,
+  GPU_CRASH_STICKY_FALLBACK_THRESHOLD,
   type SurfaceRestoreState
 } from '../../src/terminal/terminal-renderer-surface-policy.ts'
 
@@ -65,4 +67,17 @@ test('TRSP-U-08 no addon, healthy → recreate WebGL', () => {
 
 test('TRSP-U-09 document-hidden → keep-alive (occlusion never tears down GPU resources)', () => {
   assert.equal(decideDocumentHiddenAction(), 'keep-alive')
+})
+
+// ─────────── TRSP-U-10/11 GPU-crash session fuse (batch 2, N=2 product decision) ───────────
+
+test('TRSP-U-10 first GPU crash does not blow the fuse (auto-recovery gets one chance)', () => {
+  assert.equal(shouldStickToDomAfterGpuCrash(0), false)
+  assert.equal(shouldStickToDomAfterGpuCrash(1), false)
+})
+
+test('TRSP-U-11 second and later crashes stick to DOM (threshold pinned at 2)', () => {
+  assert.equal(GPU_CRASH_STICKY_FALLBACK_THRESHOLD, 2)
+  assert.equal(shouldStickToDomAfterGpuCrash(2), true)
+  assert.equal(shouldStickToDomAfterGpuCrash(3), true)
 })

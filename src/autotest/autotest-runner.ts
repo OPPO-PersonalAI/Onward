@@ -83,6 +83,9 @@ import { testFeedbackPersistenceSeed, testFeedbackPersistenceVerify } from './te
 import { testTerminalRenameRestartSurvivalSeed, testTerminalRenameRestartSurvivalVerify } from './test-terminal-rename-restart-survival'
 import { testTelemetry } from './test-telemetry'
 import { testInfraWatchdog } from './test-infra-watchdog'
+import { testGpuOcclusionFlipStress } from './test-gpu-occlusion-flip-stress'
+import { testGpuRealKillRecovery } from './test-gpu-real-kill-recovery'
+import { testGpuWakeParkSoak } from './test-gpu-wake-park-soak'
 import { testPerformanceTrace } from './test-performance-trace'
 import { testSubpageViewstateRestore } from './test-subpage-viewstate-restore'
 import { testQuickFileUnit } from './test-quick-file-unit'
@@ -455,6 +458,35 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.882:begin')
       const results = await testInfraWatchdog(ctx)
       collectSuiteResults('InfraWatchdog', results)
+      await sleep(300)
+    }
+
+    // Explicit-only: a measurement stress (window visibly flickers ~35 s,
+    // can genuinely crash the GPU process); runs only when the suite is
+    // named via ONWARD_AUTOTEST_SUITE=gpu-occlusion-flip-stress.
+    if (!ctx.cancelled() && shouldRun('gpu-occlusion-flip-stress', { explicitOnly: true })) {
+      log('phase0.883:begin')
+      const results = await testGpuOcclusionFlipStress(ctx)
+      collectSuiteResults('GpuOcclusionFlipStress', results)
+      await sleep(300)
+    }
+
+    // Explicit-only: REALLY SIGKILLs the GPU helper twice (fuse is one-way,
+    // Chromium's crash ladder caps a session) — never part of the default
+    // all-suite pass; the runner aggregates across K=3 app launches.
+    if (!ctx.cancelled() && shouldRun('gpu-real-kill-recovery', { explicitOnly: true })) {
+      log('phase0.884:begin')
+      const results = await testGpuRealKillRecovery(ctx)
+      collectSuiteResults('GpuRealKillRecovery', results)
+      await sleep(300)
+    }
+
+    // Explicit-only: the evidence-derived GPU-crash SOAK (minutes-long parks
+    // by design; a standalone measurement instrument, never in the gate).
+    if (!ctx.cancelled() && shouldRun('gpu-wake-park-soak', { explicitOnly: true })) {
+      log('phase0.885:begin')
+      const results = await testGpuWakeParkSoak(ctx)
+      collectSuiteResults('GpuWakeParkSoak', results)
       await sleep(300)
     }
 

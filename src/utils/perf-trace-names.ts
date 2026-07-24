@@ -82,6 +82,18 @@ export const PERF_TRACE_EVENT = {
   // "after upgrade" correlation in user reports could not be checked
   // against trace time. Payload: { fromPhase, toPhase, targetVersion }.
   MAIN_UPDATER_STATE_CHANGED: 'main:updater.state-changed',
+  // Autotest real-kill hook fired (ph=i). Marks a test-induced GPU kill so
+  // trace analysis can distinguish it from an organic crash: the ensuing
+  // main:gpu.process-gone will carry reason 'killed'. Payload:
+  // { pid, found, gpuEntryCount }.
+  MAIN_DEBUG_GPU_PROCESS_KILL: 'main:debug.gpu-process-kill',
+  // Wake-park soak harness cycle markers (ph=i, autotest-only; the soak is
+  // the evidence-derived GPU-crash reproducer — park hidden with live PTY
+  // output, wake with focus). Payloads: cycle {cycle, parkMs, throttleFlip};
+  // throttle-flip {cycle}; crash-observed {cycle, parkMs}.
+  MAIN_GPU_SOAK_CYCLE: 'main:gpu-soak.cycle-start',
+  MAIN_GPU_SOAK_THROTTLE_FLIP: 'main:gpu-soak.throttle-flip',
+  MAIN_GPU_SOAK_CRASH_OBSERVED: 'main:gpu-soak.crash-observed',
 
   // ───────── Main process — Git subsystem ─────────
   MAIN_GIT_RUNTIME_SUMMARY: 'main:git-runtime-summary',
@@ -710,11 +722,31 @@ export const PERF_TRACE_EVENT = {
   // the respawn-cancel breadcrumb fires when dispose() suppresses a pending
   // respawn so no fresh worker is spawned into a quitting app.
   WORKER_GIT_STATE_MIRROR_SHUTDOWN_QUIESCED: 'worker:git-state-mirror.shutdown-quiesced',
+  // A native @parcel/watcher op was refused because shutdown already began
+  // (ph=i). The gated choke point that closed the 2026-07-23 in-flight-
+  // subscribe SIGABRT hole. Payload: { label }.
+  WORKER_GIT_STATE_MIRROR_NATIVE_OP_REFUSED: 'worker:git-state-mirror.native-op-refused',
+  // The settle window ended non-quiescent and the barrier re-entered (ph=i).
+  // Payload: { requiesceCount, spunMs }. Absence = single-pass quiesce.
+  WORKER_GIT_STATE_MIRROR_SHUTDOWN_REQUIESCE: 'worker:git-state-mirror.shutdown-requiesce',
+  // Worker uncaughtException/unhandledRejection routed through the quiesce
+  // drain before exit (ph=i) — previously this tore the env down with live
+  // watcher ops (mid-session whole-process SIGABRT). Payload: { source, message }.
+  WORKER_GIT_STATE_MIRROR_UNCAUGHT_EXCEPTION_DRAIN: 'worker:git-state-mirror.uncaught-exception-drain',
+  // will-quit prevented default and awaited cleanup (ph=i). Payload:
+  // { waitedMs, timedOut }. The un-awaited cleanup let Electron free envs
+  // under live native watcher work on quit paths where will-quit ran first.
+  MAIN_APP_WILL_QUIT_CLEANUP_AWAITED: 'main:app.will-quit-cleanup-awaited',
   MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN_ACK: 'main:git-state-mirror.worker-shutdown-ack',
   MAIN_GIT_STATE_MIRROR_RESPAWN_CANCELLED: 'main:git-state-mirror.respawn-cancelled',
   // App-quit drained the GitStateMirror cooperatively before the runtime froze
   // the worker isolate (the will-quit fire-and-forget fix).
   MAIN_APP_QUIT_GSM_DRAINED: 'main:app.quit-gsm-drained',
+  // A subsystem dispose threw during quit-time cleanup (ph=i). Payload:
+  // { step, error }. Cleanup continues past the failure — without this
+  // resilience one throwing dispose (e.g. ripgrep) skipped the GitStateMirror
+  // drain and hung the quit until the debug-quit hard-exit floor.
+  MAIN_APP_QUIT_CLEANUP_STEP_FAILED: 'main:app.quit-cleanup-step-failed',
   // Background git auto-fetch (keeps the Task badge's ↓behind count fresh). All
   // off-hot-path main-process control-flow points, instrumented for diagnostic
   // visibility (a user "behind is stale / autofetch not working" trace must show
@@ -1022,6 +1054,17 @@ export const PERF_TRACE_EVENT = {
   // { disposedCount }. BUG-0003: the old interleaved dispose/ensure kept
   // >=1 owner alive so the poisoned atlas survived every rebuild.
   RENDERER_XTERM_ATLAS_RECOVERY_RENEWAL: 'renderer:xterm.atlas.recovery-renewal',
+  // Renderer: the session-scoped GPU-crash fuse blew (Nth crash, N=2) —
+  // every terminal disposed its WebGL addon and sticks to the DOM
+  // renderer until app restart; TabBar banner raised (ph=i, once per
+  // session). Payload: { crashCount, disposedCount, reason, simulated }.
+  RENDERER_XTERM_RENDERER_GPU_CRASH_STICKY_FALLBACK: 'renderer:xterm.renderer.gpu-crash-sticky-fallback',
+  // HtmlReader scroll-restore apply outcome (ph=i, once per attempt,
+  // bounded 1+4 attempts per restore target). Electron 43 upgrade: the
+  // custom-protocol document clamps/resets scrollTo during load settle;
+  // this event shows what each apply actually achieved vs the target.
+  // Payload: { attempt, targetY, appliedY, converged }.
+  RENDERER_PROJECT_EDITOR_HTML_SCROLL_APPLY: 'renderer:project-editor.html-scroll-apply',
   // Renderer: a batch of hidden-tab WebGL disposals was queued for staggered
   // (one-per-frame) execution instead of back-to-back teardown (ph=i).
   // Payload: { queuedCount }. Back-to-back context destruction is the

@@ -373,6 +373,10 @@ const en = {
   'tabBar.threadpoolStall.restart': 'Restart app',
   'tabBar.threadpoolStall.restarting': 'Restarting...',
   'tabBar.threadpoolStall.dismiss': 'Dismiss service notice',
+  'tabBar.gpuFallback.message': 'Repeated GPU crashes detected. Terminals switched to compatibility rendering for this session — restart the app to re-enable GPU acceleration.',
+  'tabBar.gpuFallback.restart': 'Restart app',
+  'tabBar.gpuFallback.restarting': 'Restarting...',
+  'tabBar.gpuFallback.dismiss': 'Dismiss rendering notice',
 
   'app.projectEditor.switchTerminalConfirm': 'This file has unsaved changes. Switching terminals will discard them. Continue?',
   'app.exportPromptsTitle': 'Export all Prompts',
@@ -1818,6 +1822,10 @@ const zhCN: LocaleTranslations = {
   'tabBar.threadpoolStall.restart': '重启应用',
   'tabBar.threadpoolStall.restarting': '正在重启...',
   'tabBar.threadpoolStall.dismiss': '关闭服务提示',
+  'tabBar.gpuFallback.message': '检测到 GPU 进程多次崩溃，本次会话的终端已切换为兼容渲染模式，重启应用可恢复 GPU 加速。',
+  'tabBar.gpuFallback.restart': '重启应用',
+  'tabBar.gpuFallback.restarting': '正在重启...',
+  'tabBar.gpuFallback.dismiss': '关闭渲染提示',
 
   'app.projectEditor.switchTerminalConfirm': '当前文件有未保存修改，切换终端会丢失这些修改，是否继续？',
   'app.exportPromptsTitle': '导出全部 Prompt',

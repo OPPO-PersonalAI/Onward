@@ -3371,11 +3371,16 @@ export function GitDiffViewer({
         // user actually stops seeing the spinner.
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
-            if (loadTokenRef.current !== currentToken) return
+            // Always emit — a silently swallowed event on token supersede
+            // left rapid-invalidation sessions with NO first-paint anywhere
+            // in the trace (a diagnostic hole; Electron 43's frame timing
+            // made it the common case under test churn). `superseded` marks
+            // that a newer load replaced this one before its paint frame.
             perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_OPEN_PHASE_FIRST_PAINT, {
               cwd: initialResult.cwd || cwd,
               fileCount: initialResult.files?.length ?? 0,
-              durationMs: +(performance.now() - start).toFixed(1)
+              durationMs: +(performance.now() - start).toFixed(1),
+              superseded: loadTokenRef.current !== currentToken
             })
           })
         })

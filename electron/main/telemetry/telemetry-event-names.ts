@@ -39,6 +39,10 @@ export const TELEMETRY_EVENT = {
   // New in the 2026-07 metric redesign (P1)
   FEATURE_FIRST_USE: 'feature/first-use',
   ERROR_RECOVERED: 'error/recovered',
+  // 2026-07-23 GPU-crash observability: outcome of every crash-recovery pass
+  // (renderer-emitted; never for simulated autotest crashes). 'sticky-fallback'
+  // = the N=2 session fuse blew and terminals stick to the DOM renderer.
+  ERROR_GPU_CRASH_RECOVERY: 'error/gpuCrashRecovery',
   CONSENT_GRANTED: 'consent/granted',
   CONSENT_REVOKED: 'consent/revoked',
   // New in P2: the generic per-feature usage counter event. Tier-1
@@ -210,6 +214,9 @@ export const TELEMETRY_ENUM_ALLOWLIST: Record<string, Record<string, readonly st
   [TELEMETRY_EVENT.FEATURE_USE]: { feature: TELEMETRY_FEATURE_USE_IDS },
   [TELEMETRY_EVENT.ERROR_RECOVERED]: {
     kind: ['unresponsive', 'webgl-fallback', 'watcher-degraded']
+  },
+  [TELEMETRY_EVENT.ERROR_GPU_CRASH_RECOVERY]: {
+    outcome: ['recreated', 'partial', 'failed', 'deferred', 'sticky-fallback']
   }
 }
 
@@ -257,6 +264,7 @@ export const TELEMETRY_TIER2_LIVE_EVENTS: ReadonlySet<string> = new Set([
   TELEMETRY_EVENT.FEATURE_FIRST_USE,
   TELEMETRY_EVENT.ERROR_RENDERER_CRASH,
   TELEMETRY_EVENT.ERROR_GPU_PROCESS_CRASH,
+  TELEMETRY_EVENT.ERROR_GPU_CRASH_RECOVERY,
   TELEMETRY_EVENT.ERROR_RECOVERED,
   TELEMETRY_EVENT.UPDATE_CHECK,
   TELEMETRY_EVENT.UPDATE_DOWNLOADED,

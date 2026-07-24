@@ -43,6 +43,8 @@ export function TabBar() {
   const [threadpoolStalled, setThreadpoolStalled] = useState(false)
   const [stallBannerDismissed, setStallBannerDismissed] = useState(false)
   const [isRelaunchingForRecovery, setIsRelaunchingForRecovery] = useState(false)
+  const [gpuFallbackActive, setGpuFallbackActive] = useState(false)
+  const [gpuFallbackBannerDismissed, setGpuFallbackBannerDismissed] = useState(false)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
 
@@ -98,11 +100,26 @@ export function TabBar() {
     }
   }, [])
 
+  // GPU-crash sticky-fallback banner: the terminal session manager blew
+  // the session fuse (2nd GPU crash) and switched terminals to the DOM
+  // renderer. Renderer-local signal — no IPC involved.
+  useEffect(() => {
+    const onGpuFallback = (event: Event) => {
+      const detail = (event as CustomEvent<{ active?: boolean }>).detail
+      setGpuFallbackActive(Boolean(detail?.active))
+    }
+    window.addEventListener('onward:gpu-renderer-fallback', onGpuFallback)
+    return () => {
+      window.removeEventListener('onward:gpu-renderer-fallback', onGpuFallback)
+    }
+  }, [])
+
   const highlightName = appName.startsWith('Onward') ? 'Onward' : null
   const restName = highlightName ? appName.slice(highlightName.length) : appName
   const showStallBanner = threadpoolStalled && !stallBannerDismissed
-  // Infrastructure degradation outranks the update banner; never stack both.
-  const showUpdateBanner = !showStallBanner && updateStatus?.phase === 'downloaded' && !updateStatus.bannerDismissed
+  const showGpuFallbackBanner = !showStallBanner && gpuFallbackActive && !gpuFallbackBannerDismissed
+  // Infrastructure degradation outranks the update banner; never stack any two.
+  const showUpdateBanner = !showStallBanner && !showGpuFallbackBanner && updateStatus?.phase === 'downloaded' && !updateStatus.bannerDismissed
   const installableVersion = updateStatus?.phase === 'downloaded' ? updateStatus.targetVersion : null
 
   const handleRelaunchForRecovery = useCallback(async () => {
@@ -244,6 +261,35 @@ export function TabBar() {
                 onClick={() => setStallBannerDismissed(true)}
                 title={t('tabBar.threadpoolStall.dismiss')}
                 aria-label={t('tabBar.threadpoolStall.dismiss')}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <line x1="9" y1="3" x2="3" y2="9" />
+                  <line x1="3" y1="3" x2="9" y2="9" />
+                </svg>
+              </button>
+            </div>
+          )}
+
+          {showGpuFallbackBanner && (
+            <div className="tab-bar-update-banner tab-bar-stall-banner" role="alert" aria-live="assertive" data-testid="gpu-fallback-banner">
+              <span className="tab-bar-update-text">
+                {t('tabBar.gpuFallback.message')}
+              </span>
+              <button
+                className="tab-bar-update-action"
+                type="button"
+                onClick={handleRelaunchForRecovery}
+                disabled={isRelaunchingForRecovery}
+                title={t('tabBar.gpuFallback.restart')}
+              >
+                {isRelaunchingForRecovery ? t('tabBar.gpuFallback.restarting') : t('tabBar.gpuFallback.restart')}
+              </button>
+              <button
+                className="tab-bar-update-close"
+                type="button"
+                onClick={() => setGpuFallbackBannerDismissed(true)}
+                title={t('tabBar.gpuFallback.dismiss')}
+                aria-label={t('tabBar.gpuFallback.dismiss')}
               >
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <line x1="9" y1="3" x2="3" y2="9" />

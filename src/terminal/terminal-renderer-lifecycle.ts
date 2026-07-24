@@ -67,6 +67,25 @@ export interface TerminalRendererLifecycleOptions {
   platform: RuntimePlatform
 }
 
+/**
+ * Session-wide WebGL suppression (BUG-0003 batch 2). When the GPU-crash
+ * fuse blows (see `shouldStickToDomAfterGpuCrash`), every terminal's
+ * ensureWebgl becomes a no-op for the rest of the session — the DOM
+ * renderer carries the buffers. Module-level because the shared glyph
+ * atlas and the GPU process are per-session resources, not per-terminal.
+ * Reset only by app restart (deliberate: a hostile GPU session stays
+ * hostile; the TabBar banner offers the restart).
+ */
+let globalWebglSuppressionReason: string | null = null
+
+export function setGlobalWebglSuppression(reason: string | null): void {
+  globalWebglSuppressionReason = reason
+}
+
+export function getGlobalWebglSuppressionReason(): string | null {
+  return globalWebglSuppressionReason
+}
+
 // Match VS Code's terminal renderer stance: once xterm's WebGL addon reports
 // that a lost context did not recover, dispose the WebGL addon and let xterm's
 // DOM renderer keep the live buffer visible. The short cooldown prevents our
@@ -288,6 +307,15 @@ export class TerminalRendererLifecycle {
       return this.buildResult(false, false)
     }
 
+    if (globalWebglSuppressionReason !== null) {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
+        terminalId: this.terminalId,
+        reason,
+        suppressedGlobally: globalWebglSuppressionReason
+      })
+      return this.buildResult(false, false)
+    }
+
     this.clearExpiredWebglCooldown()
     if (this.isWebglSuppressed()) {
       perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
@@ -472,7 +500,12 @@ export class TerminalRendererLifecycle {
     const pixelProbingSuites = new Set([
       'terminal-blank-task-repro',
       'terminal-focus-activation',
-      'render-corruption-stress'
+      'render-corruption-stress',
+      // Real-kill recovery probes renderable pixels before/after GPU death.
+      // The wake-park SOAK is deliberately NOT here: it must run with
+      // production-default context options so the IOSurface/present path it
+      // stresses matches what users actually run.
+      'gpu-real-kill-recovery'
     ])
     return suite.split(',').some((part) => pixelProbingSuites.has(part.trim()))
   }

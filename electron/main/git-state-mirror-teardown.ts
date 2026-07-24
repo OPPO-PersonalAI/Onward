@@ -37,15 +37,19 @@ export const WATCHER_QUIESCE_DEADLINE_MS = 3_000
 
 /**
  * The shutdown gate: the worker is safe to free its env iff there are no live
- * watcher subscriptions and no in-flight unsubscribe async-work. Negative inputs
- * (a bookkeeping bug) count as quiescent so a leaked counter cannot hard-wedge
- * teardown — the deadline + ack-gated terminate is the backstop for that case.
+ * watcher subscriptions, no in-flight unsubscribe async-work, AND no in-flight
+ * native watcher ops of any kind (subscribes tracked from CALL time — the
+ * 2026-07-23 SIGABRT class escaped the old two-counter gate exactly because an
+ * in-flight subscribe was invisible until its promise resolved). Negative
+ * inputs (a bookkeeping bug) count as quiescent so a leaked counter cannot
+ * hard-wedge teardown — the deadline + ack-gated terminate is the backstop.
  */
 export function isGitStateMirrorQuiescent(
   activeSubscriptions: number,
-  pendingUnsubscribes: number
+  pendingUnsubscribes: number,
+  pendingNativeOps = 0
 ): boolean {
-  return activeSubscriptions <= 0 && pendingUnsubscribes <= 0
+  return activeSubscriptions <= 0 && pendingUnsubscribes <= 0 && pendingNativeOps <= 0
 }
 
 /**
@@ -57,7 +61,7 @@ export function isGitStateMirrorQuiescent(
  *
  * Returns whether the deadline was hit (still non-quiescent) and how long it spun.
  */
-export async function awaitWatcherQuiescence(opts: {
+export interface WatcherQuiescenceOpts {
   getActive: () => number
   getPending: () => number
   settlePending: () => Promise<void>
@@ -65,21 +69,71 @@ export async function awaitWatcherQuiescence(opts: {
   now: () => number
   deadlineMs?: number
   tickMs?: number
-}): Promise<{ deadlineHit: boolean; spunMs: number }> {
+  /**
+   * Total in-flight native watcher ops tracked from CALL time (subscribes AND
+   * unsubscribes). Optional for back-compat; when provided the barrier also
+   * waits for this to reach zero and settles them each tick.
+   */
+  getPendingOps?: () => number
+  settlePendingOps?: () => Promise<void>
+}
+
+export async function awaitWatcherQuiescence(
+  opts: WatcherQuiescenceOpts
+): Promise<{ deadlineHit: boolean; spunMs: number }> {
   const deadlineMs = opts.deadlineMs ?? WATCHER_QUIESCE_DEADLINE_MS
   const tickMs = opts.tickMs ?? 20
+  const getOps = opts.getPendingOps ?? (() => 0)
   const startedAt = opts.now()
   await opts.settlePending()
+  if (getOps() > 0) await opts.settlePendingOps?.()
   while (
-    !isGitStateMirrorQuiescent(opts.getActive(), opts.getPending()) &&
+    !isGitStateMirrorQuiescent(opts.getActive(), opts.getPending(), getOps()) &&
     opts.now() - startedAt < deadlineMs
   ) {
     await opts.delay(tickMs)
     if (opts.getPending() > 0) await opts.settlePending()
+    if (getOps() > 0) await opts.settlePendingOps?.()
   }
   return {
-    deadlineHit: !isGitStateMirrorQuiescent(opts.getActive(), opts.getPending()),
+    deadlineHit: !isGitStateMirrorQuiescent(opts.getActive(), opts.getPending(), getOps()),
     spunMs: opts.now() - startedAt
+  }
+}
+
+/**
+ * Barrier + settle + RE-VALIDATION loop. The single-pass barrier had a hole
+ * (H2 of the 2026-07-23 investigation): a subscribe that resolves DURING the
+ * post-barrier settle delay queues its compensating unsubscribe after the spin
+ * already ended, so the port closed with an UnsubscribeRunner in flight. This
+ * wrapper re-enters the barrier whenever the settle window ends non-quiescent,
+ * bounded by an overall deadline so a leak still cannot wedge teardown.
+ */
+export async function awaitWatcherQuiescenceWithSettle(
+  opts: WatcherQuiescenceOpts & { settleMs?: number }
+): Promise<{ deadlineHit: boolean; spunMs: number; requiesceCount: number }> {
+  const settleMs = opts.settleMs ?? NATIVE_WATCHER_SETTLE_MS
+  const singleDeadline = opts.deadlineMs ?? WATCHER_QUIESCE_DEADLINE_MS
+  const overallDeadlineMs = 2 * singleDeadline + 2 * settleMs
+  const getOps = opts.getPendingOps ?? (() => 0)
+  const startedAt = opts.now()
+  let requiesceCount = 0
+  for (;;) {
+    const remaining = overallDeadlineMs - (opts.now() - startedAt)
+    if (remaining <= 0) {
+      return { deadlineHit: true, spunMs: opts.now() - startedAt, requiesceCount }
+    }
+    const pass = await awaitWatcherQuiescence({
+      ...opts,
+      deadlineMs: Math.min(singleDeadline, remaining)
+    })
+    await opts.delay(settleMs)
+    if (
+      isGitStateMirrorQuiescent(opts.getActive(), opts.getPending(), getOps())
+    ) {
+      return { deadlineHit: pass.deadlineHit, spunMs: opts.now() - startedAt, requiesceCount }
+    }
+    requiesceCount += 1
   }
 }
 

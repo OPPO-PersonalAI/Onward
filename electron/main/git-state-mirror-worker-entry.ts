@@ -74,8 +74,7 @@ import type {
   MirrorWatcherStatus
 } from './git-state-mirror-types'
 import {
-  awaitWatcherQuiescence,
-  NATIVE_WATCHER_SETTLE_MS
+  awaitWatcherQuiescenceWithSettle
 } from './git-state-mirror-teardown'
 
 const execFileAsync = promisify(execFile)
@@ -169,6 +168,44 @@ const entryToGroupKey = new Map<string, string>()
 // deadline. Enforced by the dispose closure's finally + a unit test.
 let activeWatcherSubscriptions = 0
 const pendingUnsubscribes = new Set<Promise<unknown>>()
+
+// CALL-TIME tracking of EVERY native @parcel/watcher op (subscribes AND
+// unsubscribes). The 2026-07-23 SIGABRT investigation proved the two counters
+// above are not enough: binding.cc queues the napi_async_work synchronously
+// inside the binding call, but activeWatcherSubscriptions is only bumped after
+// the subscribe promise RESOLVES — an in-flight subscribe was invisible to the
+// quiesce barrier, its completion drained into the dead env during
+// Environment::CleanupHandles, and node-addon-api escalated to
+// napi_fatal_error -> abort() (whole-process SIGABRT; identical stack on
+// Electron 39 prod and Electron 43 dev). Every native call MUST go through one
+// of the two wrappers below so the op is in this set before the binding runs.
+const pendingNativeWatcherOps = new Set<Promise<unknown>>()
+
+/** Track a native watcher op from call time. NO shutdown gate — used for
+ * unsubscribes, which must remain callable during teardown. */
+function trackNativeWatcherOp<T>(start: () => Promise<T>): Promise<T> {
+  const promise = start()
+  // The tracked copy never rejects so Promise.allSettled/finally bookkeeping
+  // can't produce unhandled rejections; callers keep the original promise.
+  const tracked = promise.catch(() => undefined)
+  pendingNativeWatcherOps.add(tracked)
+  void tracked.finally(() => pendingNativeWatcherOps.delete(tracked))
+  return promise
+}
+
+/** Track a native watcher op AND refuse it once shutdown has begun. The gate
+ * and the binding call share one synchronous tick, closing the async-gap class
+ * (e.g. the .gitignore read between the old shuttingDown check and the
+ * subscribe call). Used for subscribes. */
+function runGatedNativeWatcherOp<T>(label: string, start: () => Promise<T>): Promise<T> {
+  if (shuttingDown) {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_NATIVE_OP_REFUSED, {
+      label
+    })
+    return Promise.reject(new Error('worker is shutting down'))
+  }
+  return trackNativeWatcherOp(start)
+}
 
 const autotestWatcherFailSubscribeOnce =
   process.env.ONWARD_AUTOTEST === '1' &&
@@ -538,7 +575,12 @@ async function runRecompute(
       })
       const timer = setTimeout(() => {
         governorRetryTimers.delete(entry.cwd)
-        if (!shuttingDown && !entry.detachRequested) void runRecompute(entry, reason, options)
+        if (!shuttingDown && !entry.detachRequested) {
+          // Tracked: this chain can reach a watcher re-attach (focus-resync /
+          // reconcile -> reattachWatcherIfBecameGit -> subscribe); shutdown
+          // must be able to wait for its tail instead of racing it.
+          trackOperation('governor-retry recompute', runRecompute(entry, reason, options).then(() => undefined))
+        }
       }, decision.retryInMs ?? 250)
       timer.unref?.()
       governorRetryTimers.set(entry.cwd, timer)
@@ -773,7 +815,9 @@ function scheduleWatcherRestart(group: MirrorWatcherGroup, failureKind: MirrorWa
     group.restartTimer = null
     group.nextRetryAt = null
     if (shuttingDown || group.entries.size === 0 || group.restartGeneration !== generation) return
-    void ensureWatcherForGroup(group, 'restart')
+    // Tracked: the restart chain issues a fresh subscribe; shutdown waits for
+    // its tail via inFlightOperations instead of relying on the barrier alone.
+    trackOperation('watcher-restart attach', ensureWatcherForGroup(group, 'restart'))
   }, delayMs))
   emitWatcherStatus(group)
 }
@@ -998,7 +1042,9 @@ async function enterSuspended(group: MirrorWatcherGroup, message: string): Promi
   })
   if (!group.suspendedProbeTimer) {
     group.suspendedProbeTimer = setTimerUnref(setInterval(() => {
-      void runSuspendedProbe(group)
+      if (shuttingDown) return
+      // Tracked: a probe that finds the path back issues a fresh subscribe.
+      trackOperation('suspended-probe attach', runSuspendedProbe(group))
     }, MIRROR_WATCHER_SUSPENDED_PROBE_INTERVAL_MS))
   }
 }
@@ -1071,8 +1117,11 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
 
   // Single parcel-watcher subscription covering both working tree and
   // .git/**. The callback uses classifyEventPath to drop noise (objects,
-  // lockfiles, tmpfiles) and keep state-relevant paths.
-  const subscription = await parcelWatcher.subscribe(group.repoRoot, (err, events) => {
+  // lockfiles, tmpfiles) and keep state-relevant paths. Routed through the
+  // gated choke point: the shutdown gate and the binding call share one tick
+  // (the .gitignore read above used to leave an unguarded async gap), and the
+  // op is barrier-visible from call time.
+  const subscription = await runGatedNativeWatcherOp('subscribe', () => parcelWatcher.subscribe(group.repoRoot, (err, events) => {
     if (shuttingDown) return
     if (err) {
       log('error', 'parcel-watcher error', {
@@ -1111,19 +1160,19 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
       lastWatcherFireAt.set(group.repoRootKey, Date.now())
       scheduleGroupRecompute(group, keptPaths)
     }
-  }, { ignore: [...MIRROR_WATCHER_IGNORE, ...gitignoreGlobs] })
+  }, { ignore: [...MIRROR_WATCHER_IGNORE, ...gitignoreGlobs] }))
 
   // Subscription is live — count it for the shutdown quiesce barrier.
   activeWatcherSubscriptions += 1
 
   let disposed = false
-  return async () => {
+  const dispose = async () => {
     // Idempotent: a group can be torn down via detach AND shutdown; only the
     // first call unsubscribes and adjusts the quiesce accounting so the counter
     // never double-decrements.
     if (disposed) return
     disposed = true
-    const unsubscribePromise = subscription.unsubscribe()
+    const unsubscribePromise = trackNativeWatcherOp(() => subscription.unsubscribe())
     pendingUnsubscribes.add(unsubscribePromise)
     try {
       await unsubscribePromise
@@ -1137,6 +1186,15 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
       activeWatcherSubscriptions -= 1
     }
   }
+
+  // Shutdown may have begun while the subscribe was in flight (the gate can
+  // only refuse ops that START after the flip). The compensating dispose runs
+  // through the tracked-unsubscribe path so the barrier sees it too.
+  if (shuttingDown) {
+    await dispose()
+    throw new Error('worker is shutting down')
+  }
+  return dispose
 }
 
 async function ensureWatcherForGroup(
@@ -1450,31 +1508,57 @@ async function shutdownWorker(): Promise<void> {
     } catch { /* shutdown must continue */ }
   }
 
+  // Explicit group sweep: per-entry detach is the normal disposal route, but a
+  // group whose entries were already removed (or that a supervisor timer was
+  // about to resurrect) must not ride into teardown with a live subscription
+  // or an armed timer. Clearing timers here also guarantees no supervisor
+  // chain can fire between the barrier and parentPort.close().
+  for (const group of watcherGroups.values()) {
+    clearGroupRestartTimer(group)
+    clearGroupPollTimer(group)
+    clearGroupProbeTimer(group)
+    try {
+      await group.dispose?.()
+    } catch { /* shutdown must continue */ }
+    group.dispose = null
+  }
+
   entries.clear()
   watcherGroups.clear()
   entryToGroupKey.clear()
   bodyCache.clear()
   mirrorGenerations.clear()
-  // Real native quiesce barrier (replaces the old blind 250 ms sleep): wait for
-  // every in-flight unsubscribe to settle, then spin until the live-subscription
-  // count and the pending-unsubscribe set both reach zero (bounded by a hard
-  // deadline so a leaked counter can never wedge teardown — the router's
-  // terminate backstop is only provably safe AFTER shutdown-complete), then a
-  // fixed settle past parcel's FSEvents debounce ceiling for the independent
-  // coalesced-event channel. Only after this is it safe to free the env: no
-  // @parcel/watcher PromiseRunner completion can resolve into a dead isolate.
-  const { deadlineHit, spunMs } = await awaitWatcherQuiescence({
+  // Real native quiesce barrier with settle re-validation. Waits until: zero
+  // live subscriptions, zero pending unsubscribes, AND zero call-time-tracked
+  // in-flight native ops (the 2026-07-23 hole: an in-flight subscribe was
+  // invisible to the old two-counter barrier, its PromiseRunner completion
+  // drained into the freed env during CleanupHandles -> napi_fatal_error ->
+  // whole-process SIGABRT). After the settle delay the barrier RE-VALIDATES —
+  // a subscribe resolving mid-settle queues a compensating unsubscribe that a
+  // single-pass barrier would have missed. Bounded by an overall deadline so
+  // a leaked counter can never wedge teardown (the router's terminate
+  // backstop is only provably safe AFTER shutdown-complete).
+  const { deadlineHit, spunMs, requiesceCount } = await awaitWatcherQuiescenceWithSettle({
     getActive: () => activeWatcherSubscriptions,
     getPending: () => pendingUnsubscribes.size,
     settlePending: () => Promise.allSettled(Array.from(pendingUnsubscribes)).then(() => undefined),
+    getPendingOps: () => pendingNativeWatcherOps.size,
+    settlePendingOps: () => Promise.allSettled(Array.from(pendingNativeWatcherOps)).then(() => undefined),
     delay,
     now: Date.now
   })
-  await delay(NATIVE_WATCHER_SETTLE_MS)
+  if (requiesceCount > 0) {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_SHUTDOWN_REQUIESCE, {
+      requiesceCount,
+      spunMs
+    })
+  }
   const quiesce = {
     activeSubscriptions: activeWatcherSubscriptions,
     pendingUnsubscribes: pendingUnsubscribes.size,
+    pendingNativeOps: pendingNativeWatcherOps.size,
     settledMs: spunMs,
+    requiesceCount,
     deadlineHit
   }
   performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_SHUTDOWN_QUIESCED, quiesce)
@@ -1621,6 +1705,30 @@ parentPort.on('message', (msg: MainToMirrorMessage) => {
     }
   }
 })
+
+// Last-resort drain: an uncaught worker exception used to tear the env down
+// with live @parcel/watcher ops in flight — the same napi_fatal_error ->
+// whole-process SIGABRT as the quit-time race, but MID-SESSION and
+// user-visible. Route through shutdownWorker's quiesce barrier first, capped
+// so a broken barrier cannot hang a dying worker, then exit non-zero so the
+// router's respawn logic sees a real failure.
+let fatalDrainStarted = false
+function drainThenExit(source: 'uncaughtException' | 'unhandledRejection', error: unknown): void {
+  if (fatalDrainStarted) return
+  fatalDrainStarted = true
+  const message = error instanceof Error ? `${error.message}` : String(error)
+  performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_UNCAUGHT_EXCEPTION_DRAIN, {
+    source,
+    message: message.slice(0, 256)
+  })
+  log('error', `worker ${source} — draining native watcher ops before exit`, { error: message })
+  const cap = delay(10_000).then(() => undefined)
+  void Promise.race([shutdownWorker(), cap])
+    .catch(() => undefined)
+    .finally(() => process.exit(1))
+}
+process.on('uncaughtException', (error) => drainThenExit('uncaughtException', error))
+process.on('unhandledRejection', (reason) => drainThenExit('unhandledRejection', reason))
 
 // Announce readiness. From this point on the worker reacts to incoming
 // messages and parcel-watcher events; supervisor timers are only armed

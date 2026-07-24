@@ -206,8 +206,16 @@ export class RipgrepSearchManager {
   }
 
   dispose(): void {
+    // Idempotent and never throws: dispose runs inside the quit-time
+    // runCleanupIpcHandlers chain, where an escaped exception would skip
+    // every later subsystem's dispose (including the GitStateMirror worker
+    // drain) and hang the quit until the debug-quit hard-exit floor.
+    // Deliberately no cancel() round-trip here — worker.terminate() below
+    // already tears down any in-flight search, and cancel()'s request()
+    // path would throw synchronously once `disposed` is set.
+    if (this.disposed) return
     this.disposed = true
-    this.cancel()
+    this.activeSearchId = null
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
       pending.reject(new Error('Ripgrep search worker disposed'))
@@ -255,7 +263,15 @@ export class RipgrepSearchManager {
   }
 
   private request<T = unknown>(method: WorkerMethod, payload: Record<string, unknown>): Promise<T> {
-    const worker = this.ensureWorker()
+    // ensureWorker throws synchronously after dispose; surface that as a
+    // rejected promise so `.catch()` callers actually catch it instead of
+    // the exception escaping the synchronous prefix.
+    let worker: Worker
+    try {
+      worker = this.ensureWorker()
+    } catch (error) {
+      return Promise.reject(error)
+    }
     const id = this.nextRequestId++
     const startedAt = Date.now()
 

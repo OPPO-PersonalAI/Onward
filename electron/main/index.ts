@@ -30,7 +30,7 @@ if (process.platform === 'win32') {
   })
 }
 
-import { app, BrowserWindow, nativeImage, Menu, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, nativeImage, Menu, dialog, ipcMain, crashReporter } from 'electron'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
 import { registerIpcHandlers, cleanupIpcHandlers, setupWindowShortcuts } from './ipc-handlers'
@@ -89,6 +89,19 @@ const hardenedBrowserSessions = new WeakSet<Electron.Session>()
 // userData/app-state.json that surfaced when daily + Intel-mac-release
 // builds were left running side-by-side against the same userData.
 const earlyAppInfo = initializeAppIdentity()
+
+// Quit-crash test gate, cross-platform layer: local-only minidumps for every
+// process (main, renderer, GPU, workers) under the per-runner userData dir.
+// macOS keeps writing system .ips too (ignoreSystemCrashHandler stays false),
+// which the orchestrator's DiagnosticReports sweep consumes; this layer gives
+// Windows/Linux the same "a native crash during a suite fails the suite"
+// guarantee via the crashDumps sweep. Autotest-only: production keeps its
+// current no-reporter behavior (no strategy change without a user decision).
+if (process.env.ONWARD_AUTOTEST === '1') {
+  crashReporter.start({ uploadToServer: false, submitURL: '', rateLimit: false, compress: false })
+  console.log('[CrashReporter] started (autotest mode), dumps -> ' + app.getPath('crashDumps'))
+}
+
 const gotTheSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotTheSingleInstanceLock) {
   console.log('[SingleInstance] another Onward is already running; exiting.')
@@ -108,14 +121,22 @@ app.on('second-instance', () => {
 app.on('child-process-gone', (_event, details) => {
   if (details.type !== 'GPU') return
   console.log('[App] gpu-process-gone', details.reason, details.exitCode)
-  const notified = broadcastGpuProcessGone({
+  const { notified, activity } = broadcastGpuProcessGone({
     reason: details.reason,
     exitCode: details.exitCode ?? 0
   })
   console.log('[App] gpu-process-gone broadcast', notified)
+  // Fleet-analysis enrichment (2026-07-23): the msSince* antecedents let
+  // PostHog classify wake-crash vs throttle-crash vs organic per version —
+  // the Electron-upgrade A/B runs on this event. Values are identical to the
+  // main:gpu.process-gone trace payload (same snapshot instance).
   getTelemetryService().track('error/gpuProcessCrash', {
     reason: details.reason,
-    exitCode: details.exitCode ?? 0
+    exitCode: details.exitCode ?? 0,
+    msSinceLastWindowShow: activity.msSinceLastWindowShow ?? -1,
+    msSinceLastWindowFocus: activity.msSinceLastWindowFocus ?? -1,
+    msSinceLastThrottleToggle: activity.msSinceLastThrottleToggle ?? -1,
+    msSinceLastNudge: activity.msSinceLastNudge ?? -1
   })
 })
 
@@ -336,6 +357,7 @@ export async function requestQuit(): Promise<void> {
       logQuitPhase('quit:cleanup-start')
       gitAutofetchManager.dispose()
       await cleanupIpcHandlers()
+      willQuitCleanupDone = true
       logQuitPhase('quit:cleanup-done')
       destroyAllWindowsForQuit('quit')
       logQuitPhase('quit:windows-destroyed')
@@ -376,6 +398,7 @@ export async function requestRestartToApplyUpdate(): Promise<{ success: boolean;
 
     logQuitPhase('restart-to-update:cleanup-start')
     await cleanupIpcHandlers()
+    willQuitCleanupDone = true
     logQuitPhase('restart-to-update:cleanup-done')
     destroyAllWindowsForQuit('restart-to-update')
     logQuitPhase('restart-to-update:windows-destroyed')
@@ -425,6 +448,7 @@ export async function requestRelaunchForRecovery(): Promise<{ success: boolean; 
     logQuitPhase('relaunch-for-recovery:cleanup-start')
     gitAutofetchManager.dispose()
     await cleanupIpcHandlers()
+    willQuitCleanupDone = true
     logQuitPhase('relaunch-for-recovery:cleanup-done')
     destroyAllWindowsForQuit('relaunch-for-recovery')
     logQuitPhase('relaunch-for-recovery:windows-destroyed')
@@ -471,6 +495,7 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
 
     logQuitPhase('debug-quit:cleanup-start')
     await cleanupIpcHandlers()
+    willQuitCleanupDone = true
     logQuitPhase('debug-quit:cleanup-done')
     destroyAllWindowsForQuit('debug-quit')
     logQuitPhase('debug-quit:windows-destroyed')
@@ -578,6 +603,17 @@ function createWindow(displayName: string): void {
   }
 
   mainWindow = new BrowserWindow(windowOptions)
+
+  if (process.env.ONWARD_AUTOTEST === '1') {
+    // Keep the window unoccluded for the whole autotest run. Electron 43
+    // dropped MacWebContentsOcclusion from its default --disable-features,
+    // so a test window covered by the orchestrator's terminal genuinely goes
+    // document-hidden and rAF freezes — starving every paint-dependent
+    // assertion (double-rAF trace events, content-visible waits). Pinning
+    // the window on top removes occlusion from the test environment without
+    // touching production visibility semantics.
+    mainWindow.setAlwaysOnTop(true)
+  }
 
   mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
     const src = params.src || 'about:blank'
@@ -1070,18 +1106,46 @@ app.on('before-quit', async (e) => {
 })
 
 // Move the cleanup logic to will-quit (it will be triggered after confirming the exit)
-app.on('will-quit', () => {
+// will-quit must not let Electron free the process while the git-state-mirror
+// worker still holds live @parcel/watcher native ops — the un-awaited cleanup
+// was one of the barrier-bypass paths behind the 2026-07-23 teardown SIGABRT
+// class. First pass: prevent default, await cleanup (hard-capped so a wedged
+// worker can never hold the quit hostage), then re-enter quit; the latch lets
+// the second pass fall through to the synchronous tail.
+let willQuitCleanupDone = false
+const WILL_QUIT_CLEANUP_CAP_MS = 17_000
+app.on('will-quit', (event) => {
   performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_WILL_QUIT, {
     installUpdateOnQuit
   })
+  if (!willQuitCleanupDone) {
+    event.preventDefault()
+    const startedAt = Date.now()
+    const cap = new Promise<'timeout'>((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), WILL_QUIT_CLEANUP_CAP_MS)
+      t.unref()
+    })
+    void Promise.race([
+      cleanupIpcHandlers().then(() => 'done' as const).catch((error) => {
+        console.warn('[Lifecycle] will-quit cleanup failed:', error)
+        return 'done' as const
+      }),
+      cap
+    ]).then((outcome) => {
+      willQuitCleanupDone = true
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_WILL_QUIT_CLEANUP_AWAITED, {
+        waitedMs: Date.now() - startedAt,
+        timedOut: outcome === 'timeout'
+      })
+      app.quit()
+    })
+    return
+  }
   if (installUpdateOnQuit) {
     getUpdateService().installDownloadedUpdateOnQuit()
   }
   getUpdateService().stop()
   stopApiServer()
-  void cleanupIpcHandlers().catch((error) => {
-    console.warn('[Lifecycle] will-quit cleanup failed:', error)
-  })
   performanceTrace.stop()
   // Close the shared trace store last so any final performanceTrace.stop()
   // events are written before we fsync + unlink the active chunk's stream.

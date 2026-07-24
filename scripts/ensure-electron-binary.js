@@ -211,12 +211,34 @@ function ensureElectronBinary() {
   console.log(
     `[electron] dist/ is incomplete (yauzl/Node24 truncation symptom) — re-extracting electron v${version}`
   )
-  const zip = findCachedZip(version)
+  let zip = findCachedZip(version)
+  if (!zip) {
+    // Electron 42+ no longer downloads the binary from its own postinstall
+    // (deferred to the first bin run), so a fresh install legitimately has
+    // neither dist/ nor a cached zip. Trigger the official downloader
+    // ourselves to keep the install chain zero-intervention.
+    console.log(
+      `[electron] No cached zip for v${version} (Electron 42+ defers the download) — running node_modules/electron/install.js`
+    )
+    const { execFileSync } = require('node:child_process')
+    execFileSync(process.execPath, [join(ELECTRON_DIR, 'install.js')], { stdio: 'inherit' })
+    // install.js extracts dist/ itself; accept a now-healthy dist directly.
+    const healedVerdict = inspectDist(distDir)
+    if (healedVerdict.ok) {
+      writeFileSync(pathTxt, binaryRelPath(), { encoding: 'utf8' })
+      console.log(
+        `[electron] Downloaded and extracted OK via install.js: ${join(distDir, binaryRelPath())} ` +
+          `(largest dist file ${healedVerdict.largestFileBytes} bytes)`
+      )
+      return
+    }
+    zip = findCachedZip(version)
+  }
   if (!zip) {
     throw new Error(
       `Could not find the cached electron-v${version}-${process.platform}-${process.arch}.zip ` +
-        `under the @electron/get cache. Re-run \`node node_modules/electron/install.js\` to ` +
-        `download it, then re-run this script.`
+        `under the @electron/get cache even after running node_modules/electron/install.js. ` +
+        `Check network access to the Electron release mirror, then re-run pnpm install.`
     )
   }
 

@@ -6,7 +6,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '../../i18n/useI18n'
 import { trackFeatureUse } from '../../telemetry/track-feature-use'
+import { perfTraceDiagnostic } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import type { BrowserFoundInPageResult } from '../../types/electron'
+import { isSameHtmlPreviewFile } from '../../utils/html-file'
 import type { HtmlPreviewScrollState } from '../../utils/html-file'
 import {
   getHtmlPreviewController,
@@ -164,10 +167,51 @@ export function HtmlReader({
       if (stateRef.current?.browserId !== current.browserId) return
       if (result.success) {
         restoredScrollTargetRef.current = restoreTarget
-        updateState({
-          scrollRestoreStatus: 'restored',
-          restoredScrollY: result.state?.y ?? target.y
+        const firstY = result.state?.y ?? target.y
+        const tolerance = 2
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_APPLY, {
+          ph: 'i',
+          attempt: 0,
+          targetY: Math.round(target.y),
+          appliedY: Math.round(firstY),
+          converged: Math.abs(firstY - target.y) <= tolerance
         })
+        if (Math.abs(firstY - target.y) <= tolerance) {
+          updateState({ scrollRestoreStatus: 'restored', restoredScrollY: firstY })
+        } else {
+          // Chromium 150 (Electron 43): at apply time the custom-protocol
+          // document may not have finished layout, so scrollTo clamps to the
+          // current (short) max scroll — and a post-load async reset can undo
+          // an apply that DID land. A clamped apply is NOT a completed
+          // restore: stay in 'restoring', re-pin over a bounded settle
+          // window, and only report 'restored' once the offset converges
+          // (or with the truthful best-effort value when retries end).
+          void (async () => {
+            let lastY = firstY
+            let attempt = 0
+            for (const delayMs of [150, 400, 800, 1500]) {
+              await new Promise((resolve) => window.setTimeout(resolve, delayMs))
+              if (stateRef.current?.browserId !== current.browserId) return
+              if (restoredScrollTargetRef.current !== restoreTarget) return
+              attempt += 1
+              const repin = await controller.restoreScrollState(target)
+              if (repin.success && repin.state) {
+                lastY = repin.state.y
+              }
+              perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SCROLL_APPLY, {
+                ph: 'i',
+                attempt,
+                targetY: Math.round(target.y),
+                appliedY: repin.success && repin.state ? Math.round(repin.state.y) : null,
+                converged: Math.abs(lastY - target.y) <= tolerance
+              })
+              if (repin.success && repin.state && Math.abs(lastY - target.y) <= tolerance) break
+            }
+            if (stateRef.current?.browserId !== current.browserId) return
+            if (restoredScrollTargetRef.current !== restoreTarget) return
+            updateState({ scrollRestoreStatus: 'restored', restoredScrollY: lastY })
+          })()
+        }
       } else {
         updateState({ scrollRestoreStatus: 'failed', restoredScrollY: null })
       }
@@ -193,9 +237,19 @@ export function HtmlReader({
   }, [applyPendingScrollRestore, restoreScrollState, updateState])
 
   useEffect(() => {
+    const wasActive = isActiveRef.current
     isActiveRef.current = isActive
     updateState({ visible: isActive })
-  }, [isActive, updateState])
+    if (isActive && !wasActive) {
+      // Chromium 150 (Electron 43): a frame that was hidden/detached while
+      // the editor was soft-closed comes back with its scroll reset to 0 —
+      // a restore completed before the round-trip is no longer standing.
+      // Drop the completed-restore guard and re-pin the pending offset
+      // whenever the reader surface returns.
+      restoredScrollTargetRef.current = null
+      window.setTimeout(() => void applyPendingScrollRestore(), 0)
+    }
+  }, [isActive, applyPendingScrollRestore, updateState])
 
   useEffect(() => {
     const id = `project-editor-html-${++htmlReaderIdCounter}`
@@ -336,6 +390,20 @@ export function HtmlReader({
       if (message.type === 'state') {
         const payload = (message.payload ?? {}) as { url?: string; title?: string; readyState?: string }
         const current = stateRef.current
+        // A non-complete readyState announces a FRESH document in the frame
+        // (Electron 43: the custom-protocol frame can bring up its document
+        // again after a restore already landed on the previous one — the new
+        // document renders from the top). The completed-restore guard belongs
+        // to the old document: clear it and reschedule the pending restore.
+        // Home-document only — a foreign page navigated via links must never
+        // inherit the home offset.
+        if (
+          payload.readyState !== 'complete' &&
+          isSameHtmlPreviewFile(payload.url ?? null, homeUrlRef.current || null)
+        ) {
+          restoredScrollTargetRef.current = null
+          window.setTimeout(() => void applyPendingScrollRestore(), 0)
+        }
         updateState({
           url: payload.url ?? current?.url ?? '',
           title: payload.title ?? '',
