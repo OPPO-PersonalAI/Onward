@@ -45,6 +45,12 @@ export function TabBar() {
   const [isRelaunchingForRecovery, setIsRelaunchingForRecovery] = useState(false)
   const [gpuFallbackActive, setGpuFallbackActive] = useState(false)
   const [gpuFallbackBannerDismissed, setGpuFallbackBannerDismissed] = useState(false)
+  const [previousSessionNotice, setPreviousSessionNotice] = useState<{
+    kind: 'abnormal' | 'corrupt' | 'terminated-jobs'
+    terminatedActiveJobs: number
+    lastSeenAt: string | null
+  } | null>(null)
+  const [previousSessionNoticeDismissed, setPreviousSessionNoticeDismissed] = useState(false)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
 
@@ -114,12 +120,32 @@ export function TabBar() {
     }
   }, [])
 
+  // Previous-session notice (session ledger): the last instance either died
+  // without a clean-shutdown mark, or its quit knowingly terminated running
+  // tasks. One-shot query at mount; dismiss is session-local.
+  useEffect(() => {
+    let cancelled = false
+    void window.electronAPI?.system
+      ?.getPreviousSessionNotice?.()
+      .then((notice) => {
+        if (!cancelled && notice) setPreviousSessionNotice(notice)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const highlightName = appName.startsWith('Onward') ? 'Onward' : null
   const restName = highlightName ? appName.slice(highlightName.length) : appName
   const showStallBanner = threadpoolStalled && !stallBannerDismissed
   const showGpuFallbackBanner = !showStallBanner && gpuFallbackActive && !gpuFallbackBannerDismissed
   // Infrastructure degradation outranks the update banner; never stack any two.
   const showUpdateBanner = !showStallBanner && !showGpuFallbackBanner && updateStatus?.phase === 'downloaded' && !updateStatus.bannerDismissed
+  // Lowest banner priority: informational, shown only when nothing else is.
+  const showPreviousSessionBanner =
+    !showStallBanner && !showGpuFallbackBanner && !showUpdateBanner &&
+    previousSessionNotice !== null && !previousSessionNoticeDismissed
   const installableVersion = updateStatus?.phase === 'downloaded' ? updateStatus.targetVersion : null
 
   const handleRelaunchForRecovery = useCallback(async () => {
@@ -290,6 +316,30 @@ export function TabBar() {
                 onClick={() => setGpuFallbackBannerDismissed(true)}
                 title={t('tabBar.gpuFallback.dismiss')}
                 aria-label={t('tabBar.gpuFallback.dismiss')}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <line x1="9" y1="3" x2="3" y2="9" />
+                  <line x1="3" y1="3" x2="9" y2="9" />
+                </svg>
+              </button>
+            </div>
+          )}
+
+          {showPreviousSessionBanner && previousSessionNotice && (
+            <div className="tab-bar-update-banner" role="status" aria-live="polite" data-testid="previous-session-banner">
+              <span className="tab-bar-update-text">
+                {previousSessionNotice.kind === 'terminated-jobs'
+                  ? t('tabBar.previousSession.terminatedJobs', {
+                      count: String(previousSessionNotice.terminatedActiveJobs)
+                    })
+                  : t('tabBar.previousSession.abnormal')}
+              </span>
+              <button
+                className="tab-bar-update-close"
+                type="button"
+                onClick={() => setPreviousSessionNoticeDismissed(true)}
+                title={t('tabBar.previousSession.dismiss')}
+                aria-label={t('tabBar.previousSession.dismiss')}
               >
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <line x1="9" y1="3" x2="3" y2="9" />

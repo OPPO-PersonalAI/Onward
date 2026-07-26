@@ -772,6 +772,19 @@ export const PERF_TRACE_EVENT = {
   // resilience one throwing dispose (e.g. ripgrep) skipped the GitStateMirror
   // drain and hung the quit until the debug-quit hard-exit floor.
   MAIN_APP_QUIT_CLEANUP_STEP_FAILED: 'main:app.quit-cleanup-step-failed',
+  // Activity-aware quit confirmation scanned the process table (ph=i).
+  // Payload: { terminalCount, activeCount, jobs (<=3 names), durationMs,
+  // outcome: 'ok'|'no-terminals'|'error', error? }. Fires once per quit
+  // dialog; fail-open (an error outcome means the plain dialog was shown).
+  MAIN_QUIT_ACTIVITY_SCAN: 'main:quit.activity-scan',
+  // Previous session ended without a clean-shutdown mark (ph=i). Payload:
+  // { kind: 'abnormal'|'corrupt', lastPid, lastAppVersion, lastSeenAt,
+  // uptimeMs, terminatedActiveJobs }. The only trace evidence for the
+  // no-crash-report death class (SIGKILL / power loss / freeze force-quit).
+  MAIN_SESSION_LEDGER_ABNORMAL_EXIT: 'main:session-ledger.abnormal-exit-detected',
+  // This session's ledger was marked clean on a graceful-quit path (ph=i).
+  // Payload: { quitReason, terminatedActiveJobs }.
+  MAIN_SESSION_LEDGER_MARKED_CLEAN: 'main:session-ledger.marked-clean',
   // Background git auto-fetch (keeps the Task badge's ↓behind count fresh). All
   // off-hot-path main-process control-flow points, instrumented for diagnostic
   // visibility (a user "behind is stale / autofetch not working" trace must show

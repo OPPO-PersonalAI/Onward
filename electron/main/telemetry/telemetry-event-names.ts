@@ -43,6 +43,11 @@ export const TELEMETRY_EVENT = {
   // (renderer-emitted; never for simulated autotest crashes). 'sticky-fallback'
   // = the N=2 session fuse blew and terminals stick to the DOM renderer.
   ERROR_GPU_CRASH_RECOVERY: 'error/gpuCrashRecovery',
+  // 2026-07-25 session-ledger: the previous instance ended WITHOUT a
+  // clean-shutdown mark — the death class that leaves no crash report
+  // (SIGKILL, power loss, freeze force-quit). 'corrupt' = ledger unreadable
+  // (torn write mid-death).
+  ERROR_ABNORMAL_EXIT: 'error/abnormalExit',
   CONSENT_GRANTED: 'consent/granted',
   CONSENT_REVOKED: 'consent/revoked',
   // New in P2: the generic per-feature usage counter event. Tier-1
@@ -217,6 +222,9 @@ export const TELEMETRY_ENUM_ALLOWLIST: Record<string, Record<string, readonly st
   },
   [TELEMETRY_EVENT.ERROR_GPU_CRASH_RECOVERY]: {
     outcome: ['recreated', 'partial', 'failed', 'deferred', 'sticky-fallback']
+  },
+  [TELEMETRY_EVENT.ERROR_ABNORMAL_EXIT]: {
+    kind: ['abnormal', 'corrupt']
   }
 }
 
@@ -265,6 +273,7 @@ export const TELEMETRY_TIER2_LIVE_EVENTS: ReadonlySet<string> = new Set([
   TELEMETRY_EVENT.ERROR_RENDERER_CRASH,
   TELEMETRY_EVENT.ERROR_GPU_PROCESS_CRASH,
   TELEMETRY_EVENT.ERROR_GPU_CRASH_RECOVERY,
+  TELEMETRY_EVENT.ERROR_ABNORMAL_EXIT,
   TELEMETRY_EVENT.ERROR_RECOVERED,
   TELEMETRY_EVENT.UPDATE_CHECK,
   TELEMETRY_EVENT.UPDATE_DOWNLOADED,

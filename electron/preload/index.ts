@@ -1311,6 +1311,16 @@ export interface DebugAPI {
     visibility: { status: 'ok' | 'nudging' | 'gave-up'; recoveries: number }
     ptyWriteMode: 'sync' | 'conpty'
   }>
+  getQuitActivity: () => Promise<{
+    success: boolean
+    error?: string
+    summary?: {
+      terminalCount: number
+      activeCount: number
+      jobNames: string[]
+      activeTerminalLabels: string[]
+    } | null
+  }>
   shellReset: () => Promise<void>
   shellGetLastOpenedPath: () => Promise<string | null>
   shellGetLastRevealedPath: () => Promise<string | null>
@@ -2409,6 +2419,18 @@ const debugAPI: DebugAPI = {
       ptyWriteMode: 'sync' | 'conpty'
     }>
   },
+  getQuitActivity: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_GET_QUIT_ACTIVITY) as Promise<{
+      success: boolean
+      error?: string
+      summary?: {
+        terminalCount: number
+        activeCount: number
+        jobNames: string[]
+        activeTerminalLabels: string[]
+      } | null
+    }>
+  },
   feedbackGetLastOpenedUrl: () => {
     return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL)
   },
@@ -2694,6 +2716,17 @@ export interface SystemAPI {
    * shell, so the app never restarts itself.
    */
   relaunchApp: () => Promise<{ success: boolean; error?: string }>
+  /**
+   * One-shot startup notice about the previous session: abnormal end
+   * (no clean-shutdown mark — SIGKILL / power loss / freeze force-quit),
+   * or a clean quit that knowingly terminated running tasks. Null when
+   * there is nothing to tell.
+   */
+  getPreviousSessionNotice: () => Promise<{
+    kind: 'abnormal' | 'corrupt' | 'terminated-jobs'
+    terminatedActiveJobs: number
+    lastSeenAt: string | null
+  } | null>
 }
 
 // Visibility-watchdog probe responder. Lives in the preload (not app code)
@@ -2777,6 +2810,13 @@ const systemAPI: SystemAPI = {
   },
   relaunchApp: () => {
     return ipcRenderer.invoke(IPC.SYSTEM_RELAUNCH_APP) as Promise<{ success: boolean; error?: string }>
+  },
+  getPreviousSessionNotice: () => {
+    return ipcRenderer.invoke(IPC.SYSTEM_GET_PREVIOUS_SESSION_NOTICE) as Promise<{
+      kind: 'abnormal' | 'corrupt' | 'terminated-jobs'
+      terminatedActiveJobs: number
+      lastSeenAt: string | null
+    } | null>
   }
 }
 

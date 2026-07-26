@@ -812,6 +812,20 @@ export class PtyManager {
     this.cwdMap.clear()
   }
 
+  /**
+   * Live shell pids for the activity-aware quit confirmation. Exited or
+   * disposed records are skipped — they cannot own running jobs.
+   */
+  listShellRefs(): Array<{ terminalId: string; shellPid: number }> {
+    const refs: Array<{ terminalId: string; shellPid: number }> = []
+    for (const [terminalId, record] of this.instances) {
+      if (record.disposed || record.exited) continue
+      const shellPid = record.pty.pid
+      if (typeof shellPid === 'number' && shellPid > 0) refs.push({ terminalId, shellPid })
+    }
+    return refs
+  }
+
   async shutdownAll(timeoutMs: number = 1500): Promise<{ total: number; closed: number; timedOut: number }> {
     const startUs = performanceTrace.nowUs()
     const records = Array.from(this.instances.entries())

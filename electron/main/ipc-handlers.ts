@@ -7,6 +7,7 @@ import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'ele
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { existsSync, lstatSync, readFileSync, writeFileSync, statSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
+import { collectQuitActivitySummary } from './quit-activity-scan'
 import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
 import { getPromptStorage, Prompt } from './prompt-storage'
 import { getTerminalConfigStorage, TerminalWindowConfig } from './terminal-config-storage'
@@ -424,6 +425,11 @@ interface RegisterIpcHandlersOptions {
   onRestartToApplyUpdate?: () => Promise<{ success: boolean; error?: string }>
   onGracefulQuitForDebug?: () => Promise<{ success: boolean; error?: string }>
   onRelaunchForRecovery?: () => Promise<{ success: boolean; error?: string }>
+  getPreviousSessionNotice?: () => {
+    kind: 'abnormal' | 'corrupt' | 'terminated-jobs'
+    terminatedActiveJobs: number
+    lastSeenAt: string | null
+  } | null
   getApiPort?: () => number
 }
 
@@ -1079,6 +1085,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
     return options.onRelaunchForRecovery()
   })
+  ipcMain.handle(IPC.SYSTEM_GET_PREVIOUS_SESSION_NOTICE, () => {
+    return options.getPreviousSessionNotice ? options.getPreviousSessionNotice() : null
+  })
   ipcMain.handle(IPC.DEBUG_SIMULATE_THREADPOOL_STALL, (_, stalled: boolean) => {
     if (process.env.ONWARD_AUTOTEST !== '1') {
       return { success: false, error: 'debug:simulate-threadpool-stall requires ONWARD_AUTOTEST=1' }
@@ -1096,6 +1105,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       visibility: getVisibilityHealthSnapshot(),
       ptyWriteMode: process.platform === 'win32' ? 'conpty' : 'sync'
     }
+  })
+  // Autotest window into the activity-aware quit confirmation's scan — the
+  // exact summary confirmQuit consults (fail-open null on scan error).
+  ipcMain.handle(IPC.DEBUG_GET_QUIT_ACTIVITY, async () => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:get-quit-activity requires ONWARD_AUTOTEST=1' }
+    }
+    const summary = await collectQuitActivitySummary(ptyManager)
+    return { success: true, summary }
   })
   ipcMain.handle(IPC.DEBUG_FOCUS_WINDOW, () => {
     if (mainWindow.isDestroyed()) return false
@@ -3291,7 +3309,9 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.DEBUG_RUN_GPU_WAKE_PARK_SOAK)
   ipcMain.removeHandler(IPC.DEBUG_SIMULATE_THREADPOOL_STALL)
   ipcMain.removeHandler(IPC.SYSTEM_RELAUNCH_APP)
+  ipcMain.removeHandler(IPC.SYSTEM_GET_PREVIOUS_SESSION_NOTICE)
   ipcMain.removeHandler(IPC.DEBUG_GET_INFRA_HEALTH)
+  ipcMain.removeHandler(IPC.DEBUG_GET_QUIT_ACTIVITY)
   ipcMain.removeHandler(IPC.DEBUG_FOCUS_WINDOW)
   ipcMain.removeHandler(IPC.DEBUG_GET_GIT_RUNTIME_METRICS)
   ipcMain.removeHandler(IPC.DEBUG_GET_MAIN_WORK_METRICS)

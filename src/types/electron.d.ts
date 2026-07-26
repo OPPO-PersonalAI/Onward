@@ -1105,6 +1105,11 @@ export interface SystemAPI {
   ) => () => void
   onVisibilityRecoveryPush: (callback: (info: { nudge: string }) => void) => () => void
   relaunchApp: () => Promise<{ success: boolean; error?: string }>
+  getPreviousSessionNotice: () => Promise<{
+    kind: 'abnormal' | 'corrupt' | 'terminated-jobs'
+    terminatedActiveJobs: number
+    lastSeenAt: string | null
+  } | null>
 }
 
 export interface DebugAPI {
@@ -1185,6 +1190,16 @@ export interface DebugAPI {
     threadpool: { status: 'ok' | 'suspect' | 'stalled'; stalledSince: number | null; recoveries: number }
     visibility: { status: 'ok' | 'nudging' | 'gave-up'; recoveries: number }
     ptyWriteMode: 'sync' | 'conpty'
+  }>
+  getQuitActivity: () => Promise<{
+    success: boolean
+    error?: string
+    summary?: {
+      terminalCount: number
+      activeCount: number
+      jobNames: string[]
+      activeTerminalLabels: string[]
+    } | null
   }>
   shellReset: () => Promise<void>
   shellGetLastOpenedPath: () => Promise<string | null>

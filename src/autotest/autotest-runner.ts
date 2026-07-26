@@ -85,6 +85,7 @@ import { testFeedbackPersistenceSeed, testFeedbackPersistenceVerify } from './te
 import { testTerminalRenameRestartSurvivalSeed, testTerminalRenameRestartSurvivalVerify } from './test-terminal-rename-restart-survival'
 import { testTelemetry } from './test-telemetry'
 import { testInfraWatchdog } from './test-infra-watchdog'
+import { testSessionLedgerNotice } from './test-session-ledger-notice'
 import { testGpuOcclusionFlipStress } from './test-gpu-occlusion-flip-stress'
 import { testGpuRealKillRecovery } from './test-gpu-real-kill-recovery'
 import { testGpuWakeParkSoak } from './test-gpu-wake-park-soak'
@@ -479,6 +480,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.882:begin')
       const results = await testInfraWatchdog(ctx)
       collectSuiteResults('InfraWatchdog', results)
+      await sleep(300)
+    }
+
+    // Explicit-only: asserts the ABNORMAL verdict, so it only makes sense
+    // right after the runner SIGKILLed a prior instance on the same
+    // userData (run-infra-watchdog phase 3).
+    if (!ctx.cancelled() && shouldRun('session-ledger-notice', { explicitOnly: true })) {
+      log('phase0.8825:begin')
+      const results = await testSessionLedgerNotice(ctx)
+      collectSuiteResults('SessionLedgerNotice', results)
       await sleep(300)
     }
 

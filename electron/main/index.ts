@@ -42,6 +42,8 @@ import { startApiServer, stopApiServer, getApiPort } from './api-server'
 import { tMain } from './localization'
 import { getUpdateService, applyPendingUpdateOnStartup } from './update-service'
 import { getAppStateStorage } from './app-state-storage'
+import { collectQuitActivitySummary, warmQuitActivityScanner } from './quit-activity-scan'
+import { initializeSessionLedger, markSessionLedgerClean } from './session-ledger'
 import { getSettingsStorage } from './settings-storage'
 import { getTerminalCwd } from './git-utils'
 import { gitAutofetchManager } from './git-autofetch-manager'
@@ -106,6 +108,40 @@ const gotTheSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotTheSingleInstanceLock) {
   console.log('[SingleInstance] another Onward is already running; exiting.')
   app.quit()
+}
+
+// Session ledger (clean-shutdown marker): ONLY the lock holder may touch it —
+// a second instance racing past here would overwrite the primary's ledger and
+// fabricate an abnormal-exit verdict on the next launch.
+const previousSessionVerdict = gotTheSingleInstanceLock ? initializeSessionLedger() : null
+
+// One-shot startup notice for the TabBar banner: abnormal end, unreadable
+// ledger, or a clean quit that knowingly terminated running tasks.
+function buildPreviousSessionNotice(): {
+  kind: 'abnormal' | 'corrupt' | 'terminated-jobs'
+  terminatedActiveJobs: number
+  lastSeenAt: string | null
+} | null {
+  const v = previousSessionVerdict
+  if (!v) return null
+  if (v.kind === 'abnormal') {
+    return {
+      kind: 'abnormal',
+      terminatedActiveJobs: 0,
+      lastSeenAt: v.previous.lastSeenAt ?? null
+    }
+  }
+  if (v.kind === 'corrupt') {
+    return { kind: 'corrupt', terminatedActiveJobs: 0, lastSeenAt: null }
+  }
+  if (v.kind === 'clean' && (v.previous.terminatedActiveJobs ?? 0) > 0) {
+    return {
+      kind: 'terminated-jobs',
+      terminatedActiveJobs: v.previous.terminatedActiveJobs as number,
+      lastSeenAt: v.previous.finishedAt ?? null
+    }
+  }
+  return null
 }
 app.on('second-instance', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -213,9 +249,40 @@ if (process.env.ONWARD_DISABLE_GPU === '1') {
   app.commandLine.appendSwitch('disable-gpu')
 }
 
-// Exit confirmation dialog (exported for use by tray-manager)
+// Count of active-job terminals the user knowingly terminated at the last
+// confirmed quit — recorded into the session ledger for next-launch context.
+let confirmedQuitTerminatedActiveJobs = 0
+export function getConfirmedQuitTerminatedActiveJobs(): number {
+  return confirmedQuitTerminatedActiveJobs
+}
+
+// Exit confirmation dialog (exported for use by tray-manager). When any
+// terminal still has running jobs (descendant-process enumeration, see
+// quit-activity.ts), the dialog states what would be terminated instead of
+// the generic copy — the generic dialog is how a running codex task got
+// silently killed on 2026-07-24. Detection is fail-open: on scan error or
+// over-budget the plain dialog shows.
 export async function confirmQuit(): Promise<boolean> {
   const { displayName } = getAppInfo()
+  const activity = await collectQuitActivitySummary(ptyManager)
+  if (activity && activity.activeCount > 0) {
+    const jobs = activity.jobNames.join(', ')
+    const terminals = activity.activeTerminalLabels.join(', ')
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: [tMain('common.cancel'), tMain('dialog.quit.quitAnyway')],
+      defaultId: 0,
+      cancelId: 0,
+      title: tMain('dialog.quit.title', { displayName }),
+      message: tMain('dialog.quit.activeMessage', {
+        activeCount: String(activity.activeCount),
+        terminalCount: String(activity.terminalCount)
+      }),
+      detail: tMain('dialog.quit.activeDetail', { jobs, terminals })
+    })
+    if (response === 1) confirmedQuitTerminatedActiveJobs = activity.activeCount
+    return response === 1
+  }
   const { response } = await dialog.showMessageBox({
     type: 'question',
     buttons: [tMain('common.cancel'), tMain('menu.quitApp', { displayName })],
@@ -362,6 +429,7 @@ export async function requestQuit(): Promise<void> {
       destroyAllWindowsForQuit('quit')
       logQuitPhase('quit:windows-destroyed')
       flushPerformanceTrace('quit')
+      markSessionLedgerClean('quit', getConfirmedQuitTerminatedActiveJobs())
       logQuitPhase('quit:before-app-quit')
       app.quit()
     })
@@ -403,6 +471,7 @@ export async function requestRestartToApplyUpdate(): Promise<{ success: boolean;
     destroyAllWindowsForQuit('restart-to-update')
     logQuitPhase('restart-to-update:windows-destroyed')
     flushPerformanceTrace('restart-to-update')
+    markSessionLedgerClean('restart-to-update')
     logQuitPhase('restart-to-update:before-app-quit')
     app.quit()
   })
@@ -500,6 +569,7 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
     destroyAllWindowsForQuit('debug-quit')
     logQuitPhase('debug-quit:windows-destroyed')
     flushPerformanceTrace('debug-quit')
+    markSessionLedgerClean('debug-quit')
     logQuitPhase('debug-quit:before-app-quit')
   }
 
@@ -862,6 +932,7 @@ function createWindow(displayName: string): void {
     onRestartToApplyUpdate: requestRestartToApplyUpdate,
     onGracefulQuitForDebug: requestQuitForDebug,
     onRelaunchForRecovery: requestRelaunchForRecovery,
+    getPreviousSessionNotice: buildPreviousSessionNotice,
     getApiPort
   })
 
@@ -994,6 +1065,24 @@ app.whenReady().then(async () => {
   // Initialize telemetry (reads consent from settings; no-op if not consented)
   getTelemetryService().initialize()
   getTelemetryService().track('session/start')
+
+  // Prime the quit-activity process-table path off the startup critical path
+  // (Windows PowerShell/CIM cold-start would otherwise eat the scan budget
+  // on the first quit and degrade the dialog to the generic copy).
+  setTimeout(() => warmQuitActivityScanner(), 5000)
+
+  // Fleet visibility for the no-crash-report death class: the session ledger
+  // found the previous instance ended without a clean-shutdown mark
+  // (SIGKILL / power loss / freeze force-quit — none of which leave an .ips).
+  if (previousSessionVerdict && (previousSessionVerdict.kind === 'abnormal' || previousSessionVerdict.kind === 'corrupt')) {
+    const previous = previousSessionVerdict.kind === 'abnormal' ? previousSessionVerdict.previous : null
+    getTelemetryService().track('error/abnormalExit', {
+      kind: previousSessionVerdict.kind,
+      lastAppVersion: previous?.appVersion ?? 'unknown',
+      uptimeMs: previous ? String(Math.max(0, Date.parse(previous.lastSeenAt) - Date.parse(previous.startedAt) || 0)) : '-1',
+      terminatedActiveJobs: String(previous?.terminatedActiveJobs ?? 0)
+    })
+  }
 
   // Set up the application menu (contains the Edit menu to enable standard editing shortcuts)
   Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate(appInfo.displayName)))
