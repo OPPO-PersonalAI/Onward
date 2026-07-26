@@ -1010,6 +1010,12 @@ export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
       return { gitExecutable: null, repoRoot: null, gitDir: null, isRepo: false, probeState: 'error' as const }
     }
 
+    // Autotest probe interceptor (see setRepoProbeTimeoutOverrideForAutotest).
+    // Production cost is one size check on an always-empty map.
+    if (isRepoProbeTimeoutForced(normalizedCwd)) {
+      return { gitExecutable, repoRoot: null, gitDir: null, isRepo: false, probeState: 'timeout' as const }
+    }
+
     // Run all three rev-parse queries in a single git invocation
     // to cut 3 sequential process spawns down to 1
     try {
@@ -1080,6 +1086,46 @@ export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
  * deleted / re-init'd / its worktree moved — the rare cases where the otherwise-
  * immutable cwd→repoRoot mapping can change. With no argument, clears all.
  */
+/**
+ * Autotest-only (G5, 2026-07-24 review): force every rev-parse PROBE for
+ * `cwd` to classify as 'timeout' until `untilMs`, mimicking a hanging
+ * network volume — a state that has no deterministic E2E fixture.
+ *
+ * Deliberately an INTERCEPTOR at the probe layer, not a seeded cache entry:
+ * the RC-2 retry/open paths run `loadGitDiff(force)` whose escape hatch
+ * CLEARS a timeout-classified cache entry and re-probes — a seeded entry is
+ * therefore structurally unable to survive a single open (verified while
+ * authoring run-git-diff-probe-timeout). Intercepting the probe matches the
+ * real failure: clear → re-probe → still times out.
+ *
+ * `untilMs <= now` clears the override. The cached entry for `cwd` is also
+ * dropped so an immutable positive from startup cannot short-circuit the
+ * next consult before it ever reaches the probe. Guarded at the IPC / worker
+ * dispatch layer by ONWARD_AUTOTEST=1; never called from production code.
+ */
+const autotestProbeTimeoutOverrides = new Map<string, number>()
+
+export function setRepoProbeTimeoutOverrideForAutotest(cwd: string, untilMs: number): void {
+  const key = resolve(cwd)
+  if (untilMs > Date.now()) {
+    autotestProbeTimeoutOverrides.set(key, untilMs)
+  } else {
+    autotestProbeTimeoutOverrides.delete(key)
+  }
+  gitMetaCache.delete(key)
+}
+
+function isRepoProbeTimeoutForced(normalizedCwd: string): boolean {
+  if (autotestProbeTimeoutOverrides.size === 0) return false
+  const until = autotestProbeTimeoutOverrides.get(normalizedCwd)
+  if (until === undefined) return false
+  if (Date.now() > until) {
+    autotestProbeTimeoutOverrides.delete(normalizedCwd)
+    return false
+  }
+  return true
+}
+
 export function clearGitMetaCache(cwd?: string): void {
   if (cwd) {
     gitMetaCache.delete(resolve(cwd))

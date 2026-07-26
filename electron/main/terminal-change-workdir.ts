@@ -51,6 +51,18 @@ export type ChangeWorkDirFailureReason =
   | 'terminal-not-found'
   | 'write-failed'
   | 'verify-timeout'
+  // G1 hardening gate (decided in ipc-handlers via terminal-screen-mode
+  // state): a full-screen TUI holds the alternate screen — the cd would be
+  // typed INTO it.
+  | 'tui-active'
+  // G2 hardening: a transaction for this terminal is already in flight.
+  | 'busy'
+
+// G2 hardening (2026-07-24 review): one verified transaction per terminal
+// at a time. Without this, two rapid clicks write two interleaved command
+// lines into the same shell; each waiter matches only its own canonical
+// target so the STATE stays honest, but the shell session gets messy input.
+const inFlightTerminals = new Set<string>()
 
 export interface ChangeWorkDirResult {
   success: boolean
@@ -67,6 +79,26 @@ export async function executeVerifiedChangeWorkDir(
     terminalId,
     path: String(targetPath ?? '').slice(0, 512)
   })
+
+  if (inFlightTerminals.has(terminalId)) {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_TERMINAL_CHANGE_WORKDIR_FAILED, {
+      terminalId,
+      reason: 'busy'
+    })
+    return { success: false, reason: 'busy' }
+  }
+  inFlightTerminals.add(terminalId)
+  try {
+    return await runVerifiedChangeWorkDir(terminalId, targetPath)
+  } finally {
+    inFlightTerminals.delete(terminalId)
+  }
+}
+
+async function runVerifiedChangeWorkDir(
+  terminalId: string,
+  targetPath: string
+): Promise<ChangeWorkDirResult> {
 
   const resolvedTarget = resolveExistingTerminalCwd(targetPath)
   if (!resolvedTarget) {

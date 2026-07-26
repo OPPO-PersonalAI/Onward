@@ -154,7 +154,9 @@ const CHANGE_WORKDIR_FAILURE_KEYS = {
   'target-not-found': 'terminalGrid.changeWorkDir.failed.target-not-found',
   'terminal-not-found': 'terminalGrid.changeWorkDir.failed.terminal-not-found',
   'write-failed': 'terminalGrid.changeWorkDir.failed.write-failed',
-  'verify-timeout': 'terminalGrid.changeWorkDir.failed.verify-timeout'
+  'verify-timeout': 'terminalGrid.changeWorkDir.failed.verify-timeout',
+  'tui-active': 'terminalGrid.changeWorkDir.failed.tui-active',
+  'busy': 'terminalGrid.changeWorkDir.failed.busy'
 } as const
 type ChangeWorkDirFailureKey = (typeof CHANGE_WORKDIR_FAILURE_KEYS)[keyof typeof CHANGE_WORKDIR_FAILURE_KEYS]
 

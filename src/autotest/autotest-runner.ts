@@ -10,6 +10,8 @@
  */
 import type { AutotestContext, TestResult, TestSuiteResult } from './types'
 import { testTerminalAutofollow } from './test-terminal-autofollow'
+import { testTerminalLivenessHint } from './test-terminal-liveness-hint'
+import { testGitDiffProbeTimeout } from './test-git-diff-probe-timeout'
 import { testTerminalTitleRename } from './test-terminal-title-rename'
 import { testTaskLayout } from './test-task-layout'
 import { testPromptSender } from './test-prompt-sender'
@@ -222,6 +224,25 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.1:begin')
       const results = await testTerminalAutofollow(ctx)
       collectSuiteResults('TerminalAutofollow', results)
+      await sleep(400)
+    }
+
+    // explicitOnly: requires ONWARD_SHELL_INTEGRATION=0 +
+    // ONWARD_LIVENESS_WINDOW_MS from its dedicated runner — running it in a
+    // default full pass (integration alive) would false-fail by design.
+    if (!ctx.cancelled() && shouldRun('terminal-liveness-hint', { explicitOnly: true })) {
+      log('phase0.11:begin')
+      const results = await testTerminalLivenessHint(ctx)
+      collectSuiteResults('TerminalLivenessHint', results)
+      await sleep(400)
+    }
+
+    // explicitOnly: poisons the repo-root meta cache (5-minute backoff
+    // entry) — must not contaminate unrelated suites in a shared app run.
+    if (!ctx.cancelled() && shouldRun('git-diff-probe-timeout', { explicitOnly: true })) {
+      log('phase0.115:begin')
+      const results = await testGitDiffProbeTimeout(ctx)
+      collectSuiteResults('GitDiffProbeTimeout', results)
       await sleep(400)
     }
 

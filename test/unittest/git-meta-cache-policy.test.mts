@@ -70,6 +70,26 @@ test('a plain not-repo entry is unaffected by the backoff ladder', () => {
   assert.equal(isMetaCacheEntryFresh(entry, 1500, TTL), false, 'short TTL still applies')
 })
 
+// ───── G6 (2026-07-24 review): alias-keying is documented behaviour ─────
+// The gitMetaCache key is `path.resolve(cwd)` — LEXICAL normalization only,
+// deliberately NOT `fs.realpath`: dereferencing a symlink/junction on the
+// very hanging network volume RC-2 protects against would itself block in
+// the threadpool. Consequence (accepted cost, locked here so a future
+// "optimisation" to canonical keys re-litigates it consciously): each
+// lexical alias of the same directory carries an INDEPENDENT entry and an
+// INDEPENDENT strike ladder — N aliases pay up to N initial 10 s probes
+// before all their ladders engage.
+
+test('G6: alias entries carry independent backoff ladders (documented behaviour)', () => {
+  // Simulates two lexical aliases (e.g. `Z:\link\repo` and `D:\real\repo`)
+  // of one hanging volume: entries are independent, so one alias being deep
+  // into backoff must not extend the other's window.
+  const viaJunction = { value: { isRepo: false, probeState: 'timeout' as const }, at: 0, timeoutStrikes: 3 }
+  const viaRealPath = { value: { isRepo: false, probeState: 'timeout' as const }, at: 0, timeoutStrikes: 1 }
+  assert.equal(isMetaCacheEntryFresh(viaJunction, 200_000, TTL), true, 'strike-3 alias holds 5 min')
+  assert.equal(isMetaCacheEntryFresh(viaRealPath, 200_000, TTL), false, 'strike-1 alias re-probes after 30 s')
+})
+
 // ───── Probe-error classifier decision table ─────
 
 test('classifier: a timeout kill (killed/SIGTERM, no numeric code) → timeout', () => {

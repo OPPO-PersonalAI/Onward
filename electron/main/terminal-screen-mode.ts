@@ -66,6 +66,26 @@ export function createScreenModeState(): TerminalScreenModeState {
   return { altScreen: false, carry: '' }
 }
 
+/**
+ * Gate decision for the verified change-workdir transaction (G1 hardening,
+ * 2026-07-24 review): while a full-screen TUI holds the ALTERNATE screen,
+ * writing `cd …\r` into the PTY types the command INTO the TUI (e.g. a
+ * running coding agent's composer) and presses Enter — the proof OSC never
+ * arrives, and the side effect on the inner program is unguarded.
+ *
+ * Deliberately keyed on `altScreen` ONLY — NOT on bracketed paste: zsh /
+ * fish / readline enable DECSET 2004 at every ordinary prompt, so gating on
+ * it would block every legitimate manual cwd switch on POSIX shells. The
+ * residual risk (a TUI repainting the NORMAL buffer in place, e.g. the
+ * ConPTY-synthesized variant from BUG-0001) is accepted: the transaction's
+ * verify-timeout still guarantees nothing is persisted.
+ */
+export function shouldBlockChangeWorkdirForTui(
+  state: TerminalScreenModeState | undefined
+): boolean {
+  return state?.altScreen === true
+}
+
 export function scanScreenMode(
   state: TerminalScreenModeState,
   data: string

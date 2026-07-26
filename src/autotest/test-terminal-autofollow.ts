@@ -340,6 +340,77 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
     unsubscribeColorCapture()
   }
 
+  // ───── TA-16/17: verified change-workdir hardening (G1 TUI gate + G2 busy
+  // lock, 2026-07-24 review). Driven through the REAL PTY (terminal.write →
+  // shell echoes DECSET 1049), so the assertion covers the full main-side
+  // chain: pty onData → scanScreenMode → screen-mode state → gate. This is
+  // deliberately NOT injectPtyData, which writes renderer-side and would
+  // bypass the main-process scanner entirely. ─────
+  const emitRawSequence = async (sequence: string, label: string) => {
+    // POSIX printf accepts \033; PowerShell needs [char]27 concatenation.
+    const command = platform === 'win32'
+      ? `Write-Host -NoNewline ([char]27 + '${sequence}')`
+      : `printf '\\033${sequence}'`
+    await execCommand(command, label, 250)
+  }
+
+  await emitRawSequence('[?1049h', 'alt-screen-enter')
+  const altReached = await waitFor('terminal-alt-buffer-active', () => {
+    return api.getViewportState(terminalId)?.bufferType === 'alternate'
+  }, 8000, 120)
+
+  if (altReached) {
+    // Same bytes reached the renderer's parser AFTER the main-process scan,
+    // so the gate MUST be armed — a miss here is a main/renderer parity bug.
+    const gated = await window.electronAPI.terminal.changeWorkDirVerified(
+      terminalId,
+      `${fixtureRootPath}${separator}test`
+    )
+    record('TA-16-tui-gate-blocks-change-workdir', gated.success === false && gated.reason === 'tui-active', {
+      outcome: gated,
+      viewport: readViewport(api)
+    })
+    await emitRawSequence('[?1049l', 'alt-screen-exit')
+    const backToNormal = await waitFor('terminal-normal-buffer-active', () => {
+      return api.getViewportState(terminalId)?.bufferType === 'normal'
+    }, 8000, 120)
+    record('TA-16a-alt-screen-exit-reopens-gate', backToNormal, {
+      viewport: readViewport(api)
+    })
+  } else {
+    // Documented platform branch: some ConPTY builds virtualize DECSET 1049
+    // instead of passing it through (BUG-0001 sub-mechanism B). The gate
+    // then must NOT block — the terminal really is on the normal buffer.
+    record('TA-16-tui-gate-blocks-change-workdir', platform === 'win32', {
+      skipped: 'conpty-no-alt-passthrough',
+      viewport: readViewport(api)
+    })
+    // Defensive: clear any virtualized inner alt state ConPTY may hold.
+    await emitRawSequence('[?1049l', 'alt-screen-exit-cleanup')
+  }
+
+  // TA-16b: with the normal buffer active, the verified transaction must
+  // succeed end-to-end (cd written, shell proof OSC observed, cwd returned).
+  const cdTarget = `${fixtureRootPath}${separator}test`
+  const cdOk = await window.electronAPI.terminal.changeWorkDirVerified(terminalId, cdTarget)
+  record('TA-16b-verified-change-workdir-succeeds', cdOk.success === true && typeof cdOk.cwd === 'string', {
+    outcome: cdOk,
+    target: cdTarget
+  })
+
+  // TA-17: two concurrent transactions on one terminal — exactly one wins,
+  // the other is rejected 'busy' (G2 lock). Target = fixtureRootPath so the
+  // winner also restores the suite's working directory.
+  const [race1, race2] = await Promise.all([
+    window.electronAPI.terminal.changeWorkDirVerified(terminalId, fixtureRootPath),
+    window.electronAPI.terminal.changeWorkDirVerified(terminalId, fixtureRootPath)
+  ])
+  const oneBusy = (race1.success && race2.reason === 'busy') || (race2.success && race1.reason === 'busy')
+  record('TA-17-concurrent-change-workdir-one-busy', oneBusy, {
+    race1,
+    race2
+  })
+
   log('terminal-autofollow:done', {
     total: results.length,
     passed: results.filter(result => result.ok).length,

@@ -17,7 +17,8 @@ import assert from 'node:assert/strict'
 
 import {
   createScreenModeState,
-  scanScreenMode
+  scanScreenMode,
+  shouldBlockChangeWorkdirForTui
 } from '../../electron/main/terminal-screen-mode.ts'
 
 test('TSM-U-01 DECSET 1049 enters the alternate screen exactly once', () => {
@@ -103,6 +104,28 @@ test('TSM-U-10 plain TUI repaint output produces no transitions', () => {
 test('TSM-U-11 carry stays bounded on pathological ESC-free streams', () => {
   const r = scanScreenMode(createScreenModeState(), 'x'.repeat(100_000))
   assert.ok(r.state.carry.length <= 15)
+})
+
+test('TSM-U-13 change-workdir gate blocks ONLY while the alt screen is active', () => {
+  // Normal buffer → allowed (including the fresh-state and unknown cases).
+  assert.equal(shouldBlockChangeWorkdirForTui(undefined), false)
+  assert.equal(shouldBlockChangeWorkdirForTui(createScreenModeState()), false)
+
+  // TUI entered the alternate screen → blocked.
+  const alt = scanScreenMode(createScreenModeState(), '\x1b[?1049h').state
+  assert.equal(shouldBlockChangeWorkdirForTui(alt), true)
+
+  // TUI exited → allowed again.
+  const back = scanScreenMode(alt, '\x1b[?1049l').state
+  assert.equal(shouldBlockChangeWorkdirForTui(back), false)
+})
+
+test('TSM-U-14 gate ignores bracketed-paste-style prompts (normal buffer stays allowed)', () => {
+  // zsh/fish enable DECSET 2004 at every ordinary prompt; the classifier
+  // does not track 2004 and the gate must not block a plain prompt stream.
+  const state = scanScreenMode(createScreenModeState(), '\x1b[?2004h$ ').state
+  assert.equal(state.altScreen, false)
+  assert.equal(shouldBlockChangeWorkdirForTui(state), false)
 })
 
 test('TSM-U-12 full life cycle: enter, wipe attempts inside alt, exit', () => {

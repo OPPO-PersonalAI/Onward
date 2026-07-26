@@ -56,6 +56,7 @@ type GitIpcWorkerMethod =
   | 'updateIndexContent'
   | 'warmDiffCache'
   | 'inspectListCacheStats'
+  | 'poisonRepoProbeForAutotest'
 
 type WorkerRequest = {
   id: number
@@ -113,6 +114,22 @@ class GitIpcWorkerClient {
       repoKey: cwd,
       dedupeKey: `git-ipc:resolve-root:${resolve(cwd)}`,
       label: 'worker git resolve repo root'
+    })
+  }
+
+  /**
+   * Autotest-only (G5, 2026-07-24 review): install the probe-timeout
+   * interceptor in the WORKER's own git-utils instance — the diff path runs
+   * `loadGitDiff` inside the worker, so main's module instance alone never
+   * covers it. `untilMs <= now` clears the override. Worker-side dispatch
+   * re-checks ONWARD_AUTOTEST.
+   */
+  poisonRepoProbeForAutotest(cwd: string, untilMs: number): Promise<boolean> {
+    return this.enqueueWorkerTask<boolean>('poisonRepoProbeForAutotest', { cwd, untilMs }, {
+      priority: 'high',
+      repoKey: null,
+      dedupeKey: `git-ipc:poison-probe:${resolve(cwd)}:${untilMs}`,
+      label: 'worker poison repo probe (autotest)'
     })
   }
 

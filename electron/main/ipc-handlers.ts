@@ -20,10 +20,11 @@ import { readCurrentChangelog } from './changelog'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { getTelemetryConsent, setTelemetryConsent } from './telemetry/telemetry-consent'
 import { applyTerminalUserEnvVars, buildColorCapableTerminalEnv } from './terminal-env'
-import { createScreenModeState, scanScreenMode, TerminalScreenModeState } from './terminal-screen-mode'
+import { createScreenModeState, scanScreenMode, shouldBlockChangeWorkdirForTui, TerminalScreenModeState } from './terminal-screen-mode'
 import {
   getTerminalCwd,
   getTerminalGitInfo,
+  setRepoProbeTimeoutOverrideForAutotest,
   setTerminalCwdAuthorityResolver,
   setTerminalCwdDetectedHandler
 } from './git-utils'
@@ -372,6 +373,18 @@ const terminalBracketedPasteState = new Map<string, boolean>()
 // scrollback-visibility breadcrumb missing from BUG-0001's bundle. Scanned
 // at the same per-chunk site as the bracketed-paste tracker above.
 const terminalScreenModeStates = new Map<string, TerminalScreenModeState>()
+
+// ONWARD_LIVENESS_WINDOW_MS: debug/test override for the shell-integration
+// liveness window (default 15 s). Read once at startup, clamped to a sane
+// range; primarily lets autotests exercise the silent → hint → recovered
+// chain deterministically without a 15 s wall-clock wait. See
+// docs/debug-env-variables.md.
+const livenessWindowOverrideMs: number | null = (() => {
+  const raw = Number(process.env.ONWARD_LIVENESS_WINDOW_MS || '')
+  if (!Number.isFinite(raw) || raw < 250 || raw > 600_000) return null
+  console.log(`[ShellIntegrationLiveness] window override active: ${raw}ms (ONWARD_LIVENESS_WINDOW_MS)`)
+  return raw
+})()
 
 // Buffer request waiting queue
 interface TerminalBufferResult {
@@ -1212,6 +1225,37 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       return { ok: false, error: String(error) }
     }
   })
+  // Autotest-only (G5, 2026-07-24 review): seed a timeout-classified probe
+  // entry for a cwd so the RC-2 "Git timed out" UI state + retry escape can
+  // be driven without a real hanging volume. Gated on ONWARD_AUTOTEST=1.
+  ipcMain.handle('debug:autotest-poison-repo-probe', async (
+    _event,
+    payload?: { cwd?: unknown; durationMs?: unknown }
+  ): Promise<{ ok: boolean; error?: string; targets?: string[] }> => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { ok: false, error: 'debug:autotest-poison-repo-probe requires ONWARD_AUTOTEST=1' }
+    }
+    const cwd = typeof payload?.cwd === 'string' ? payload.cwd : ''
+    if (!cwd) return { ok: false, error: 'Missing cwd.' }
+    const durationMs = Number(payload?.durationMs)
+    const untilMs = Number.isFinite(durationMs) && durationMs > 0 ? Date.now() + durationMs : 0
+    try {
+      // Install the interceptor in BOTH module instances (main + git IPC
+      // worker — the diff path runs loadGitDiff inside the worker) and for
+      // BOTH key shapes (raw and mirror-canonical — the viewer opens with
+      // the canonicalised cwd).
+      const targets = new Set<string>([cwd])
+      const canonical = gitStateMirrorRouter.canonicaliseCwd(cwd)
+      if (canonical) targets.add(canonical)
+      for (const target of targets) {
+        setRepoProbeTimeoutOverrideForAutotest(target, untilMs)
+        await gitIpcWorkerClient.poisonRepoProbeForAutotest(target, untilMs)
+      }
+      return { ok: true, targets: Array.from(targets) }
+    } catch (error) {
+      return { ok: false, error: String(error) }
+    }
+  })
   // Autotest-only: deterministically drive ONE background auto-fetch for a repo
   // (bypassing the due-timer) so the fetch→revalidate→behind path can be asserted
   // without racing the scheduler's interval. Gated on ONWARD_AUTOTEST=1.
@@ -1439,7 +1483,11 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       // the TERMINAL_DISPOSE cleanup), and a stale waiting-timer from the
       // pre-takeover shell would otherwise fire a false hint mid-agent.
       if (!options?.command) {
-        shellIntegrationLiveness.start(id, ptyManager.getShellKind(id))
+        if (livenessWindowOverrideMs !== null) {
+          shellIntegrationLiveness.start(id, ptyManager.getShellKind(id), livenessWindowOverrideMs)
+        } else {
+          shellIntegrationLiveness.start(id, ptyManager.getShellKind(id))
+        }
       } else {
         shellIntegrationLiveness.dispose(id)
       }
@@ -1641,6 +1689,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.TERMINAL_CHANGE_WORKDIR_VERIFIED, async (_, id: string, targetPath: string) => {
     if (typeof id !== 'string' || !id || typeof targetPath !== 'string' || !targetPath) {
       return { success: false, reason: 'target-not-found' }
+    }
+    // G1 hardening gate: a TUI holding the alternate screen would receive
+    // the cd command as typed input + Enter (real side effect on the inner
+    // program). Block up front instead of relying on verify-timeout to
+    // paper over the injection. Decision logic + rationale live in
+    // terminal-screen-mode.ts::shouldBlockChangeWorkdirForTui.
+    if (shouldBlockChangeWorkdirForTui(terminalScreenModeStates.get(id))) {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_TERMINAL_CHANGE_WORKDIR_FAILED, {
+        terminalId: id,
+        reason: 'tui-active'
+      }, { terminalId: id })
+      return { success: false, reason: 'tui-active' }
     }
     return executeVerifiedChangeWorkDir(id, targetPath)
   })
@@ -3241,6 +3301,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler('debug:post-api-terminal-write')
   ipcMain.removeHandler('debug:autotest-write-external-file')
   ipcMain.removeHandler('debug:autotest-git-init')
+  ipcMain.removeHandler('debug:autotest-poison-repo-probe')
   ipcMain.removeHandler('debug:autotest-git-autofetch')
   ipcMain.removeHandler('performance-trace:record')
   ipcMain.removeHandler('performance-trace:get-status')

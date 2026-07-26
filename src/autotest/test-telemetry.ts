@@ -26,6 +26,10 @@ export async function testTelemetry(ctx: AutotestContext): Promise<TestResult[]>
   // "was this event type ever captured" must be asserted on the union of
   // all reads, not on the final file state.
   const seenNames = new Set<string>()
+  // Monotonic per-name maximum across every read — the drain-immune
+  // counterpart of seenNames for COUNT assertions: once N events of a name
+  // have been observed together, a later outbox drain cannot un-observe them.
+  const maxSeenCounts = new Map<string, number>()
   const getEvents = async (): Promise<TelemetryLogEntry[]> => {
     const raw = await window.electronAPI.debug.readTelemetryLog()
     if (!raw) return []
@@ -33,8 +37,56 @@ export async function testTelemetry(ctx: AutotestContext): Promise<TestResult[]>
       .filter(l => l.trim())
       .map(l => { try { return JSON.parse(l) } catch { return null } })
       .filter((e): e is TelemetryLogEntry => e !== null)
-    for (const e of parsed) seenNames.add(e.name)
+    const counts = new Map<string, number>()
+    for (const e of parsed) {
+      seenNames.add(e.name)
+      counts.set(e.name, (counts.get(e.name) ?? 0) + 1)
+    }
+    for (const [name, count] of counts) {
+      if (count > (maxSeenCounts.get(name) ?? 0)) maxSeenCounts.set(name, count)
+    }
     return parsed
+  }
+
+  // Phase-count wait (2026-07-24 repair, Bucket-1 timing-design fix): the
+  // old pattern — fire-and-forget track() → fixed sleep → ONE sliced read →
+  // exact-count gate — raced the 5 s fast-mode heartbeat/aggregation cycle,
+  // which delays the main-process JSONL appends past the sleep window. The
+  // late events always landed (every failing run's final census was a full
+  // 30/30), so the product was never at fault: whichever phase's window
+  // collided with the heartbeat went red (TEL-05 in isolation, TEL-06 under
+  // full-run load) — the user-visible "fluctuation".
+  //
+  // The count is a DELTA against a baseline captured BEFORE the phase's
+  // track() calls, NOT a whole-file absolute: launches B/C seed a
+  // historical-migration backlog into the outbox (seed_backlog in the
+  // runner, incl. one prompt/use), so an absolute count over-counts by the
+  // seed (first repair attempt failed 3/3 on exactly that, count 7 ≠ 6).
+  // Baseline + delta reproduces the old slice()'s relative semantics while
+  // removing both of its defects (fixed-sleep timing assumption, index
+  // shifting on a shrinkable outbox — maxSeenCounts is monotonic). The
+  // ceiling is a hang detector; a healthy run short-circuits immediately.
+  const eventCountBaseline = async (name: string): Promise<number> => {
+    await getEvents()
+    return maxSeenCounts.get(name) ?? 0
+  }
+  const waitForEventDelta = async (
+    name: string,
+    base: number,
+    expected: number
+  ): Promise<{ ok: boolean; observed: number }> => {
+    const deadline = Date.now() + 15_000
+    for (;;) {
+      await getEvents()
+      const observed = (maxSeenCounts.get(name) ?? 0) - base
+      if (observed >= expected) {
+        return { ok: observed === expected, observed }
+      }
+      if (Date.now() >= deadline) {
+        return { ok: false, observed }
+      }
+      await sleep(150)
+    }
   }
 
   log('telemetry-test:start')
@@ -49,7 +101,7 @@ export async function testTelemetry(ctx: AutotestContext): Promise<TestResult[]>
   ))
 
   // === Phase 2: Prompt operations (3 types, multiple clicks each) ===
-  const baseline2 = events.length
+  const promptBase = await eventCountBaseline('prompt/use')
   // send x3
   window.electronAPI.telemetry.track('prompt/use', { action: 'send' })
   window.electronAPI.telemetry.track('prompt/use', { action: 'send' })
@@ -59,50 +111,44 @@ export async function testTelemetry(ctx: AutotestContext): Promise<TestResult[]>
   window.electronAPI.telemetry.track('prompt/use', { action: 'execute' })
   // sendAndExecute x1
   window.electronAPI.telemetry.track('prompt/use', { action: 'sendAndExecute' })
-  await sleep(500)
-  events = await getEvents()
-  const promptEvents = events.slice(baseline2).filter(e => e.name === 'prompt/use')
-  record('TEL-03-prompt-use-count', promptEvents.length === 6, { count: promptEvents.length })
+  const promptCount = await waitForEventDelta('prompt/use', promptBase, 6)
+  record('TEL-03-prompt-use-count', promptCount.ok, { count: promptCount.observed, base: promptBase })
 
   // === Phase 3: Dropdown — Workspace (menu clicks) ===
-  const baseline3 = events.length
+  const workspaceBase = await eventCountBaseline('dropdown/workspace')
   window.electronAPI.telemetry.track('dropdown/workspace', { action: 'openDir' })
   window.electronAPI.telemetry.track('dropdown/workspace', { action: 'openDir' })
   window.electronAPI.telemetry.track('dropdown/workspace', { action: 'changeDir' })
-  await sleep(300)
-  events = await getEvents()
-  record('TEL-04-dropdown-workspace', events.slice(baseline3).filter(e => e.name === 'dropdown/workspace').length === 3)
+  const workspaceCount = await waitForEventDelta('dropdown/workspace', workspaceBase, 3)
+  record('TEL-04-dropdown-workspace', workspaceCount.ok, { count: workspaceCount.observed, base: workspaceBase })
 
   // === Phase 4: Dropdown — Development (menu clicks) ===
-  const baseline4 = events.length
+  const developmentBase = await eventCountBaseline('dropdown/development')
   window.electronAPI.telemetry.track('dropdown/development', { action: 'editor' })
   window.electronAPI.telemetry.track('dropdown/development', { action: 'editor' })
   window.electronAPI.telemetry.track('dropdown/development', { action: 'gitDiff' })
   window.electronAPI.telemetry.track('dropdown/development', { action: 'gitDiff' })
   window.electronAPI.telemetry.track('dropdown/development', { action: 'gitHistory' })
-  await sleep(300)
-  events = await getEvents()
-  record('TEL-05-dropdown-development', events.slice(baseline4).filter(e => e.name === 'dropdown/development').length === 5)
+  const developmentCount = await waitForEventDelta('dropdown/development', developmentBase, 5)
+  record('TEL-05-dropdown-development', developmentCount.ok, { count: developmentCount.observed, base: developmentBase })
 
   // === Phase 5: Dropdown — Tools (menu clicks) ===
   // Actions mirror today's UI: the unified codeAgent launcher replaced the
   // claudeCode/codex split entries in spring 2026.
-  const baseline5 = events.length
+  const toolsBase = await eventCountBaseline('dropdown/tools')
   window.electronAPI.telemetry.track('dropdown/tools', { action: 'codeAgent' })
   window.electronAPI.telemetry.track('dropdown/tools', { action: 'codeAgent' })
   window.electronAPI.telemetry.track('dropdown/tools', { action: 'browser' })
   window.electronAPI.telemetry.track('dropdown/tools', { action: 'browser' })
-  await sleep(300)
-  events = await getEvents()
-  record('TEL-06-dropdown-tools', events.slice(baseline5).filter(e => e.name === 'dropdown/tools').length === 4)
+  const toolsCount = await waitForEventDelta('dropdown/tools', toolsBase, 4)
+  record('TEL-06-dropdown-tools', toolsCount.ok, { count: toolsCount.observed, base: toolsBase })
 
   // === Phase 6: Error/crash simulation ===
-  const baseline6 = events.length
+  const crashBase = await eventCountBaseline('error/rendererCrash')
   window.electronAPI.telemetry.track('error/rendererCrash', { reason: 'crashed', exitCode: '1' })
   window.electronAPI.telemetry.track('error/rendererCrash', { reason: 'oom', exitCode: '137' })
-  await sleep(300)
-  events = await getEvents()
-  record('TEL-07-error-renderer-crash', events.slice(baseline6).filter(e => e.name === 'error/rendererCrash').length === 2)
+  const crashCount = await waitForEventDelta('error/rendererCrash', crashBase, 2)
+  record('TEL-07-error-renderer-crash', crashCount.ok, { count: crashCount.observed, base: crashBase })
 
   // === Phase 7: Wait for heartbeat (5s in fast mode) + daily upload ===
   log('telemetry-test:waiting-for-heartbeat-and-upload')

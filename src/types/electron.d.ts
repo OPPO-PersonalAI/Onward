@@ -122,7 +122,7 @@ export interface TerminalAPI {
   changeWorkDirVerified: (id: string, targetPath: string) => Promise<{
     success: boolean
     cwd?: string
-    reason?: 'target-not-found' | 'terminal-not-found' | 'write-failed' | 'verify-timeout'
+    reason?: 'target-not-found' | 'terminal-not-found' | 'write-failed' | 'verify-timeout' | 'tui-active' | 'busy'
   }>
   /** Shell integration produced no cwd OSC within the liveness window. */
   onIntegrationSilent: (callback: (id: string, shellKind: string) => void) => () => void
@@ -1172,6 +1172,7 @@ export interface DebugAPI {
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
   gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
+  poisonRepoProbeForAutotest: (payload: { cwd: string; durationMs?: number }) => Promise<{ ok: boolean; error?: string }>
   gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>

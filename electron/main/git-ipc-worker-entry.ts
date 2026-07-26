@@ -16,6 +16,7 @@ import {
   prewarmHistoryCommitDiffs,
   getGitRepoMeta,
   invalidateGitDiffCache,
+  setRepoProbeTimeoutOverrideForAutotest,
   resolveRepoRoot,
   saveGitFileContent,
   stageGitFile,
@@ -50,6 +51,7 @@ type GitIpcWorkerMethod =
   | 'updateIndexContent'
   | 'warmDiffCache'
   | 'inspectListCacheStats'
+  | 'poisonRepoProbeForAutotest'
 
 type WorkerRequest = {
   id: number
@@ -92,6 +94,21 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
       return await resolveRepoRoot(cwd)
     case 'getDiff':
       return await getGitDiff(cwd, payload.options as { scope?: 'root-only' | 'full'; force?: boolean } | undefined)
+    case 'poisonRepoProbeForAutotest': {
+      // Autotest-only probe interceptor (G5); the worker inherits main's
+      // env, and the gate is re-checked here so a stray call is inert.
+      if (process.env.ONWARD_AUTOTEST !== '1') {
+        throw new Error('poisonRepoProbeForAutotest requires ONWARD_AUTOTEST=1')
+      }
+      const untilMs = Number(payload.untilMs) || 0
+      setRepoProbeTimeoutOverrideForAutotest(cwd, untilMs)
+      // The startup prewarm has usually already filled the diff LIST cache
+      // for this cwd; a later getDiff would serve that hit without ever
+      // reaching the intercepted probe. Invalidate so the next open really
+      // walks loadGitDiff → getGitRepoMeta → forced timeout.
+      invalidateGitDiffCache(cwd, 'autotest-poison-repo-probe')
+      return true
+    }
     case 'getHistory':
       return await getGitHistory(
         cwd,
