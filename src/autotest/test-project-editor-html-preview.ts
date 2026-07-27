@@ -1239,6 +1239,223 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
       10000
     )
     await getApi()?.setHtmlPreviewZoomFactor?.(1)
+    if (cancelled()) return results
+
+    // ── In-page TOC anchor navigation (PHTML-35..39) ──
+    // User-reported flow: docs under docs/html carry a fixed left TOC whose
+    // entries are pure-hash links (href="#section-id"). Clicking an entry must
+    // jump to the section EVERY time (including a repeat click on the same
+    // entry after scrolling away), and must never leave the reader stuck on
+    // the opaque "HTML Preview loading" overlay.
+    const TOC_LANDED_TOLERANCE_PX = 120
+    const anchorTopInViewport = async (id: string): Promise<number | null> => {
+      const result = await getApi()?.evaluateHtmlPreviewForTest?.(
+        `(() => { const el = document.getElementById(${JSON.stringify(id)}); return el ? Math.round(el.getBoundingClientRect().top) : null })()`
+      )
+      return result?.success && typeof result.value === 'number' ? result.value : null
+    }
+    const waitForAnchorLanded = async (
+      label: string,
+      id: string,
+      timeoutMs = 2500
+    ): Promise<{ ok: boolean; top: number | null }> => {
+      const start = performance.now()
+      let top: number | null = null
+      while (performance.now() - start < timeoutMs) {
+        top = await anchorTopInViewport(id)
+        if (top !== null && Math.abs(top) <= TOC_LANDED_TOLERANCE_PX) return { ok: true, top }
+        await sleep(120)
+      }
+      ctx.log('html-preview-anchor-timeout', { label, id, top })
+      return { ok: false, top }
+    }
+    const scrollPreviewToTop = async (label: string): Promise<boolean> => {
+      await getApi()?.setHtmlPreviewScrollForTest?.(0)
+      const atTop = await waitForDocumentState(label, (state) => (state.scrollY ?? Number.NaN) <= 4, 3000)
+      if (!atTop.ok) return false
+      // The restore-scroll command re-applies its offset on the next animation
+      // frame (product-side layout-settle guard). A click issued before that
+      // frame lands gets its scrollIntoView undone by the deferred re-apply —
+      // wait it out, then reconfirm the frame is still parked at the top.
+      await sleep(80)
+      const settled = await waitForDocumentState(`${label}-settled`, (state) => (state.scrollY ?? Number.NaN) <= 4, 2000)
+      return settled.ok
+    }
+
+    const tocNavBefore = getApi()?.getHtmlPreviewNavState?.() ?? null
+    const firstTopOk = await scrollPreviewToTop('phtml-toc-top-before-first-click')
+    const firstTocClick = await clickPreviewLink('toc-link-1')
+    const firstLanded = await waitForAnchorLanded('phtml-toc-first-click', 'anchor-section-1')
+    record('PHTML-35-toc-anchor-first-click-jumps', Boolean(firstTopOk && firstTocClick && firstLanded.ok), {
+      firstTopOk,
+      firstTocClick,
+      landedTop: firstLanded.top,
+      tolerance: TOC_LANDED_TOLERANCE_PX
+    })
+    if (cancelled()) return results
+
+    // Boolean-correctness repetition (N=5): scroll away, click the SAME TOC
+    // entry again — every trial must land back on the section. A repeat click
+    // of the last-clicked entry exercises the same-URL navigation path.
+    const tocTrials: Array<{ scrollBackOk: boolean; clicked: boolean; landed: boolean; topAfter: number | null }> = []
+    for (let trial = 0; trial < 5; trial += 1) {
+      const scrollBackOk = await scrollPreviewToTop(`phtml-toc-trial-${trial}-top`)
+      const clicked = await clickPreviewLink('toc-link-1')
+      const landed = await waitForAnchorLanded(`phtml-toc-trial-${trial}`, 'anchor-section-1')
+      tocTrials.push({ scrollBackOk, clicked, landed: Boolean(clicked && landed.ok), topAfter: landed.top })
+    }
+    record('PHTML-36-toc-anchor-repeat-click-jumps-5x', tocTrials.every((trial) => trial.scrollBackOk && trial.landed), {
+      tocTrials
+    })
+    if (cancelled()) return results
+
+    // Locked design decision: TOC anchor jumps are pure scrolls — they add no
+    // host history entries (Back/Forward untouched) and, because the frame URL
+    // now carries the fragment, a hash-only difference must not light Home up.
+    const tocNavAfter = getApi()?.getHtmlPreviewNavState?.() ?? null
+    record('PHTML-36b-toc-clicks-do-not-touch-nav-history', Boolean(
+      tocNavBefore && tocNavAfter &&
+      tocNavAfter.canGoBack === tocNavBefore.canGoBack &&
+      tocNavAfter.canGoForward === tocNavBefore.canGoForward &&
+      tocNavAfter.homeEnabled === tocNavBefore.homeEnabled
+    ), {
+      tocNavBefore,
+      tocNavAfter
+    })
+    if (cancelled()) return results
+
+    // The repeat clicks above must not leave the reader stuck on the opaque
+    // loading overlay (isLoading latched true with no load event to clear it).
+    await sleep(600)
+    const readerAfterToc = getApi()?.getHtmlReaderState?.() ?? null
+    const stuckOverlay = document.querySelector('.project-editor-html-loading')
+    record('PHTML-37-toc-repeat-click-does-not-stick-loading-overlay', Boolean(
+      readerAfterToc && !readerAfterToc.isLoading && !stuckOverlay
+    ), {
+      isLoading: readerAfterToc?.isLoading ?? null,
+      hasOverlay: Boolean(stuckOverlay)
+    })
+    if (cancelled()) return results
+
+    // Anchor jump correctness with a non-default zoom factor applied to the
+    // live document (user hypothesis: zoom broke TOC jumps).
+    const tocZoomSeeded = await (getApi()?.setHtmlPreviewZoomFactor?.(ZOOM_PERSIST_TARGET) ?? Promise.resolve(false))
+    const tocZoomApplied = await waitForAppliedZoom('phtml-toc-zoom-seed', ZOOM_PERSIST_TARGET)
+    const tocZoomTopOk = await scrollPreviewToTop('phtml-toc-zoom-top')
+    const tocZoomClick = await clickPreviewLink('toc-link-2')
+    const tocZoomLanded = await waitForAnchorLanded('phtml-toc-zoom-click', 'anchor-section-2', 4000)
+    record('PHTML-38-toc-anchor-jump-lands-under-zoom', Boolean(
+      tocZoomSeeded && tocZoomApplied.ok && tocZoomTopOk && tocZoomClick && tocZoomLanded.ok
+    ), {
+      zoomApplied: tocZoomApplied.last,
+      tocZoomTopOk,
+      tocZoomClick,
+      landedTop: tocZoomLanded.top,
+      tolerance: TOC_LANDED_TOLERANCE_PX
+    })
+    await getApi()?.setHtmlPreviewZoomFactor?.(1)
+    await waitForAppliedZoom('phtml-toc-zoom-reset', 1)
+    if (cancelled()) return results
+
+    // Warm-reopen ordering: after ESC close → reopen, the remembered offset
+    // restores FIRST; a TOC click issued afterwards is user intent and must
+    // win — no delayed restore re-pin may snap the page back.
+    const TOC_WARM_SCROLL_Y = 600
+    await getApi()?.setHtmlPreviewScrollForTest?.(TOC_WARM_SCROLL_Y)
+    const tocWarmSeeded = await waitForDocumentState(
+      'phtml-toc-warm-seed',
+      (state) => Math.abs((state.scrollY ?? 0) - TOC_WARM_SCROLL_Y) <= 80,
+      5000
+    )
+    await sleep(2400)
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true
+    }))
+    const tocWarmClosed = await waitFor(
+      'phtml-toc-warm-close',
+      () => !(getApi()?.isOpen?.() ?? false),
+      10000,
+      100
+    )
+    const tocWarmReopened = await ctx.reopenProjectEditor('phtml-toc-warm-reopen')
+    const tocWarmFixtureBack = await waitFor(
+      'phtml-toc-warm-reopen-file',
+      () => getApi()?.getActiveFilePath?.() === fixturePath,
+      10000,
+      100
+    )
+    const tocWarmRestored = await waitForDocumentState(
+      'phtml-toc-warm-restored',
+      (state) => Math.abs((state.scrollY ?? 0) - TOC_WARM_SCROLL_Y) <= 80,
+      10000
+    )
+    const tocWarmClick = await clickPreviewLink('toc-link-1')
+    const tocWarmLanded = await waitForAnchorLanded('phtml-toc-warm-click', 'anchor-section-1', 4000)
+    await sleep(2000)
+    const tocWarmStillTop = await anchorTopInViewport('anchor-section-1')
+    record('PHTML-39-toc-click-after-warm-reopen-wins-over-restore', Boolean(
+      tocWarmSeeded.ok && tocWarmClosed && tocWarmReopened && tocWarmFixtureBack &&
+      tocWarmRestored.ok && tocWarmClick && tocWarmLanded.ok &&
+      tocWarmStillTop !== null && Math.abs(tocWarmStillTop) <= TOC_LANDED_TOLERANCE_PX
+    ), {
+      seededScrollY: tocWarmSeeded.state?.scrollY ?? null,
+      restoredScrollY: tocWarmRestored.state?.scrollY ?? null,
+      landedTop: tocWarmLanded.top,
+      stillTopAfterSettle: tocWarmStillTop,
+      tolerance: TOC_LANDED_TOLERANCE_PX
+    })
+    if (cancelled()) return results
+
+    // Same-URL link clicks (a link resolving to the URL the frame already
+    // shows) must reload in place instead of latching the loading overlay —
+    // React skips the unchanged src write, so the old dead-push path never
+    // produced a load event. Trial 0 is a real navigation (the resolved href
+    // drops the onwardHtmlReload query); trials 1..4 hit the same-URL guard.
+    // Every path produces a load, so gate each trial on loadCount advancing.
+    const selfTrials: Array<{ clicked: boolean; settled: boolean }> = []
+    for (let trial = 0; trial < 5; trial += 1) {
+      const loadCountBefore = getApi()?.getHtmlReaderState?.()?.loadCount ?? 0
+      const clicked = await clickPreviewLink('self-link')
+      const settled = await waitFor(
+        `phtml-self-link-${trial}-settled`,
+        () => {
+          const reader = getApi()?.getHtmlReaderState?.()
+          return Boolean(reader && reader.ready && !reader.isLoading && reader.loadCount > loadCountBefore)
+        },
+        8000,
+        100
+      )
+      selfTrials.push({ clicked, settled })
+    }
+    const selfOverlayStuck = Boolean(document.querySelector('.project-editor-html-loading'))
+    const selfNavAfter = getApi()?.getHtmlPreviewNavState?.() ?? null
+    // Exactly ONE history entry accumulated across the five clicks: Back once
+    // must return to the opened URL (which carries the onwardHtmlReload query
+    // the resolved self-link href drops). Duplicate pushes would make Back
+    // land on the query-less self URL instead. The editor ESC round-trip is a
+    // SOFT close (HtmlReader stays mounted, history survives), so Back is not
+    // required to bottom out here — the URL is the dedupe signal.
+    navButton('back')?.click()
+    const selfBackReturned = await waitForNavState(
+      'phtml-self-link-back-dedupes',
+      (state) => Boolean(state.forwardEnabled && state.url?.includes('onwardHtmlReload=')),
+      8000
+    )
+    record('PHTML-40-same-url-link-click-reloads-in-place-5x', Boolean(
+      selfTrials.every((trial) => trial.clicked && trial.settled) &&
+      !selfOverlayStuck &&
+      selfNavAfter?.canGoBack === true &&
+      selfNavAfter?.canGoForward === false &&
+      selfBackReturned.ok
+    ), {
+      selfTrials,
+      selfOverlayStuck,
+      selfNavAfter,
+      backState: selfBackReturned.state
+    })
   } finally {
     if (detourCreated.success) {
       await window.electronAPI.project.deletePath(ctx.rootPath, detourPath)

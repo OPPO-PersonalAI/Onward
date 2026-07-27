@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 
 import {
   buildHtmlPreviewUrl,
+  isInPageAnchorHref,
   resolveHtmlPreviewRequest
 } from '../../electron/main/html-preview-path.ts'
 import { isHtmlPreviewBridgeMessage } from '../../src/utils/html-preview-bridge.ts'
@@ -103,4 +104,23 @@ test('HPP-U-06 bridge messages require the marker, version, and session token', 
   assert.equal(isHtmlPreviewBridgeMessage({ ...valid, sessionId: 'session-b' }, 'session-a'), false)
   assert.equal(isHtmlPreviewBridgeMessage({ ...valid, marker: 'forged' }, 'session-a'), false)
   assert.equal(isHtmlPreviewBridgeMessage(null, 'session-a'), false)
+})
+
+test('HPP-U-07 in-page anchor classification reads the RAW href attribute', () => {
+  // Pure-hash links are handled inside the bridge as programmatic scrolls.
+  assert.equal(isInPageAnchorHref('#section-1'), true)
+  assert.equal(isInPageAnchorHref('#'), true)
+  assert.equal(isInPageAnchorHref('#%E4%B8%AD%E6%96%87'), true)
+  // Anything that is not a bare fragment stays on the navigate-request path.
+  assert.equal(isInPageAnchorHref(''), false)
+  assert.equal(isInPageAnchorHref('page.html#section'), false)
+  assert.equal(isInPageAnchorHref('./page.html'), false)
+  assert.equal(isInPageAnchorHref('?query#hash'), false)
+  assert.equal(isInPageAnchorHref('https://example.com/#hash'), false)
+  // The resolved DOM `href` property (absolute URL) must classify as NOT an
+  // anchor — feeding it instead of the raw attribute is the historical bug.
+  assert.equal(isInPageAnchorHref('onward-html-preview://s/a.html#section'), false)
+  // Non-string attribute reads (null when the attribute is absent).
+  assert.equal(isInPageAnchorHref(null), false)
+  assert.equal(isInPageAnchorHref(undefined), false)
 })

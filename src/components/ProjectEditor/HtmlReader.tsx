@@ -91,6 +91,10 @@ export function HtmlReader({
   const sessionIdRef = useRef<string | null>(null)
   const isActiveRef = useRef(isActive)
   const homeUrlRef = useRef<string>('')
+  // The URL the iframe src attribute currently carries. React skips the
+  // attribute write when the value is unchanged, so a navigation to this
+  // exact URL would never produce a load event — callers must branch.
+  const frameUrlRef = useRef<string | null>(null)
   const stateRef = useRef<HtmlReaderState | null>(null)
   const restoreScrollStateRef = useRef<HtmlPreviewScrollState | null>(restoreScrollState ?? null)
   const restoredScrollTargetRef = useRef<string | null>(null)
@@ -118,6 +122,7 @@ export function HtmlReader({
     } else if (mode === 'replace') {
       historyRef.current[historyIndexRef.current] = nextUrl
     }
+    frameUrlRef.current = nextUrl
     setFrameUrl(nextUrl)
     updateState({
       url: nextUrl,
@@ -292,6 +297,7 @@ export function HtmlReader({
       homeUrlRef.current = previewUrl
       historyRef.current = [previewUrl]
       historyIndexRef.current = 0
+      frameUrlRef.current = previewUrl
       setFrameUrl(previewUrl)
       updateState({ url: previewUrl, homeUrl: previewUrl, visible: isActiveRef.current })
 
@@ -369,6 +375,7 @@ export function HtmlReader({
       pendingRequestsRef.current.clear()
       browserIdRef.current = null
       sessionIdRef.current = null
+      frameUrlRef.current = null
       stateRef.current = null
       onStateChange?.(null)
     }
@@ -419,7 +426,29 @@ export function HtmlReader({
         const nextUrl = (message.payload as { url?: unknown } | undefined)?.url
         if (typeof nextUrl !== 'string') return
         void window.electronAPI.htmlPreview.validateNavigation(sessionId, nextUrl).then((allowed) => {
-          if (allowed && sessionIdRef.current === sessionId) navigateFrame(nextUrl, 'push')
+          if (!allowed || sessionIdRef.current !== sessionId) return
+          if (frameUrlRef.current === nextUrl) {
+            // React will not rewrite an unchanged src attribute, so pushing
+            // this URL would navigate nothing and no load event would ever
+            // clear the spinner. Match browser semantics: reload in place.
+            perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_SAME_URL_RELOAD, { ph: 'i' })
+            updateState({ isLoading: true })
+            void sendCommand('reload')
+            return
+          }
+          navigateFrame(nextUrl, 'push')
+        })
+        return
+      }
+      if (message.type === 'anchor-scroll') {
+        // In-page anchor clicks are handled entirely inside the bridge
+        // (programmatic scroll, no host navigation, no history entry); this
+        // breadcrumb is the host-side evidence that the jump fired.
+        const payload = (message.payload ?? {}) as { hash?: unknown; found?: unknown }
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_HTML_ANCHOR_SCROLL, {
+          ph: 'i',
+          hash: typeof payload.hash === 'string' ? payload.hash.slice(0, 64) : null,
+          found: Boolean(payload.found)
         })
         return
       }
@@ -438,7 +467,7 @@ export function HtmlReader({
     }
     window.addEventListener('message', handleMessage)
     return () => window.removeEventListener('message', handleMessage)
-  }, [navigateFrame, onEscape, onFindShortcut, onFoundInPage, onReloadShortcut, onZoomShortcut, updateState])
+  }, [navigateFrame, onEscape, onFindShortcut, onFoundInPage, onReloadShortcut, onZoomShortcut, sendCommand, updateState])
 
   const handleFrameLoad = useCallback(() => {
     const current = stateRef.current

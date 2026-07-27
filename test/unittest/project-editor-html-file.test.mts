@@ -133,9 +133,10 @@ test('PEHTML-U-12 different paths and POSIX case differences are different docum
   assert.equal(isSameHtmlPreviewDocument('file:///tmp/A.html', 'file:///tmp/a.html'), false)
 })
 
-test('PEHTML-U-13 hash counts as a different location', () => {
-  // An in-page anchor click pushes a history entry and enables Back, so Home
-  // must stay enabled (i.e. #hash is treated as navigated away from home).
+test('PEHTML-U-13 hash counts as a different DOCUMENT location', () => {
+  // Document identity stays hash-sensitive (anchors are distinguishable
+  // positions). Nav buttons and scroll capture use FILE identity instead —
+  // in-page anchors are a pure scroll, locked by PEHTML-U-26.
   assert.equal(isSameHtmlPreviewDocument('file:///p/a.html?mtime=1#section', 'file:///p/a.html?mtime=2'), false)
   assert.equal(isSameHtmlPreviewDocument('file:///p/a.html#s', 'file:///p/a.html#s'), true)
 })
@@ -291,4 +292,47 @@ test('PEHTML-U-25 file identity ignores a structural fragment without decoding f
   assert.equal(isSameHtmlPreviewFile('file:///p/a.html%23working-route', 'file:///p/a.html#working-route'), false)
   assert.equal(isSameHtmlPreviewFile('file:///p/a.html?route=one', 'file:///p/a.html?route=two'), false)
   assert.equal(isSameHtmlPreviewFile('file:///p/a.html#route', 'file:///p/b.html#route'), false)
+})
+
+test('PEHTML-U-26 a hash-only difference keeps Home disabled (anchors are pure scrolls)', () => {
+  // In-page anchor clicks are handled inside the bridge as programmatic
+  // scrolls: no host history entry, Back stays put — so Home must not light
+  // up when only the fragment differs from the opened file's URL.
+  const base = {
+    ready: true,
+    canGoBack: false,
+    canGoForward: false,
+    homeUrl: 'file:///p/a.html?onwardHtmlReload=0'
+  }
+  assert.deepEqual(deriveHtmlPreviewNavButtonState({
+    ...base,
+    currentUrl: 'file:///p/a.html?onwardHtmlReload=0#anchor-section-1'
+  }), {
+    backEnabled: false,
+    forwardEnabled: false,
+    reloadEnabled: true,
+    homeEnabled: false
+  })
+  // A real cross-file navigation still enables Home, hash or not.
+  assert.deepEqual(deriveHtmlPreviewNavButtonState({
+    ...base,
+    canGoBack: true,
+    currentUrl: 'file:///p/other.html#anchor'
+  }), {
+    backEnabled: true,
+    forwardEnabled: false,
+    reloadEnabled: true,
+    homeEnabled: true
+  })
+  // A filename containing a literal %23 is NOT a fragment: it must still
+  // compare as a different file and enable Home.
+  assert.deepEqual(deriveHtmlPreviewNavButtonState({
+    ...base,
+    currentUrl: 'file:///p/a.html%23section'
+  }), {
+    backEnabled: false,
+    forwardEnabled: false,
+    reloadEnabled: true,
+    homeEnabled: true
+  })
 })

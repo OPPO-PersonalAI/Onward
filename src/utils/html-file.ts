@@ -92,8 +92,9 @@ export function normalizeHtmlPreviewDocumentUrl(rawUrl: string | null | undefine
   }
   const pathname = segments.join('/')
   const search = url.searchParams.toString()
-  // The hash is kept on purpose: an in-page anchor click pushes a history
-  // entry and enables Back, so Home must stay enabled symmetrically.
+  // The hash is kept: DOCUMENT identity distinguishes anchors. Callers that
+  // need FILE identity (nav buttons, scroll capture — in-page anchors are a
+  // pure scroll, not a navigation) go through normalizeHtmlPreviewFileUrl.
   return `${url.protocol}//${url.host}${pathname}${search ? `?${search}` : ''}${url.hash}`
 }
 
@@ -147,7 +148,10 @@ export function deriveHtmlPreviewNavButtonState(input: {
     backEnabled: ready && canGoBack,
     forwardEnabled: ready && canGoForward,
     reloadEnabled: ready,
-    homeEnabled: ready && homeUrl !== null && !isSameHtmlPreviewDocument(currentUrl, homeUrl)
+    // Hash-insensitive FILE comparison: an in-page anchor click is a pure
+    // scroll handled inside the bridge (no history entry, Back stays put),
+    // so a hash-only difference must not light Home up either.
+    homeEnabled: ready && homeUrl !== null && !isSameHtmlPreviewFile(currentUrl, homeUrl)
   }
 }
 

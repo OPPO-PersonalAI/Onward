@@ -33,10 +33,31 @@ SPDX-License-Identifier: Apache-2.0
       .spacer {
         min-height: 900px;
       }
+
+      .toc {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #ffffff;
+      }
+
+      html {
+        scroll-behavior: auto;
+      }
     </style>
     <script src="__HTML_PREVIEW_SERVER_URL__/external.js"></script>
   </head>
   <body data-onward-html-preview-fixture="initial">
+    <nav class="toc" aria-label="table of contents">
+      <a id="toc-link-1" href="#anchor-section-1">TOC_LINK_ONE</a>
+      <a id="toc-link-2" href="#anchor-section-2">TOC_LINK_TWO</a>
+    </nav>
     <main>
       <section class="panel">
         <h1>HTML Preview Autotest</h1>
@@ -45,6 +66,7 @@ SPDX-License-Identifier: Apache-2.0
         <p id="local-status">local pending</p>
         <p><a id="nav-second-link" href="./nav-second-page.html">NAV_SECOND_LINK</a></p>
         <p><a id="nav-blocked-link" href="../../outside-preview-root.html">NAV_BLOCKED_LINK</a></p>
+        <p><a id="self-link" href="./regularization_landscape.html">SELF_LINK</a></p>
         <img id="local-image" src="./local-dot.svg" alt="local fixture image" width="24" height="24">
       </section>
       <section class="spacer" aria-label="scroll spacer">
@@ -56,6 +78,20 @@ SPDX-License-Identifier: Apache-2.0
         <p>HTML_SCROLL_TARGET should stay near the same viewport after a forced refresh.</p>
         <p>HTML_SEARCH_TARGET gamma</p>
       </section>
+      <section class="spacer" aria-label="toc spacer one"></section>
+      <section class="panel" id="anchor-section-1">
+        <h2>Anchor section one</h2>
+        <p>ANCHOR_SECTION_ONE target for in-page TOC navigation.</p>
+      </section>
+      <section class="spacer" aria-label="toc spacer two"></section>
+      <section class="panel" id="anchor-section-2">
+        <h2>Anchor section two</h2>
+        <p>ANCHOR_SECTION_TWO target for in-page TOC navigation.</p>
+      </section>
+      <!-- Trailing headroom so the last anchor target can reach the viewport
+           top at any zoom factor up to 2x; without it scrollIntoView clamps at
+           the document's max scroll and the landing assertion cannot hold. -->
+      <section class="spacer" aria-label="toc spacer three"></section>
     </main>
     <script>
       window.__ONWARD_HTML_LOCAL_READY = true;

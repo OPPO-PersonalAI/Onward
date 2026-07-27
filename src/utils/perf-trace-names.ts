@@ -1010,6 +1010,13 @@ export const PERF_TRACE_EVENT = {
   // became ready on (re)open (ph=i). Breadcrumb for "zoom reverted to 1 after a
   // warm subpage round-trip" — shows whether the ready-gated reapply fired.
   RENDERER_PROJECT_EDITOR_HTML_ZOOM_RESTORED: 'renderer:project-editor.html-zoom-restored',
+  // Renderer: the HTML preview bridge handled an in-page anchor click with a
+  // programmatic scroll (ph=i; payload: hash slice, found). Breadcrumb for
+  // "clicking a TOC entry does not jump" reports.
+  RENDERER_PROJECT_EDITOR_HTML_ANCHOR_SCROLL: 'renderer:project-editor.html-anchor-scroll',
+  // Renderer: a link click resolved to the URL the preview frame already
+  // shows; the host reloaded in place instead of a dead src push (ph=i).
+  RENDERER_PROJECT_EDITOR_HTML_SAME_URL_RELOAD: 'renderer:project-editor.html-same-url-reload',
   // Renderer: persist refused to write an active file that was opened under a
   // different scope (cross-Task contamination guard; site=snapshot|restore-null).
   RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED: 'renderer:project-editor.persist-active-file-guarded',

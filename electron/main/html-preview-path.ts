@@ -66,6 +66,17 @@ export function buildHtmlPreviewUrl(
   return url.toString()
 }
 
+/**
+ * Classify a link's RAW `href` attribute as an in-page anchor. Must be fed
+ * `getAttribute('href')`, never the resolved `href` DOM property — the
+ * property expands to an absolute URL and defeats the prefix test.
+ * Serialized verbatim into the HTML Preview bridge script via toString(),
+ * so it must stay self-contained (no captured bindings, no helpers).
+ */
+export function isInPageAnchorHref(rawHref: unknown): boolean {
+  return typeof rawHref === 'string' && rawHref.startsWith('#')
+}
+
 export function resolveHtmlPreviewRequest(
   rawUrl: string,
   options: HtmlPreviewRequestOptions
