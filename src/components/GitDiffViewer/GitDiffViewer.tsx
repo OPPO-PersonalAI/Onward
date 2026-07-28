@@ -60,6 +60,8 @@ import {
 } from './clickLatencyTracker'
 import { buildClickPhaseTraceRecords } from './clickLatencyTraceEmitter'
 import {
+  buildGitDiffBaseIdentity,
+  buildGitDiffContentSignature,
   buildGitDiffFileKey,
   buildGitDiffSelectionSnapshot,
   clearGitDiffMemorySelection,
@@ -69,6 +71,7 @@ import {
   resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
   resolveGitDiffSnapshotSelection,
+  shouldCompleteWarmReveal,
   shouldRestoreGitDiffSnapshotScroll,
   type DiffRestoreDecision,
   type DiffViewAnchor,
@@ -149,6 +152,19 @@ const MAX_DIFF_SPLIT_RATIO = 0.9
 const DIFF_SPLIT_RATIO_EPSILON = 0.002
 const DIFF_INLINE_BREAKPOINT = 900
 const DIFF_REVEAL_TIMEOUT_MS = 2000
+// Collapse layout settles asynchronously after a diff lands; one probe per
+// settled reveal, never per layout pass.
+const COLLAPSE_STATE_PROBE_DEBOUNCE_MS = 250
+// How long after a reveal decision a later model write may still correct it.
+// Inside this window the view is still settling from an open / file switch and
+// the user is waiting for it; past it they are reading, and re-revealing
+// because a coding agent touched the file would move the viewport out from
+// under them.
+const REVEAL_CORRECTION_WINDOW_MS = 3000
+// @monaco-editor/react owns the widget's disposal and Monaco's menu /
+// context-key emitters fire late; disposing a model out from under them during
+// teardown throws. Same 100 ms the close path has always used.
+const MODEL_SWEEP_DEFER_MS = 100
 // Subpage-switch-back restore (afterEnter) polls for the previously selected
 // file to reappear in the freshly loaded diff list. On a fast host the list is
 // ready within a few hundred ms, but a cold diff file-list spawn behind an EDR
@@ -833,6 +849,20 @@ type GitDiffDebugApi = {
     at: number
     revealTargetLine: number | null
   } | null
+  getBoundModelUris: () => {
+    originalUri: string | null
+    modifiedUri: string | null
+    expectedOriginalUri: string | null
+    expectedModifiedUri: string | null
+    diffCurrent: boolean
+  } | null
+  getLiveDiffModelCount: () => number
+  getCollapseState: () => {
+    totalLines: number
+    laidOutLines: number
+    hiddenLineCount: number
+    collapsed: boolean
+  } | null
   getScrollTop: () => number
   getScrollMetrics: () => {
     scrollTop: number
@@ -1187,7 +1217,6 @@ function getDiffLayoutMode(
   return sameRow && separatedColumns ? 'side-by-side' : 'inline'
 }
 
-const SIGNATURE_SAMPLE_SIZE = 256
 const SCROLL_RESTORE_TOLERANCE = 64
 
 function hashString(input: string): string {
@@ -1198,28 +1227,45 @@ function hashString(input: string): string {
   return (hash >>> 0).toString(16)
 }
 
-function buildTextSignature(text: string): string {
-  if (!text) return '0:0:0'
-  const head = text.slice(0, SIGNATURE_SAMPLE_SIZE)
-  const tail = text.slice(-SIGNATURE_SAMPLE_SIZE)
-  return `${text.length}:${hashString(head)}:${hashString(tail)}`
-}
-
+// Full-text signature. The sampled buildTextSignature it used to call could
+// not see a same-length middle-only rewrite — an agent swapping one line for
+// another of equal length kept length, head and tail identical — so the
+// restore-vs-reveal decision concluded "the user has already seen this" and
+// restored a stale position instead of revealing the change.
 function buildDiffSignature(original: string, modified: string): string {
-  return `${buildTextSignature(original)}|${buildTextSignature(modified)}`
+  return buildGitDiffContentSignature(original, modified)
 }
 
+// Prefix every onward-owned diff model shares. The disposal sweep uses it to
+// tell our models apart from any other in-memory model Monaco holds.
+const GIT_DIFF_MODEL_URI_PREFIX = 'inmemory://model/onward-git-diff/'
+
+// `baseIdentity` encodes the diff's BASE (changeType + status + a full-content
+// hash of the base body — see buildGitDiffBaseIdentity). It rides the URI so a
+// base change can never share a model with the version it replaced: Monaco
+// looks models up by URI and DISCARDS the value passed to createModel when one
+// already exists, which is how a reopened panel used to mount against a body
+// from the previous git state and compute its first diff from it.
+//
+// Same shape as VS Code's `toGitUri()`, whose query carries a required `ref`.
+// The worktree side deliberately does NOT carry a content hash: folding it in
+// would re-key (and therefore remount) the whole widget on every external
+// write, which is the common case when a coding agent edits the tree while the
+// diff is open. Freshness there is owned by the disposal sweep (a model that is
+// not bound is disposed, so the next mount builds it from current content) and
+// by the diff-currency gate.
 function buildGitDiffModelPath(
   file: GitFileStatus,
   repoRoot: string | null | undefined,
-  side: 'original' | 'modified'
+  side: 'original' | 'modified',
+  baseIdentity: string
 ): string {
   const repoSegment = hashString(file.repoRoot || repoRoot || 'repo')
   const path = (side === 'original' ? (file.originalFilename || file.filename) : file.filename)
     .split('/')
     .map(encodeURIComponent)
     .join('/')
-  return `inmemory://model/onward-git-diff/${repoSegment}/${side}/${path}`
+  return `${GIT_DIFF_MODEL_URI_PREFIX}${repoSegment}/${encodeURIComponent(baseIdentity)}/${side}/${path}`
 }
 
 function buildContentWithSelection(
@@ -1519,6 +1565,33 @@ export function GitDiffViewer({
   const lastRestoreDecisionRef = useRef<DiffRestoreDecisionRecord | null>(null)
   // Cancellation token for the warm-reopen reveal settle loop.
   const warmRevealSettleRunIdRef = useRef(0)
+  // ── Diff currency ─────────────────────────────────────────────────────────
+  // Monaco keeps its previous `_diff` when a model's content changes — it only
+  // flips `_isDiffUpToDate` false and schedules a 200 ms debouncer — so
+  // `getLineChanges() !== null` stays true throughout the window in which it
+  // answers about the PREVIOUS content. These two counters give the honest
+  // signal: every write into the bound models bumps `modelWriteSeqRef`, and an
+  // `onDidUpdateDiff` records the seq (and the URIs) it was computed for.
+  // A diff is current only when both still match.
+  const modelWriteSeqRef = useRef(0)
+  const diffComputedAtRef = useRef<{ seq: number; originalUri: string; modifiedUri: string } | null>(null)
+  // Set when a reveal had to be applied against a diff that was NOT provably
+  // current. The next `onDidUpdateDiff` for the same fileKey re-applies it —
+  // one corrective chance, so a misjudged gate degrades into a single viewport
+  // correction instead of stranding the user away from the change.
+  const provisionalRevealRef = useRef<{ fileKey: string; reason: string } | null>(null)
+  // Last measured hideUnchangedRegions outcome (autotest probe + trace).
+  const collapseStateRef = useRef<{
+    totalLines: number
+    laidOutLines: number
+    hiddenLineCount: number
+    collapsed: boolean
+  } | null>(null)
+  const collapseProbeTimerRef = useRef<number | null>(null)
+  // Model URIs currently bound, plus the URIs the disposal sweep must spare
+  // because their fileKey holds unsaved draft edits.
+  const boundModelUrisRef = useRef<{ originalUri: string; modifiedUri: string } | null>(null)
+  const draftProtectedModelUrisRef = useRef<Set<string>>(new Set())
   // Event-driven viewport-goal self-heal. A freshly (re)mounted DiffEditor
   // reports scrollHeight ≈ viewport for several frames until Monaco measures
   // the diff layout, so a pixel `setScrollTop` (restore) or a line reveal
@@ -1573,6 +1646,24 @@ export function GitDiffViewer({
   const getFileKey = useCallback((file: GitFileStatus, repoRoot = activeCwd || '') => {
     return buildGitDiffFileKey(file.repoRoot || repoRoot, file)
   }, [activeCwd])
+  // Base identity of a file's CURRENTLY loaded body. Read from the ref rather
+  // than from React state so imperative call sites (model-URI checks, the warm
+  // reveal settle, the disposal sweep) always agree with what was last bound.
+  // A body that has not loaded yet resolves against '' — harmless, because the
+  // editor is only mounted once `fileReadyForPreview` is true.
+  const resolveBaseIdentity = useCallback((file: GitFileStatus): string => {
+    const state = fileContentsRef.current[getFileKey(file)]
+    return buildGitDiffBaseIdentity({
+      changeType: file.changeType,
+      status: file.status,
+      originalContent: state?.originalContent ?? ''
+    })
+  }, [getFileKey])
+  const modelPathFor = useCallback((
+    file: GitFileStatus,
+    side: 'original' | 'modified'
+  ): string => buildGitDiffModelPath(file, activeCwd, side, resolveBaseIdentity(file)),
+  [activeCwd, resolveBaseIdentity])
   const jumpToEditorCheckTokenRef = useRef(0)
   const buildJumpToEditorTarget = useCallback((file: GitFileStatus | null) => {
     if (!file?.filename) return null
@@ -1700,19 +1791,41 @@ export function GitDiffViewer({
   }, [activeCwd, terminalId])
 
   const selectedFileKey = selectedFile ? getFileKey(selectedFile) : null
-  // The editor identity deliberately EXCLUDES the mirror generation: remounts
-  // happen only on explicit user actions (Refresh Changes / file switch bump
+  const selectedFileState = selectedFileKey ? fileContents[selectedFileKey] : null
+  // Base identity of what is currently selected. The base body is only ever a
+  // placeholder while `fileReadyForPreview` is false, and the editor is not
+  // mounted then, so this never keys a model on an empty stand-in.
+  const selectedBaseIdentity = useMemo(() => {
+    if (!selectedFile) return 'none'
+    return buildGitDiffBaseIdentity({
+      changeType: selectedFile.changeType,
+      status: selectedFile.status,
+      originalContent: selectedFileState?.originalContent ?? ''
+    })
+  }, [selectedFile, selectedFileState?.originalContent])
+  // Folding the base identity in is what makes a base change REMOUNT rather
+  // than re-path. @monaco-editor/react reacts to a changed model path by
+  // calling setModel on the INNER editor, and DiffEditorWidget derives its
+  // view model solely from its own setModel (`_diffModelSrc`) — it does not
+  // observe the inner editors — so a re-path alone would leave the diff being
+  // computed against the models the widget still references. A remount routes
+  // through the widget's own setModel and builds a fresh DiffEditorViewModel,
+  // which is also what resets `_diff` and the unchanged-region visibility
+  // state that the 2026-07-26 bundle showed being inherited.
+  //
+  // The identity deliberately EXCLUDES the mirror generation: remounts happen
+  // only on explicit user actions (Refresh Changes / file switch bump
   // `diffEditorResetNonce`; cwd / selection changes re-key naturally). Folding
   // `mirrorSnapshot.generation` in here made EVERY background repo state
   // change tear down the whole Monaco editor — the visible "global refresh"
-  // of the 2026-07-16 revert-scope bug. Mirror data changes now flow through
-  // normal React props/state updates without a remount.
-  const diffEditorIdentityKey = `${activeCwd || 'no-cwd'}::${selectedFileKey || 'empty'}::n${diffEditorResetNonce}`
+  // of the 2026-07-16 revert-scope bug. Mirror data changes still flow through
+  // normal React props/state updates without a remount; only a genuinely
+  // different BASE re-keys.
+  const diffEditorIdentityKey = `${activeCwd || 'no-cwd'}::${selectedFileKey || 'empty'}::b${selectedBaseIdentity}::n${diffEditorResetNonce}`
   const currentDiffIdentityRef = useRef(diffEditorIdentityKey)
   useEffect(() => {
     currentDiffIdentityRef.current = diffEditorIdentityKey
   }, [diffEditorIdentityKey])
-  const selectedFileState = selectedFileKey ? fileContents[selectedFileKey] : null
   const statusText = useMemo(() => ({
     M: t('gitDiff.status.modified'),
     A: t('gitDiff.status.added'),
@@ -1769,6 +1882,23 @@ export function GitDiffViewer({
     }, DIFF_REVEAL_TIMEOUT_MS)
   }, [cancelDiffRevealTimeout, requestDiffRevealRestore])
 
+  // "Does the diff Monaco holds describe the models it is bound to RIGHT NOW?"
+  // Both halves matter: the URIs pin WHICH models the recorded diff was for,
+  // and the seq pins that nothing has been written into them since. Checking
+  // `getLineChanges() !== null` instead answers only "was a diff ever
+  // computed on this widget", which is what let the 2026-07-26 bundle's reveal
+  // read a diff belonging to the file's previous git state.
+  const isDiffCurrentForBoundModels = useCallback((
+    editor: monacoTypes.editor.IStandaloneDiffEditor
+  ): boolean => {
+    const computed = diffComputedAtRef.current
+    if (!computed) return false
+    if (computed.seq !== modelWriteSeqRef.current) return false
+    const originalUri = editor.getOriginalEditor().getModel()?.uri.toString()
+    const modifiedUri = editor.getModifiedEditor().getModel()?.uri.toString()
+    return computed.originalUri === originalUri && computed.modifiedUri === modifiedUri
+  }, [])
+
   // Warm-reopen fast path: complete the render-then-reveal cycle when Monaco
   // already holds this file's computed diff. Model reuse across close/reopen
   // fires no `onDidUpdateDiff` (same reality the hunk-widget settle documents
@@ -1791,17 +1921,29 @@ export function GitDiffViewer({
         const originalUri = editor.getOriginalEditor().getModel()?.uri.toString()
         const modifiedUri = editor.getModifiedEditor().getModel()?.uri.toString()
         const modelsMatch =
-          originalUri === buildGitDiffModelPath(file, activeCwd, 'original') &&
-          modifiedUri === buildGitDiffModelPath(file, activeCwd, 'modified')
+          originalUri === modelPathFor(file, 'original') &&
+          modifiedUri === modelPathFor(file, 'modified')
         // A stale-marked key means a forced refetch is on its way (the
         // selection effect fires it) — deciding against the OLD body would
         // restore a position the fresh content invalidates, and the later
         // onDidUpdateDiff cannot re-open an idle cycle. Wait it out.
         const isStale = staleFileContentKeysRef.current.has(fileKey)
-        if (
-          state && !state.loading && !state.error && !state.isBinary &&
-          !isStale && modelsMatch && editor.getLineChanges() !== null
-        ) {
+        const diffCurrent = isDiffCurrentForBoundModels(editor)
+        if (shouldCompleteWarmReveal({
+          contentReady: Boolean(state && !state.loading && !state.error && !state.isBinary),
+          staleMarked: isStale,
+          modelsMatch,
+          diffComputedForBoundModels: diffCurrent
+        })) {
+          perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_WARM_READY_GATE, {
+            cwd: activeCwd ?? '',
+            terminalId,
+            filename: file.filename,
+            changeType: file.changeType,
+            lineChangesLen: editor.getLineChanges()?.length ?? -1,
+            diffCurrent,
+            waitedMs: Math.round(performance.now() - startedAt)
+          })
           requestDiffRevealRestore('warm-ready')
           return
         }
@@ -1810,7 +1952,63 @@ export function GitDiffViewer({
       requestAnimationFrame(tick)
     }
     tick()
-  }, [activeCwd, getFileKey, requestDiffRevealRestore])
+  }, [
+    activeCwd,
+    getFileKey,
+    isDiffCurrentForBoundModels,
+    modelPathFor,
+    requestDiffRevealRestore,
+    terminalId
+  ])
+
+  // hideUnchangedRegions leaves no public getter for "which ranges are hidden",
+  // but it does not need one: a collapsed region contributes a small placeholder
+  // widget instead of its lines, so the laid-out height of the modified editor
+  // collapses with it. Comparing the height Monaco actually laid out against the
+  // height the model would occupy fully expanded yields the hidden-line count
+  // without reaching into internals. View zones (inserted-line gutters) only ADD
+  // height, so this under-reports rather than inventing collapse — safe for an
+  // assertion of the form "something was collapsed".
+  const measureCollapseState = useCallback(() => {
+    const editor = diffEditorRef.current
+    const monaco = monacoRef.current
+    if (!editor || !monaco) return null
+    const modified = editor.getModifiedEditor()
+    const model = modified.getModel()
+    if (!model) return null
+    const lineHeight = modified.getOption(monaco.editor.EditorOption.lineHeight) as number
+    if (!lineHeight || lineHeight <= 0) return null
+    const totalLines = model.getLineCount()
+    const laidOutHeight = modified.getTopForLineNumber(totalLines) + lineHeight
+    const laidOutLines = Math.max(0, Math.round(laidOutHeight / lineHeight))
+    const hiddenLineCount = Math.max(0, totalLines - laidOutLines)
+    return { totalLines, laidOutLines, hiddenLineCount, collapsed: hiddenLineCount > 0 }
+  }, [])
+
+  // Debounced so the collapse layout has settled. Deliberately NOT wired to
+  // onDidContentSizeChange, which fires per layout pass — one emission per
+  // settled reveal is the whole budget this event is allowed.
+  const scheduleCollapseStateProbe = useCallback(() => {
+    if (collapseProbeTimerRef.current !== null) {
+      window.clearTimeout(collapseProbeTimerRef.current)
+    }
+    collapseProbeTimerRef.current = window.setTimeout(() => {
+      collapseProbeTimerRef.current = null
+      const measured = measureCollapseState()
+      if (!measured) return
+      collapseStateRef.current = measured
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_COLLAPSE_STATE, {
+        cwd: activeCwd ?? '',
+        terminalId,
+        filename: selectedFileRef.current?.filename,
+        changeType: selectedFileRef.current?.changeType,
+        totalLines: measured.totalLines,
+        laidOutLines: measured.laidOutLines,
+        hiddenLineCount: measured.hiddenLineCount,
+        collapsed: measured.collapsed
+      })
+    }, COLLAPSE_STATE_PROBE_DEBOUNCE_MS)
+  }, [activeCwd, measureCollapseState, terminalId])
 
   // Re-apply the parked viewport goal (see pendingViewportGoalRef) once the
   // editor's measured content can honor it. Driven by onDidContentSizeChange;
@@ -2167,7 +2365,7 @@ export function GitDiffViewer({
     if (!fileKey || !file) return
     const fileState = fileContentsRef.current[fileKey]
     const modifiedEditor = editor.getModifiedEditor()
-    const expectedModelUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    const expectedModelUri = modelPathFor(file, 'modified')
     if (
       !fileState
       || fileState.loading
@@ -2924,42 +3122,126 @@ export function GitDiffViewer({
     return Boolean(measurement && measurement.ratio !== null && Math.abs(measurement.ratio - targetRatio) <= 0.08)
   }, [measureDiffSplitState])
 
-  const detachDiffEditor = useCallback(() => {
-    if (isPanel) {
-      disposeDiffEditorBindings()
-      return
+  // URIs that must survive a sweep: whatever is bound right now, plus any file
+  // holding unsaved draft edits. A dirty draft's VALUE lives in React state and
+  // would be rebuilt from it anyway, but disposing its model throws away the
+  // undo stack the user is still working against.
+  const collectRetainedModelUris = useCallback((trustLiveEditor: boolean): Set<string> => {
+    const retained = new Set<string>()
+    // Ask the LIVE widget first. Ref bookkeeping can lag a detach→remount, and
+    // being wrong here means disposing a model out from under a mounted editor
+    // (`getModel()` goes null and every model wait burns its full budget), so
+    // the authority is what the widget actually holds at disposal time.
+    //
+    // EXCEPT on the detach path: panel mode deliberately keeps `diffEditorRef`
+    // pointing at the widget React has already unmounted, so asking it there
+    // retains exactly the superseded models the sweep exists to reclaim — the
+    // stale body then survives into the next mount, which is the original bug.
+    const editor = trustLiveEditor ? diffEditorRef.current : null
+    const liveModel = editor?.getModel()
+    if (liveModel?.original) retained.add(liveModel.original.uri.toString())
+    if (liveModel?.modified) retained.add(liveModel.modified.uri.toString())
+    const bound = boundModelUrisRef.current
+    if (bound) {
+      retained.add(bound.originalUri)
+      retained.add(bound.modifiedUri)
     }
-    disposeDiffEditorBindings()
-    const editor = diffEditorRef.current
-    const modelUrisToDispose = new Set<string>()
-    if (editor) {
-      const model = editor.getModel()
-      if (model?.original) modelUrisToDispose.add(model.original.uri.toString())
-      if (model?.modified) modelUrisToDispose.add(model.modified.uri.toString())
+    for (const file of diffResultRef.current?.files ?? []) {
+      const state = fileContentsRef.current[getFileKey(file)]
+      if (!state || state.draftContent === undefined) continue
+      if (state.draftContent === state.modifiedContent) continue
+      retained.add(modelPathFor(file, 'original'))
+      retained.add(modelPathFor(file, 'modified'))
     }
+    for (const uri of draftProtectedModelUrisRef.current) retained.add(uri)
+    return retained
+  }, [getFileKey, modelPathFor])
+
+  // Dispose superseded onward-git-diff models.
+  //
+  // Content-identity URIs mean every new BASE mints a fresh model pair, so
+  // without a sweep a coding agent editing the tree would grow Monaco's model
+  // table for the life of the session. It is also what keeps the worktree side
+  // honest: that URI stays stable by design, so the only thing guaranteeing a
+  // remount rebuilds it from current content is that the superseded model is
+  // gone by then.
+  //
+  // Deferred for the same reason the pre-existing close-path disposal was:
+  // @monaco-editor/react owns the widget's disposal and Monaco's menu /
+  // context-key emitters fire late; disposing a model out from under them
+  // during teardown throws.
+  const sweepSupersededDiffModels = useCallback((reason: string, trustLiveEditor = true) => {
     const monaco = monacoRef.current
-    if (monaco && modelUrisToDispose.size > 0) {
-      // @monaco-editor/react owns the DiffEditor disposal. Disposing it here as
-      // well can race Monaco's delayed menu/context-key emitters during close.
-      window.setTimeout(() => {
-        for (const model of monaco.editor.getModels()) {
-          if (!model.uri.toString().startsWith('inmemory://model/onward-git-diff/')) continue
-          if (!modelUrisToDispose.has(model.uri.toString())) continue
-          try {
-            model.dispose()
-          } catch (error) {
-            debugLog('editor:model-dispose:error', { error: String(error), uri: model.uri.toString() })
-          }
+    if (!monaco) return
+    window.setTimeout(() => {
+      // Retained set is computed HERE, not at schedule time. The defer window
+      // is long enough for a detach→remount to complete (deselect then click,
+      // or a re-key), and a set captured before that remount would name the
+      // OLD binding — disposing the models the new mount had just bound and
+      // leaving the editor with `getModel() === null`. Observed as GDS-17's
+      // `secondModelModifiedContent: null` with the renderer state holding the
+      // right body, followed by every model wait burning its full budget.
+      const retained = collectRetainedModelUris(trustLiveEditor)
+      let disposed = 0
+      let live = 0
+      for (const model of monaco.editor.getModels()) {
+        const uri = model.uri.toString()
+        if (!uri.startsWith(GIT_DIFF_MODEL_URI_PREFIX)) continue
+        if (retained.has(uri)) { live += 1; continue }
+        try {
+          model.dispose()
+          disposed += 1
+        } catch (error) {
+          debugLog('editor:model-dispose:error', { error: String(error), uri })
         }
-      }, 100)
+      }
+      if (disposed > 0) {
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_SWEEP, {
+          cwd: activeCwd ?? '',
+          terminalId,
+          reason,
+          disposed,
+          live,
+          retained: retained.size
+        })
+      }
+    }, MODEL_SWEEP_DEFER_MS)
+  }, [activeCwd, collectRetainedModelUris, terminalId])
+
+  const detachDiffEditor = useCallback(() => {
+    disposeDiffEditorBindings()
+    // Panel mode used to return here without disposing anything, which is what
+    // let a model outlive the widget with a body from the file's previous git
+    // state — the next mount then looked it up by URI (Monaco returns the
+    // existing model and DISCARDS the content passed to createModel) and
+    // computed its first diff from that stale body. Both modes sweep now.
+    // Release the widget's models BEFORE anything can dispose them. Monaco
+    // enforces the ordering itself — disposing a TextModel a DiffEditorWidget
+    // still references throws "TextModel got disposed before DiffEditorWidget
+    // model got reset" — and in panel mode the widget outlives the detach
+    // (SubpageSubtreeFreeze freezes the subtree rather than unmounting it), so
+    // the sweep below would otherwise pull models out from under a live
+    // reference. This is the ordering that makes `trustLiveEditor: false`
+    // safe: we are not guessing that nothing holds them, we have released it.
+    try {
+      diffEditorRef.current?.setModel(null)
+    } catch (error) {
+      debugLog('editor:release-models:error', { error: String(error) })
     }
+    // Clear the bound pair so the sweep treats it as superseded — after a
+    // detach nothing is bound, and retaining it is exactly the leak that let a
+    // stale body survive into the next mount.
+    boundModelUrisRef.current = null
+    diffComputedAtRef.current = null
+    sweepSupersededDiffModels('detach', false)
     originalDecorationsRef.current?.clear()
     modifiedDecorationsRef.current?.clear()
     originalDecorationsRef.current = null
     modifiedDecorationsRef.current = null
+    if (isPanel) return
     diffEditorRef.current = null
     monacoRef.current = null
-  }, [disposeDiffEditorBindings, isPanel])
+  }, [disposeDiffEditorBindings, isPanel, sweepSupersededDiffModels])
 
   const clearActiveDiffSelection = useCallback((options?: { detachEditor?: boolean }) => {
     setSelectedFile(null)
@@ -3934,12 +4216,12 @@ export function GitDiffViewer({
     const modifiedModel = modifiedEditor.getModel()
     if (!originalModel || !modifiedModel) return null
 
-    const expectedOriginalUri = buildGitDiffModelPath(file, activeCwd, 'original')
-    const expectedModifiedUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    const expectedOriginalUri = modelPathFor(file, 'original')
+    const expectedModifiedUri = modelPathFor(file, 'modified')
     const originalUri = originalModel.uri.toString()
     const modifiedUri = modifiedModel.uri.toString()
     if (originalUri !== expectedOriginalUri || modifiedUri !== expectedModifiedUri) {
-      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_SYNC, {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_SYNC, {
         cwd: activeCwd,
         terminalId,
         fileKey,
@@ -3969,11 +4251,80 @@ export function GitDiffViewer({
       const originalViewState = originalEditor.saveViewState()
       const modifiedViewState = modifiedEditor.saveViewState()
       suppressDraftChangeRef.current = true
+      // Writing into a bound model invalidates whatever diff Monaco already
+      // holds — it keeps `_diff` and only debounces the recompute, so anything
+      // that consumes the diff between here and the next onDidUpdateDiff would
+      // be reading the previous content's answer.
+      modelWriteSeqRef.current += 1
+      // A reveal decision taken moments ago described the body being replaced
+      // right now. It was honest when it was made — the models held that body
+      // and Monaco's diff described them — so the currency gate had nothing to
+      // object to; the staleness only comes into existence HERE. Re-arm it so
+      // the recompute re-reveals against the body the user will actually see.
+      // Bounded to a short window after the decision: past it the user is
+      // reading rather than waiting for the view to settle, and yanking the
+      // viewport out from under them because an agent touched the file would
+      // be worse than leaving it where they put it.
+      const lastDecision = lastRestoreDecisionRef.current
+      if (
+        lastDecision &&
+        lastDecision.action === 'reveal-first-change' &&
+        lastDecision.fileKey === fileKey &&
+        Date.now() - lastDecision.at <= REVEAL_CORRECTION_WINDOW_MS
+      ) {
+        provisionalRevealRef.current = { fileKey, reason: lastDecision.reason ?? 'content-changed' }
+      }
       try {
         if (plan.originalChanged) originalModel.setValue(nextOriginalContent)
         if (plan.modifiedChanged) modifiedModel.setValue(nextModifiedContent)
       } finally {
         suppressDraftChangeRef.current = false
+      }
+      // Rebuild the diff view model after a full-content write.
+      //
+      // `setValue` takes TextModel's flush path, which DESTROYS every
+      // decoration on the model (`textModel.js` `_setValueFromTextBuffer`:
+      // "Destroy all my decorations"). Monaco tracks unchanged-region
+      // positions across recomputes through exactly those decorations, so on
+      // the next computation `updateUnchangedRegions` resolves all of them to
+      // undefined, filters them all out, and ends up inverting an EMPTY hidden
+      // set into "the whole file is visible" — hideUnchangedRegions silently
+      // stops collapsing anything (MT-05 / MT-06 / MT-08, 0/3 before this).
+      //
+      // That is the same terminal mechanism as the 2026-07-26 bundle's
+      // whole-file-expanded symptom, reached by a different route: there the
+      // previous diff had no unchanged regions to inherit, here the write
+      // destroyed the ones that existed.
+      //
+      // `setModel` with the same pair builds a fresh DiffEditorViewModel, so
+      // `_unchangedRegions` starts undefined and the next computation takes the
+      // "compute regions from scratch" branch instead of the transfer branch.
+      // No DOM remount is involved — the widget keeps its editors.
+      // Only when a diff had ALREADY been computed for these models. The
+      // defect is inheriting stale region state, and there is none to inherit
+      // on the first population — rebuilding there just discards the
+      // in-flight computation the reveal cycle is waiting for, which showed up
+      // as GDS-54 trials idling into the 2 s safety timeout and revealing
+      // against a half-settled diff (`trigger: 'timeout'`, target line 1).
+      const rebuiltViewModel = (plan.originalChanged || plan.modifiedChanged) &&
+        diffComputedAtRef.current !== null
+      if (rebuiltViewModel) {
+        try {
+          editor.setModel({ original: originalModel, modified: modifiedModel })
+          // The previous stamp described a diff that no longer exists.
+          diffComputedAtRef.current = null
+          perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_VIEW_MODEL_REBUILT, {
+            cwd: activeCwd,
+            terminalId,
+            filename: file.filename,
+            changeType: file.changeType,
+            reason,
+            originalChanged: plan.originalChanged,
+            modifiedChanged: plan.modifiedChanged
+          })
+        } catch (error) {
+          debugLog('editor:view-model-rebuild:error', { error: String(error) })
+        }
       }
       if (originalViewState) originalEditor.restoreViewState(originalViewState)
       if (modifiedViewState) modifiedEditor.restoreViewState(modifiedViewState)
@@ -3981,7 +4332,11 @@ export function GitDiffViewer({
     }
 
     const durationMs = +(performance.now() - startedAt).toFixed(1)
-    perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_SYNC, {
+    // Diagnostic tier (prod default-on): "did the click actually write into the
+    // models, and with what lengths" was the one link the 2026-07-26 bundle
+    // could not answer, because this event rode the opt-in tier. Selection /
+    // model-reconcile frequency, scalar payload — it is not a hot path.
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_SYNC, {
       cwd: activeCwd,
       terminalId,
       fileKey,
@@ -4779,7 +5134,7 @@ export function GitDiffViewer({
     if (!file || !fileKey) return
     const model = diffEditorRef.current?.getModifiedEditor().getModel()
     const modelUri = model?.uri.toString()
-    const expectedUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    const expectedUri = modelPathFor(file, 'modified')
     if (!modelUri || modelUri !== expectedUri) return
     setFileContents((prev) => {
       const current = prev[fileKey]
@@ -4814,7 +5169,7 @@ export function GitDiffViewer({
       return false
     }
 
-    const expectedModelUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    const expectedModelUri = modelPathFor(file, 'modified')
     const deadline = Date.now() + 5000
     while (Date.now() < deadline) {
       if (
@@ -4910,6 +5265,37 @@ export function GitDiffViewer({
       diffEditorRef.current = editor
       monacoRef.current = monaco
 
+      // Record what this mount actually bound. Monaco resolves models by URI
+      // and returns an existing one in preference to the content handed to
+      // createModel, so "which URI did we end up on" is the only trustworthy
+      // statement about which body the widget is diffing.
+      const boundOriginalUri = editor.getOriginalEditor().getModel()?.uri.toString() ?? ''
+      const boundModifiedUri = editor.getModifiedEditor().getModel()?.uri.toString() ?? ''
+      boundModelUrisRef.current = { originalUri: boundOriginalUri, modifiedUri: boundModifiedUri }
+      // A fresh widget has no computed diff yet; anything left over describes
+      // the previous mount's models.
+      diffComputedAtRef.current = null
+      const mountedFile = selectedFileRef.current
+      if (mountedFile) {
+        const expectedOriginalUri = modelPathFor(mountedFile, 'original')
+        if (boundOriginalUri && boundOriginalUri !== expectedOriginalUri) {
+          // Post-fix this cannot happen: the identity is part of the URI AND of
+          // the React key, so a different base remounts onto a different URI.
+          // Kept as a tripwire so a regression of the identity scheme shows up
+          // in a user's trace instead of only as a mis-positioned viewport.
+          perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_IDENTITY_REUSED, {
+            cwd: activeCwd ?? '',
+            terminalId,
+            filename: mountedFile.filename,
+            changeType: mountedFile.changeType,
+            boundOriginalUri: boundOriginalUri.slice(-120),
+            expectedOriginalUri: expectedOriginalUri.slice(-120)
+          })
+        }
+      }
+      // Any pair minted for an earlier base is unreachable from here on.
+      sweepSupersededDiffModels('bind')
+
       // Apply persisted split ratio at mount as a guard for Monaco versions
       // that initialize layout before consuming the initial options object.
       editor.updateOptions({ splitViewDefaultRatio: diffSplitRatioRef.current })
@@ -4989,10 +5375,64 @@ export function GitDiffViewer({
 
       // Transition from waiting-diff to restoring-scroll when Monaco finishes computing changes
       diffEditorBindingDisposablesRef.current.push(editor.onDidUpdateDiff(() => {
+        // Stamp WHAT this diff was computed for before anything consumes it.
+        // Pairing the URIs with the write seq is what makes
+        // `isDiffCurrentForBoundModels` able to answer honestly later.
+        diffComputedAtRef.current = {
+          seq: modelWriteSeqRef.current,
+          originalUri: editor.getOriginalEditor().getModel()?.uri.toString() ?? '',
+          modifiedUri: editor.getModifiedEditor().getModel()?.uri.toString() ?? ''
+        }
         requestDiffRevealRestore('diff-computed')
         diffNavigationIndexRef.current = -1
         scheduleDiffHunkActionWidgetInstall('diff-updated')
         const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
+        // One corrective chance: a reveal that had to run against a diff we
+        // could not prove current gets re-applied now that a real one landed.
+        // Without this, `requestDiffRevealRestore` above is a no-op (the phase
+        // is already 'idle') and a misjudged gate strands the viewport for the
+        // rest of the session — exactly what the 2026-07-26 bundle recorded.
+        const provisional = provisionalRevealRef.current
+        if (provisional) {
+          // Disarm only when it is spent or can never apply — NOT merely
+          // because this particular onDidUpdateDiff arrived. Monaco emits one
+          // per computation, and a write landing between two computations
+          // makes an intermediate emission fail the currency check; consuming
+          // the arming there would throw away the correction and leave the
+          // viewport on the superseded body with nothing left to fix it.
+          if (provisional.fileKey !== liveFileKey) {
+            provisionalRevealRef.current = null
+          } else if (isDiffCurrentForBoundModels(editor)) {
+            provisionalRevealRef.current = null
+            const changes = editor.getLineChanges()
+            if (changes && changes.length > 0) {
+              const firstChange = changes[0]
+              const targetLine = firstChange.modifiedStartLineNumber
+                || firstChange.originalStartLineNumber
+                || 1
+              revealLineNearTopSafe(editor.getModifiedEditor(), targetLine)
+              lastRestoreDecisionRef.current = {
+                action: 'reveal-first-change',
+                reason: provisional.reason,
+                trigger: 'deferred-diff-computed',
+                fileKey: liveFileKey,
+                at: Date.now(),
+                revealTargetLine: targetLine
+              }
+              perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_RESTORE_DECISION, {
+                cwd: activeCwd ?? '',
+                terminalId,
+                action: 'reveal-first-change',
+                reason: provisional.reason,
+                trigger: 'deferred-diff-computed',
+                revealTargetLine: targetLine,
+                filename: selectedFileRef.current?.filename,
+                corrective: true
+              })
+            }
+          }
+        }
+        scheduleCollapseStateProbe()
         // Consume a parked reveal-first-change: the restore decision ran
         // before Monaco had computed this model pair's diff (fresh swap on
         // the timeout path). One-shot, and only for the same fileKey — a
@@ -5432,6 +5872,15 @@ export function GitDiffViewer({
       // the cycle lands on the first hunk instead of silently keeping an
       // old scroll offset (2026-07-18 warm-reopen staleness bundle).
       const changes = editor.getLineChanges()
+      // The reveal target comes from `getLineChanges()`, which answers about
+      // whatever content Monaco last diffed. On the paths that can reach here
+      // before a recompute lands (the safety timeout, a model write racing the
+      // 200 ms debounce) the answer belongs to the PREVIOUS content, so record
+      // that fact and let onDidUpdateDiff correct the viewport once.
+      const diffCurrent = isDiffCurrentForBoundModels(editor)
+      if (!diffCurrent && fileKey && decision?.action === 'reveal-first-change') {
+        provisionalRevealRef.current = { fileKey, reason: decision.reason }
+      }
       if (changes && changes.length > 0) {
         const firstChange = changes[0]
         const targetLine = firstChange.modifiedStartLineNumber || firstChange.originalStartLineNumber || 1
@@ -5481,8 +5930,14 @@ export function GitDiffViewer({
       reason: decisionRecord.reason,
       trigger: decisionRecord.trigger,
       revealTargetLine: decisionRecord.revealTargetLine,
-      filename: file?.filename
+      filename: file?.filename,
+      // Self-describing across a git-state transition: reading two
+      // file-load-memory-hit records to work out that changeType had moved was
+      // the slowest step of the 2026-07-26 analysis.
+      changeType: file?.changeType,
+      diffCurrent: editor ? isDiffCurrentForBoundModels(editor) : false
     })
+    scheduleCollapseStateProbe()
 
     // Transition to idle — CSS fade-in reveals content
     cancelDiffRevealTimeout()
@@ -6381,6 +6836,35 @@ export function GitDiffViewer({
       getIsDraftDirty: () => isDraftDirtyRef.current,
       getRestoreNotice: () => diffRestoreNotice,
       getLastRestoreDecision: () => lastRestoreDecisionRef.current,
+      // Model identity + lifecycle probes. `getBoundModelUris` is what lets a
+      // test assert "the widget is diffing the CURRENT base", and
+      // `getLiveDiffModelCount` is what bounds the leak that content-identity
+      // URIs would otherwise create under a mutating tree.
+      getBoundModelUris: () => {
+        const editor = diffEditorRef.current
+        if (!editor) return null
+        return {
+          originalUri: editor.getOriginalEditor().getModel()?.uri.toString() ?? null,
+          modifiedUri: editor.getModifiedEditor().getModel()?.uri.toString() ?? null,
+          expectedOriginalUri: selectedFileRef.current
+            ? modelPathFor(selectedFileRef.current, 'original')
+            : null,
+          expectedModifiedUri: selectedFileRef.current
+            ? modelPathFor(selectedFileRef.current, 'modified')
+            : null,
+          diffCurrent: isDiffCurrentForBoundModels(editor)
+        }
+      },
+      getLiveDiffModelCount: () => {
+        const monaco = monacoRef.current
+        if (!monaco) return -1
+        return monaco.editor.getModels()
+          .filter((model) => model.uri.toString().startsWith(GIT_DIFF_MODEL_URI_PREFIX))
+          .length
+      },
+      // Measured on demand rather than served from the debounced probe so a
+      // test never races the 250 ms emission window.
+      getCollapseState: () => measureCollapseState(),
       getScrollTop: () => diffEditorRef.current?.getModifiedEditor().getScrollTop() ?? 0,
       getScrollMetrics: () => {
         const editor = diffEditorRef.current
@@ -6389,7 +6873,7 @@ export function GitDiffViewer({
         const scrollHeight = modifiedEditor.getScrollHeight()
         const viewportHeight = modifiedEditor.getLayoutInfo().height
         const file = selectedFileRef.current
-        const expectedModelUri = file ? buildGitDiffModelPath(file, activeCwd, 'modified') : null
+        const expectedModelUri = file ? modelPathFor(file, 'modified') : null
         return {
           scrollTop: modifiedEditor.getScrollTop(),
           scrollHeight,
@@ -6785,13 +7269,13 @@ export function GitDiffViewer({
 
   const originalModelPath = useMemo(() => {
     if (!selectedFile) return undefined
-    return buildGitDiffModelPath(selectedFile, activeCwd, 'original')
-  }, [activeCwd, selectedFile])
+    return buildGitDiffModelPath(selectedFile, activeCwd, 'original', selectedBaseIdentity)
+  }, [activeCwd, selectedBaseIdentity, selectedFile])
 
   const modifiedModelPath = useMemo(() => {
     if (!selectedFile) return undefined
-    return buildGitDiffModelPath(selectedFile, activeCwd, 'modified')
-  }, [activeCwd, selectedFile])
+    return buildGitDiffModelPath(selectedFile, activeCwd, 'modified', selectedBaseIdentity)
+  }, [activeCwd, selectedBaseIdentity, selectedFile])
 
   const diffView = useMemo(() => {
     if (DEBUG_GIT_DIFF) {
@@ -7933,7 +8417,7 @@ export function GitDiffViewer({
           && !liveFileState.loading
           && !liveFileState.isBinary
           && modifiedEditor?.getModel()?.uri.toString()
-            === buildGitDiffModelPath(liveFile, activeCwd, 'modified')
+            === modelPathFor(liveFile, 'modified')
         )
         return {
           subpage: 'diff',

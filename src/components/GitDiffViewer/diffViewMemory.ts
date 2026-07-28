@@ -191,6 +191,110 @@ export function resolveDiffRestoreDecision(input: {
   return { action: 'reveal-first-change', reason: 'no-saved-position' }
 }
 
+// ── Monaco model identity ────────────────────────────────────────────────────
+//
+// A Monaco model is looked up by URI (@monaco-editor/react's getOrCreateModel
+// does `editor.getModel(uri) ?? editor.createModel(value, lang, uri)`), so a
+// URI that does NOT encode the content it stands for silently resurrects a
+// model whose body belongs to an earlier version of the file — and the value
+// passed to createModel is discarded. Monaco then computes the mount-time diff
+// against that stale body, and keeps BOTH the stale `_diff` and the stale
+// unchanged-region visibility state when the body is later corrected in place.
+//
+// The remedy mirrors VS Code's git extension, whose `toGitUri()` puts a
+// REQUIRED `ref` in the URI query: the base side's identity IS its URI, so a
+// different base is a different document and can never share a model. The
+// worktree side stays a stable URI and mutates in place (VS Code keeps it a
+// plain `file:` document) — model freshness there is owned by the disposal
+// sweep plus the diff-currency gate, not by the URI.
+//
+// Deliberately NOT part of the identity: `draftContent`. The identity keys a
+// model; folding a live draft into it would rebuild the model on every
+// keystroke.
+
+const STRONG_HASH_RADIX = 36
+
+// Full-content hash. `buildTextSignature` above samples head + tail + length,
+// which is adequate for "is this the content the user last SAW" but far too
+// weak to key a model on: an agent rewriting one line into another line of the
+// same length keeps length, head and tail identical, and the collision
+// resurrects exactly the stale model this identity exists to retire. Two
+// independent 32-bit accumulators (djb2 forward, sdbm reverse) give ~64 bits
+// over the whole string, which is what makes the "same length, same head, same
+// tail, different middle" case a different identity.
+export function hashTextStrong(text: string): string {
+  let djb2 = 5381
+  let sdbm = 0
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i)
+    djb2 = (((djb2 << 5) + djb2) ^ code) >>> 0
+    sdbm = (code + (sdbm << 6) + (sdbm << 16) - sdbm) >>> 0
+  }
+  return `${text.length.toString(STRONG_HASH_RADIX)}` +
+    `-${djb2.toString(STRONG_HASH_RADIX)}` +
+    `-${sdbm.toString(STRONG_HASH_RADIX)}`
+}
+
+export type GitDiffBaseIdentityInput = {
+  changeType: GitFileStatus['changeType']
+  status: GitFileStatus['status']
+  /** Git-provided base content for this entry (empty for an untracked file). */
+  originalContent: string
+}
+
+// Identity of the diff's BASE. `changeType` + `status` are included even
+// though the content hash alone would usually differ, because they are what
+// makes the identity self-describing in a trace and because an empty base is
+// legitimately shared by "untracked" and "added" entries.
+export function buildGitDiffBaseIdentity(input: GitDiffBaseIdentityInput): string {
+  return `${input.changeType}.${input.status || 'x'}.${hashTextStrong(input.originalContent)}`
+}
+
+// Signature of "the content the user last SAW", used by
+// resolveDiffRestoreDecision to choose between restoring a saved position and
+// revealing the first change. It runs over the full text for the same reason
+// the model identity does: the head+tail+length sampling it replaced reports
+// "unchanged" for a same-length middle-only rewrite, which is precisely the
+// edit a coding agent makes (one line swapped for another of equal length).
+// A false "unchanged" here restores a scroll offset that belongs to content
+// the user has never seen — the presentation-layer half of the same defect
+// family as the stale-model identity above.
+export function buildGitDiffContentSignature(original: string, modified: string): string {
+  return `${hashTextStrong(original)}|${hashTextStrong(modified)}`
+}
+
+// ── Warm-reopen reveal gate ──────────────────────────────────────────────────
+//
+// `editor.getLineChanges() !== null` answers "has a diff ever been computed on
+// this widget", NOT "does the computed diff describe what the models currently
+// hold". Monaco keeps `_diff` across a content change and only flips
+// `_isDiffUpToDate` to false while a 200 ms debouncer is pending
+// (`diffEditorViewModel.js`), so the null-check passes throughout the window in
+// which the answer is wrong. Monaco guards its own diff-consuming APIs with
+// `isDiffUpToDate` for exactly this reason.
+//
+// `diffComputedForBoundModels` is the honest signal: an `onDidUpdateDiff` has
+// landed for the model pair currently bound, and no write into those models
+// has happened since.
+
+export type WarmRevealGateInput = {
+  /** Selected body is present, settled, and renderable. */
+  contentReady: boolean
+  /** A forced refetch is pending for this key — deciding now reads a doomed body. */
+  staleMarked: boolean
+  /** The widget's bound model URIs equal the ones the selection expects. */
+  modelsMatch: boolean
+  /** Monaco has reported a diff for the CURRENTLY bound models, with no write since. */
+  diffComputedForBoundModels: boolean
+}
+
+export function shouldCompleteWarmReveal(input: WarmRevealGateInput): boolean {
+  if (!input.contentReady) return false
+  if (input.staleMarked) return false
+  if (!input.modelsMatch) return false
+  return input.diffComputedForBoundModels
+}
+
 export function resolveGitDiffSnapshotScrollTop(
   scrollTop: number | null | undefined,
   scrollHeight: number,

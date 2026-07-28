@@ -161,6 +161,26 @@ export interface GitDiffDebugApi {
     at: number
     revealTargetLine: number | null
   } | null
+  // Which models the DiffEditor is actually bound to, and whether Monaco's
+  // computed diff describes them. `diffCurrent:false` at reveal time is the
+  // 2026-07-26 defect signature.
+  getBoundModelUris?: () => {
+    originalUri: string | null
+    modifiedUri: string | null
+    expectedOriginalUri: string | null
+    expectedModifiedUri: string | null
+    diffCurrent: boolean
+  } | null
+  // Live onward-git-diff model count — bounds the leak that content-identity
+  // URIs create when the working tree keeps changing.
+  getLiveDiffModelCount?: () => number
+  // hideUnchangedRegions outcome, measured on demand.
+  getCollapseState?: () => {
+    totalLines: number
+    laidOutLines: number
+    hiddenLineCount: number
+    collapsed: boolean
+  } | null
   getScrollTop: () => number
   getScrollMetrics: () => {
     scrollTop: number

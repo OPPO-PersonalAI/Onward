@@ -835,6 +835,43 @@ export const PERF_TRACE_EVENT = {
   // parked and how it resolved.
   RENDERER_GIT_DIFF_VIEWPORT_GOAL: 'renderer:git-diff.viewport-goal',
   RENDERER_GIT_DIFF_MODEL_SYNC: 'renderer:git-diff.model-sync',
+  // The warm-reopen fast path's gate, emitted ONCE when it opens (never per
+  // rAF tick). `diffCurrent` is the field that matters: it is the answer to
+  // "did Monaco's diff describe the models bound at this moment", which the
+  // old `getLineChanges() !== null` gate could not distinguish. A trace with
+  // `diffCurrent:false` on a warm-ready decision is the 2026-07-26 bundle's
+  // signature and must not occur post-fix. Diagnostic tier (prod default-on),
+  // ph='i', reopen / file-switch frequency.
+  RENDERER_GIT_DIFF_WARM_READY_GATE: 'renderer:git-diff.warm-ready-gate',
+  // Monaco's hideUnchangedRegions outcome once a reveal has settled. Answers
+  // "was the file actually collapsed", which no event covered before — the
+  // 2026-07-26 bundle could only reason about it from source. Monaco carries
+  // the previous diff's region VISIBILITY forward (updateUnchangedRegions'
+  // "Transfer state from cur state"), so a base whose diff had zero unchanged
+  // regions used to leave every later region expanded. Debounced to one
+  // emission per settled reveal — never wired to onDidContentSizeChange
+  // directly. Diagnostic tier, ph='i'.
+  RENDERER_GIT_DIFF_COLLAPSE_STATE: 'renderer:git-diff.collapse-state',
+  // A model URI was reused while the file's BASE identity differed from the
+  // one the live model was built for. Post-fix this must never fire; it exists
+  // so a regression of the identity scheme is visible in a user's trace rather
+  // than only as a mis-positioned viewport. Emitted on the transition only.
+  // Diagnostic tier, ph='i'.
+  RENDERER_GIT_DIFF_MODEL_IDENTITY_REUSED: 'renderer:git-diff.model-identity-reused',
+  // Disposal sweep for superseded onward-git-diff models. Content-identity
+  // URIs mean a new base mints a new model pair, so without a sweep an agent
+  // editing the tree would grow Monaco's model table without bound. Emitted
+  // once per sweep that actually disposed something. Diagnostic tier, ph='i'.
+  RENDERER_GIT_DIFF_MODEL_SWEEP: 'renderer:git-diff.model-sweep',
+  // The diff VIEW model was rebuilt after a full-content write. `setValue`
+  // takes TextModel's flush path, which destroys every decoration on the
+  // model — including the ones Monaco tracks unchanged-region positions with —
+  // so the next recompute inverts an empty hidden set into "the whole file is
+  // visible" and hideUnchangedRegions silently stops collapsing. Rebuilding
+  // the view model resets that state. Emitted once per write that actually
+  // changed a side, so it is selection / external-write frequency, not a hot
+  // path. Diagnostic tier, ph='i'.
+  RENDERER_GIT_DIFF_VIEW_MODEL_REBUILT: 'renderer:git-diff.view-model-rebuilt',
   RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
   RENDERER_GIT_DIFF_CACHE_INVALIDATION: 'renderer:git-diff.cache-invalidation',
   // Optimistic local list patch after a known single-file mutation

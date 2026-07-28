@@ -1415,14 +1415,23 @@ export const TerminalGrid = memo(function TerminalGrid({
           // right away already finds a warm cache — don't make them wait out a
           // 2s debounce on top of the cold compute.
           warmedReposRef.current.add(repoRoot)
-          void window.electronAPI.git.warmDiffCache(repoRoot)
+          // Rejection is swallowed deliberately. This is a cache WARM: if it
+          // loses (quit disposed the git IPC worker, repo vanished), the next
+          // open simply pays the cold compute. `void` suppresses the unused-
+          // promise lint but attaches no rejection handler, so the quit-time
+          // "Git IPC worker client disposed" reject escaped as an unhandled
+          // rejection and tripped AT-RT-no-runtime-errors in the
+          // subpage-navigation suites.
+          window.electronAPI.git.warmDiffCache(repoRoot).catch(() => {})
         } else {
           // Subsequent state changes: debounce re-warms so rapid churn does not
           // queue a warm per event (the warm is also in-flight-deduped + runs in
           // the low-priority ::diff-precompute lane, so this is just politeness).
           if (warmDiffTimerRef.current) clearTimeout(warmDiffTimerRef.current)
           warmDiffTimerRef.current = window.setTimeout(() => {
-            void window.electronAPI.git.warmDiffCache(repoRoot)
+            // Same reasoning as the leading-edge warm above: a debounced warm
+            // can outlive the window it was scheduled in.
+            window.electronAPI.git.warmDiffCache(repoRoot).catch(() => {})
           }, 2000)
         }
       }

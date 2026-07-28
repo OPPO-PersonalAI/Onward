@@ -2678,7 +2678,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Background diff cache warming — pre-compute diff so opening the panel is instant
   ipcMain.handle(IPC.GIT_WARM_DIFF_CACHE, async (_, cwd: string) => {
-    const result = await gitIpcWorkerClient.warmDiffCache(cwd)
+    // A cache WARM must never throw. It is fire-and-forget by construction —
+    // the renderer schedules it on a 2 s debounce and nothing waits on the
+    // answer — so the only thing a throw accomplishes is Electron logging
+    // "Error occurred in handler for 'git:warm-diff-cache'", which the
+    // autotest runtime-error guard (AT-RT-no-runtime-errors) counts as a
+    // defect. A debounced warm can outlive the window it was scheduled in and
+    // land after quit disposed the git IPC worker; losing it costs nothing but
+    // one cold compute on the next open.
+    let result: { success: boolean } | undefined
+    try {
+      result = await gitIpcWorkerClient.warmDiffCache(cwd)
+    } catch (error) {
+      console.log('[GitWarmDiffCache] skipped:', String(error))
+      return { success: false }
+    }
     // warmDiffCache only warms the LIST caches (request + single-repo) inside
     // the worker. Also kick the per-file content precompute so the user's FIRST
     // click lands on a warm body cache instead of a cold `git show`/`cat-file`

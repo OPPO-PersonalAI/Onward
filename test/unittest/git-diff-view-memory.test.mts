@@ -16,6 +16,7 @@ import {
   resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
   resolveGitDiffSnapshotSelection,
+  shouldCompleteWarmReveal,
   shouldRestoreGitDiffSnapshotScroll,
   type DiffViewMemory
 } from '../../src/components/GitDiffViewer/diffViewMemory.ts'
@@ -405,5 +406,66 @@ describe('git diff restore-vs-reveal decision (DRD)', () => {
       }),
       { action: 'reveal-first-change', reason: 'no-saved-position' }
     )
+  })
+})
+
+/**
+ * WRG-* — the warm-reopen reveal gate (2026-07-26 diagnostic bundle, BUG-0004).
+ *
+ * The gate used to ask `editor.getLineChanges() !== null`, which answers "has a
+ * diff ever been computed on this widget" rather than "does the computed diff
+ * describe what the models hold now". Monaco keeps its previous `_diff` across
+ * a content change and only flips `_isDiffUpToDate` while a 200 ms debouncer is
+ * pending, so the old gate stayed open through the entire window in which its
+ * answer was wrong — and the reveal landed on the PREVIOUS content's first
+ * change (line 1, for a base that used to be an untracked empty file).
+ *
+ * WRG-05 is the case that must never regress; WRG-06 is the 4891fc9 win the
+ * fix has to preserve.
+ */
+describe('warm reveal gate', () => {
+  const gate = (over: Partial<Parameters<typeof shouldCompleteWarmReveal>[0]> = {}) =>
+    shouldCompleteWarmReveal({
+      contentReady: true,
+      staleMarked: false,
+      modelsMatch: true,
+      diffComputedForBoundModels: true,
+      ...over
+    })
+
+  it('WRG-01: a body still loading never opens the gate', () => {
+    assert.equal(gate({ contentReady: false }), false)
+  })
+
+  it('WRG-02: a stale-marked key never opens the gate', () => {
+    // A forced refetch is already on its way; deciding now reads a doomed body.
+    assert.equal(gate({ staleMarked: true }), false)
+  })
+
+  it('WRG-03: models that do not match the selection never open the gate', () => {
+    assert.equal(gate({ modelsMatch: false }), false)
+  })
+
+  it('WRG-04: everything settled and the diff current opens the gate', () => {
+    assert.equal(gate(), true)
+  })
+
+  it('WRG-05: a diff that does not describe the bound models keeps it shut', () => {
+    // The defect: `getLineChanges()` would have returned a non-empty array here
+    // (Monaco retains the previous result), and the old gate opened on it.
+    assert.equal(gate({ diffComputedForBoundModels: false }), false)
+  })
+
+  it('WRG-06: currency alone is not enough — every precondition still applies', () => {
+    assert.equal(gate({ diffComputedForBoundModels: true, contentReady: false }), false)
+    assert.equal(gate({ diffComputedForBoundModels: true, staleMarked: true }), false)
+    assert.equal(gate({ diffComputedForBoundModels: true, modelsMatch: false }), false)
+  })
+
+  it('WRG-07: the unchanged-content warm reopen still takes the fast path', () => {
+    // 4891fc9's win: when nothing was written into the models, the diff Monaco
+    // already holds IS current, so the reopen must not idle into the 2 s
+    // safety timeout.
+    assert.equal(gate({ diffComputedForBoundModels: true }), true)
   })
 })

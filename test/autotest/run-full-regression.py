@@ -115,6 +115,15 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-diff-ux-presentation-autotest.sh",
     "test/autotest/run-git-diff-ux-tree-autotest.sh",
     "test/autotest/run-git-diff-model-sync-autotest.sh",
+    # Mutation-timing matrix (BUG-0004): the working tree changes at an
+    # arbitrary moment relative to the Git Diff lifecycle — the Agent Coding
+    # First workload, where a file can be rewritten before the panel opens,
+    # during its load, inside the click -> reveal-decision window, while the
+    # user reads it, or during close. Split by PHASE rather than by cost alone
+    # so a red box names the moment that broke, not just "the matrix".
+    "test/autotest/run-git-diff-mutation-timing-closed-autotest.sh",
+    "test/autotest/run-git-diff-mutation-timing-load-reveal-autotest.sh",
+    "test/autotest/run-git-diff-mutation-timing-viewing-autotest.sh",
     # EXPLICIT-ONLY 8th GDS group (excluded from GDS_GROUP=''): reopen freshness
     # under a fully-silenced mirror (GSM watcher + reconcile heartbeat muted via
     # env) — GDS-50/51 lock the mirror attach-lifecycle recovery contract.
@@ -333,6 +342,12 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     "test/autotest/run-git-diff-ux-presentation-autotest.sh": 280,
     "test/autotest/run-git-diff-ux-tree-autotest.sh": 280,
     "test/autotest/run-git-diff-model-sync-autotest.sh": 280,
+    # Mutation-timing groups share the family's 280s in-app watchdog so the
+    # orchestrator fence sits above it rather than killing a wedged app
+    # mid-teardown. Each group is 2-4 cases x 3 internal trials.
+    "test/autotest/run-git-diff-mutation-timing-closed-autotest.sh": 280,
+    "test/autotest/run-git-diff-mutation-timing-load-reveal-autotest.sh": 280,
+    "test/autotest/run-git-diff-mutation-timing-viewing-autotest.sh": 280,
     # 8th (explicit-only) GDS group: ~20s measured app session, but it shares the
     # family's 280s in-app watchdog, so the orchestrator fence sits above it like
     # the other GDS slices instead of killing a wedged app mid-teardown at 180s.

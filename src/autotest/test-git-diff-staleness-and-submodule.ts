@@ -1124,11 +1124,20 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     // and a 300-line file collapses "bottom" (first visible ≈ 147) onto the
     // change line (150).
     const deepBaselineLines = Array.from({ length: 1200 }, (_, i) => `deep baseline line ${i + 1}`)
+    // v1 and v2 must put their FIRST change on DIFFERENT lines. Both editing
+    // line 600 (the shape this case shipped with until 2026-07-27) makes the
+    // [590,610] band pass whether the reveal read the CURRENT diff or the
+    // previous one — the assertion cannot distinguish stale from fresh, which
+    // is why it stayed green through the 2026-07-26 warm-model bundle. With
+    // v1's edit at 600 and v2's at 200, a reveal that read v1's diff lands at
+    // ~600 and fails the band outright.
+    const V1_EDIT_LINE = 600
+    const V2_EDIT_LINE = 200
     const v1 = deepBaselineLines
-      .map((l, i) => (i === 599 ? 'deep baseline line 600 EDITED-V1' : l))
+      .map((l, i) => (i === V1_EDIT_LINE - 1 ? `deep baseline line ${V1_EDIT_LINE} EDITED-V1` : l))
       .join('\n') + '\n'
     const v2 = deepBaselineLines
-      .map((l, i) => (i === 599 ? 'deep baseline line 600 EDITED-V2-WHILE-CLOSED' : l))
+      .map((l, i) => (i === V2_EDIT_LINE - 1 ? `deep baseline line ${V2_EDIT_LINE} EDITED-V2-WHILE-CLOSED` : l))
       .join('\n') + '\n'
 
     await window.electronAPI.git.saveFileContent(cleanRoot, deepChangeFile, v1)
@@ -1217,21 +1226,39 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     // is 600, so the reveal must target ~600. The pre-fix build never
     // applies the content-changed reveal → revealTargetLine stays null →
     // deterministic red. Pixel metrics are logged as enrichment only.
+    // Wait for the viewport to come to REST, not for the first decision to
+    // exist. This case predates the corrective reveal pass, so sampling at
+    // first-decision used to be equivalent — nothing could replace the record.
+    // It no longer is: when the reveal cycle outruns its 2 s safety window
+    // (cold open, slow diff worker) the first record is a `timeout` reveal
+    // against a half-settled diff, and the corrective `deferred-diff-computed`
+    // pass replaces it a few hundred ms later. Sampling early read the
+    // superseded record and failed a view that was actually correct (1 run in
+    // 8). Same settled-sampling shape as GDS-54.
     const decision52Applied = await waitFor('GDS-52-reveal-decision-applied', () => {
       const d = window.__onwardGitDiffDebug?.getLastRestoreDecision?.()
-      return Boolean(d && d.at >= reopen52Mark && d.action === 'reveal-first-change' && d.revealTargetLine !== null)
-    }, 8000)
+      if (!d || d.at < reopen52Mark || d.action !== 'reveal-first-change') return false
+      if (d.revealTargetLine === null) return false
+      return Math.abs(d.revealTargetLine - V2_EDIT_LINE) <= 10
+    }, 10000)
     const decision52 = window.__onwardGitDiffDebug?.getLastRestoreDecision?.() ?? null
     const finalMetrics = window.__onwardGitDiffDebug?.getScrollMetrics() ?? null
+    // Band tracks V2_EDIT_LINE. A reveal that read v1's (stale) diff targets
+    // ~V1_EDIT_LINE and is now excluded by construction.
     const revealTargetInBand = typeof decision52?.revealTargetLine === 'number' &&
-      decision52.revealTargetLine >= 590 && decision52.revealTargetLine <= 610
+      decision52.revealTargetLine >= V2_EDIT_LINE - 10 &&
+      decision52.revealTargetLine <= V2_EDIT_LINE + 10
+    const revealTargetIsStaleV1 = typeof decision52?.revealTargetLine === 'number' &&
+      decision52.revealTargetLine >= V1_EDIT_LINE - 10 &&
+      decision52.revealTargetLine <= V1_EDIT_LINE + 10
     record('GDS-52-reopen-changed-content-reveals-first-change', Boolean(
       firstViewReady &&
       reopenContentFresh &&
       decision52Applied &&
       decision52?.action === 'reveal-first-change' &&
       decision52?.reason === 'content-changed' &&
-      revealTargetInBand
+      revealTargetInBand &&
+      !revealTargetIsStaleV1
     ), {
       firstViewReady,
       parkedOk,
@@ -1240,7 +1267,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       reopenContentFresh,
       decision52Applied,
       revealTargetInBand,
+      revealTargetIsStaleV1,
+      expectedRevealLine: V2_EDIT_LINE,
       revealTargetLine: decision52?.revealTargetLine ?? null,
+      boundModelUris: window.__onwardGitDiffDebug?.getBoundModelUris?.() ?? null,
+      collapseState: window.__onwardGitDiffDebug?.getCollapseState?.() ?? null,
       finalScrollTop: finalMetrics?.scrollTop ?? null,
       finalMaxScrollTop: finalMetrics?.maxScrollTop ?? null,
       finalFirstVisibleProbe: window.__onwardGitDiffDebug?.getFirstVisibleLine() ?? null,
@@ -1331,6 +1362,219 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
     await waitFor('GDS-53-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+  }
+
+  // ═════ GDS-54 / GDS-55: reopen ACROSS A GIT-STATE TRANSITION ═════
+  //
+  // The 2026-07-26 diagnostic bundle, reproduced. GDS-52 above only ever moves
+  // tracked → tracked, so the BASE body keeps its identity and a reused model
+  // still holds a usable diff. The reported failure needed the base to change
+  // while the model URI stayed the same:
+  //
+  //   view the file while UNTRACKED  → base is empty, the whole file is one
+  //                                    change starting at line 1, and Monaco
+  //                                    records ZERO unchanged regions
+  //   close, stage it                → the staged blob becomes a real base
+  //   edit a LATE line, reopen, click the UNSTAGED entry
+  //
+  // (The bundle's user reached the same shape via `git add` + commit; staging
+  // is the equivalent transition reachable from the renderer API surface, and
+  // it exercises the identical "empty base → non-empty base, same path" step.)
+  //
+  // Pre-fix the reopen resolved the same model URI, got the kept-alive model
+  // still holding the untracked-era body, computed its mount-time diff from
+  // it, and the warm-ready gate read that diff a few frames later:
+  //   GDS-54 → revealTargetLine 1 (the untracked diff's first change)
+  //   GDS-55 → nothing collapsed (Monaco carries the previous diff's region
+  //            VISIBILITY forward, and "zero regions" inverts to "all visible")
+  //
+  // Both gates are decision / measurement records, never pixels: collapse
+  // layout settles asynchronously, so raw offsets are not gate-able.
+  //
+  // N=5 aggregation: the defect is a race between Monaco's 200 ms diff
+  // debouncer and the gate's rAF tick, i.e. boolean-correctness class — one
+  // trial is one draw from that race, so all 5 must pass.
+  if (!cancelled() && runGroup('reentry')) {
+    const transitionFile = '__autotest_gds54_transition.txt'
+    const transitionBaseLines = Array.from({ length: 1200 }, (_, i) => `transition line ${i + 1}`)
+    const untrackedBody = transitionBaseLines.join('\n') + '\n'
+    // The edit line MOVES between trials. Two reasons, both load-bearing:
+    //   1. repeating identical bytes makes the view memory's saved position
+    //      still match the content signature from trial 2 onward, so the cycle
+    //      correctly takes a RESTORE decision and never reveals at all — the
+    //      case would be asserting against a decision it did not provoke;
+    //   2. a distinct line per trial turns "read the previous trial's diff"
+    //      into a wrong ANSWER rather than an indistinguishable one, which is
+    //      the same property GDS-52's fixture was missing.
+    const editLineForTrial = (trial: number) => 950 - trial * 100
+    const editedBodyForTrial = (trial: number) => {
+      const line = editLineForTrial(trial)
+      return transitionBaseLines
+        .map((l, i) => (i === line - 1 ? `transition line ${line} EDITED-AFTER-STAGE` : l))
+        .join('\n') + '\n'
+    }
+
+    // selectFileByPath takes the first entry matching the filename, and this
+    // case deliberately produces TWO (staged/A and unstaged/M). Pick by
+    // changeType through the index selector instead.
+    const selectByChangeType = (filename: string, changeType: 'untracked' | 'unstaged' | 'staged'): boolean => {
+      const files = window.__onwardGitDiffDebug?.getFileList() ?? []
+      const index = files.findIndex((f) => f.filename === filename && f.changeType === changeType)
+      if (index < 0) return false
+      return Boolean(window.__onwardGitDiffDebug?.selectFileByIndex(index))
+    }
+
+    const trials54: Array<Record<string, unknown>> = []
+    let pass54 = 0
+    let pass55 = 0
+    const TRIALS = 5
+
+    for (let trial = 0; trial < TRIALS && !cancelled(); trial += 1) {
+      await restoreBaseline()
+      // ── phase 1: UNTRACKED, viewed once so its zero-region diff is cached ──
+      await window.electronAPI.git.saveFileContent(cleanRoot, transitionFile, untrackedBody)
+      await sleep(260)
+
+      window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+      await waitFor(`GDS-54-t${trial}-open-untracked`, () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+      await waitFor(`GDS-54-t${trial}-list-untracked`, () => Boolean(
+        (window.__onwardGitDiffDebug?.getFileList() ?? [])
+          .some((f) => f.filename === transitionFile && f.changeType === 'untracked')
+      ), adaptiveDiffBudget())
+      const selectedUntracked = selectByChangeType(transitionFile, 'untracked')
+      const untrackedReady = await waitForSelectedContentAndModel(
+        `GDS-54-t${trial}-untracked-ready`,
+        untrackedBody,
+        { timeoutMs: adaptiveDiffBudget() }
+      )
+      // Let the untracked-era diff AND its zero-unchanged-region state settle —
+      // that state is the poison the reopen must not inherit.
+      await sleep(500)
+
+      window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+      await waitFor(`GDS-54-t${trial}-close`, () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+
+      // ── phase 2: stage (base stops being empty), then edit a LATE line ──
+      // The late edit is what makes "read the stale diff" (line 1) and "read
+      // the current diff" (line ~950) different answers.
+      const TRANSITION_EDIT_LINE = editLineForTrial(trial)
+      const editedBody = editedBodyForTrial(trial)
+      await window.electronAPI.git.stageFile(cleanRoot, transitionFile)
+      await sleep(220)
+      await window.electronAPI.git.saveFileContent(cleanRoot, transitionFile, editedBody)
+      await sleep(320)
+
+      // ── phase 3: reopen, WAIT FOR THE PREFETCH so the click is a memory hit ──
+      // A cache MISS routes through `loading` and takes the safe deferral path,
+      // which is precisely why GDS-52 never tripped this. The user's path was a
+      // hit; the test must take the same one.
+      const reopenMark = Date.now()
+      window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+      await waitFor(`GDS-54-t${trial}-reopen`, () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+      const unstagedListed = await waitFor(`GDS-54-t${trial}-reopen-list`, () => Boolean(
+        (window.__onwardGitDiffDebug?.getFileList() ?? [])
+          .some((f) => f.filename === transitionFile && f.changeType === 'unstaged')
+      ), adaptiveDiffBudget())
+      await sleep(900)
+      const selectedUnstaged = selectByChangeType(transitionFile, 'unstaged')
+
+      const contentFresh = await waitForSelectedContentAndModel(
+        `GDS-54-t${trial}-reopen-content-model-ready`,
+        editedBody,
+        { timeoutMs: adaptiveDiffBudget() }
+      )
+      // Wait for the viewport to come to REST, not for the first decision to
+      // exist. On a cold trial (first open of the session: Monaco mounting,
+      // the diff worker starting, git caches empty) the computation can outrun
+      // the 2 s safety window, so the first record is a `timeout` reveal that
+      // the corrective `deferred-diff-computed` pass replaces a few hundred ms
+      // later. Sampling at first-decision read the superseded one and made the
+      // cold trial fail while the view was actually correct (observed 1 run in
+      // 6). The contract is where the user ENDS UP, not which trigger got
+      // there first — so poll until the target matches, and only fall back to
+      // whatever is there when it never does.
+      const decisionArrived = await waitFor(`GDS-54-t${trial}-decision`, () => {
+        const d = window.__onwardGitDiffDebug?.getLastRestoreDecision?.()
+        if (!d || d.at < reopenMark || d.revealTargetLine === null) return false
+        return Math.abs(d.revealTargetLine - TRANSITION_EDIT_LINE) <= 12
+      }, 10000)
+      const decision = window.__onwardGitDiffDebug?.getLastRestoreDecision?.() ?? null
+      const bound = window.__onwardGitDiffDebug?.getBoundModelUris?.() ?? null
+      await sleep(600)
+      const collapse = window.__onwardGitDiffDebug?.getCollapseState?.() ?? null
+
+      const revealOnCurrentChange = typeof decision?.revealTargetLine === 'number' &&
+        decision.revealTargetLine >= TRANSITION_EDIT_LINE - 12 &&
+        decision.revealTargetLine <= TRANSITION_EDIT_LINE + 12
+      // The pre-fix signature, named explicitly so a failure log says WHY.
+      const revealIsStaleTop = decision?.revealTargetLine === 1
+      // ...and landing on a DIFFERENT trial's edit line means a previous
+      // trial's diff was read, which the moving edit line makes detectable.
+      const revealIsOtherTrialLine = typeof decision?.revealTargetLine === 'number' &&
+        [0, 1, 2, 3, 4]
+          .filter((other) => other !== trial)
+          .some((other) => Math.abs((decision.revealTargetLine as number) - editLineForTrial(other)) <= 12)
+      const modelIsCurrent = Boolean(
+        bound && bound.originalUri === bound.expectedOriginalUri &&
+        bound.modifiedUri === bound.expectedModifiedUri
+      )
+      const trialOk54 = Boolean(
+        selectedUntracked && untrackedReady && unstagedListed && selectedUnstaged &&
+        contentFresh && decisionArrived && revealOnCurrentChange &&
+        !revealIsStaleTop && !revealIsOtherTrialLine && modelIsCurrent
+      )
+      // 1200 lines with a single edited line must collapse hard; "collapsed at
+      // all, and by a lot" is the contract — the exact count is Monaco's business.
+      const trialOk55 = Boolean(collapse && collapse.collapsed && collapse.hiddenLineCount > 500)
+      if (trialOk54) pass54 += 1
+      if (trialOk55) pass55 += 1
+      trials54.push({
+        trial,
+        selectedUntracked,
+        untrackedReady,
+        unstagedListed,
+        selectedUnstaged,
+        contentFresh,
+        decisionArrived,
+        revealTargetLine: decision?.revealTargetLine ?? null,
+        expectedRevealLine: TRANSITION_EDIT_LINE,
+        revealOnCurrentChange,
+        revealIsStaleTop,
+        revealIsOtherTrialLine,
+        decisionTrigger: decision?.trigger ?? null,
+        decisionAction: decision?.action ?? null,
+        modelIsCurrent,
+        boundOriginalTail: bound?.originalUri?.slice(-90) ?? null,
+        expectedOriginalTail: bound?.expectedOriginalUri?.slice(-90) ?? null,
+        diffCurrentAtProbe: bound?.diffCurrent ?? null,
+        liveModelCount: window.__onwardGitDiffDebug?.getLiveDiffModelCount?.() ?? null,
+        collapsed: collapse?.collapsed ?? null,
+        hiddenLineCount: collapse?.hiddenLineCount ?? null,
+        totalLines: collapse?.totalLines ?? null,
+        trialOk54,
+        trialOk55
+      })
+
+      window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+      await waitFor(`GDS-54-t${trial}-final-close`, () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+      // restoreBaseline() at the top of the next trial unstages and reverts;
+      // drop the scratch file here so it never reaches the repo-root sweep.
+      await window.electronAPI.git.unstageFile(cleanRoot, transitionFile)
+      await window.electronAPI.project.deletePath(cleanRoot, transitionFile)
+      await sleep(200)
+    }
+
+    log('GDS-54-trials', trials54)
+    record('GDS-54-reopen-across-git-state-transition-reveals-current-change', pass54 === TRIALS, {
+      passed: pass54,
+      trials: TRIALS,
+      note: 'untracked -> stage -> late edit -> reopen+click MUST reveal the CURRENT first change; revealTargetLine===1 is the 2026-07-26 stale-model signature'
+    })
+    record('GDS-55-reopen-across-git-state-transition-still-collapses', pass55 === TRIALS, {
+      passed: pass55,
+      trials: TRIALS,
+      note: 'the untracked-era diff has ZERO unchanged regions; Monaco carries region VISIBILITY forward, so a reused view model leaves the whole 1200-line file expanded'
+    })
   }
 
   // ───── GDS-47: read-path stat revalidation surfaces a WATCHER-MISSED edit ─────

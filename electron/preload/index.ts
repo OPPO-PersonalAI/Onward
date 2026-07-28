@@ -1252,6 +1252,7 @@ export interface DebugAPI {
   autotestGsmWatcherSilent: boolean
   autotestGsmLatencyGroup: string
   autotestGdsGroup: string
+  autotestMutationTimingGroup: string
   getMirrorWatcherStatusHistory: () => unknown[]
   perfTraceCaptureContent: boolean
   // ONWARD_DISABLE_VIRTUAL_CURSOR=1 disables the Prompt textarea's
@@ -2280,6 +2281,10 @@ const debugAutotestGsmLatencyGroup =
 // run only that group so the suite can be split across sub-5-min runners (class-2).
 const debugAutotestGdsGroup =
   (debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GDS_GROUP) || ''
+// '' = run the whole Git-Diff mutation-timing matrix; 'closed' | 'load-reveal' |
+// 'viewing' run one phase group so the matrix splits across sub-5-min runners.
+const debugAutotestMutationTimingGroup =
+  (debugAutotestEnabled && process.env.ONWARD_AUTOTEST_MT_GROUP) || ''
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 const virtualCursorDisabled = process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1'
 const gitDiffPerformanceDiagnosticsEnabled =
@@ -2312,6 +2317,7 @@ const debugAPI: DebugAPI = {
   autotestGsmWatcherSilent: debugAutotestGsmWatcherSilent,
   autotestGsmLatencyGroup: debugAutotestGsmLatencyGroup,
   autotestGdsGroup: debugAutotestGdsGroup,
+  autotestMutationTimingGroup: debugAutotestMutationTimingGroup,
   getMirrorWatcherStatusHistory: () => {
     return mirrorWatcherStatusHistory.slice()
   },

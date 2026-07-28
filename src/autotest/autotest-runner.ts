@@ -36,6 +36,7 @@ import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
 import { testGitDiffChaosConvergence } from './test-git-diff-chaos-convergence'
+import { testGitDiffMutationTiming } from './test-git-diff-mutation-timing'
 import { testGitDiffNestedGitlink } from './test-git-diff-nested-gitlink'
 import { testGitDiffClickLatency } from './test-git-diff-click-latency'
 import { testGitDiffIdenticalBlob } from './test-git-diff-identical-blob'
@@ -841,6 +842,17 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase5.498:begin')
       const results = await testGitDiffChaosConvergence(ctx)
       collectSuiteResults('GitDiffChaosConvergence', results)
+      await sleep(300)
+    }
+
+    // Phase 5.499: Git Diff mutation-timing matrix — the tree changes at an
+    // arbitrary moment relative to the Git Diff lifecycle (Agent Coding First).
+    // EXPLICIT-ONLY: needs its own fixture repo and a phase-group env split, so
+    // it never rides an 'all' run.
+    if (!ctx.cancelled() && shouldRun('git-diff-mutation-timing', { explicitOnly: true })) {
+      log('phase5.499:begin')
+      const results = await testGitDiffMutationTiming(ctx)
+      collectSuiteResults('GitDiffMutationTiming', results)
       await sleep(300)
     }
 
