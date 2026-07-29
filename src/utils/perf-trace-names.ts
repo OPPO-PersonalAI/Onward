@@ -201,6 +201,26 @@ export const PERF_TRACE_EVENT = {
   RENDERER_SETTINGS_OPEN: 'renderer:settings.open',
   RENDERER_CHANGELOG_OPEN: 'renderer:changelog.open',
 
+  // ───────── Task drag-to-rearrange ─────────
+  // Diagnostic breadcrumbs for "my Tasks jumped around / the order did not
+  // stick". Off the hot path by construction: the pointermove path emits
+  // NOTHING (it runs every frame and only writes CSS transforms), so a trace
+  // shows mode transitions and committed drops only.
+  // Payload carries `trigger: 'long-press' | 'menu'`.
+  RENDERER_TASK_REORDER_MODE_ENTER: 'renderer:task-reorder.mode-enter',
+  // Payload carries `reason: 'esc' | 'outside-click' | 'drop' | 'layout-change'
+  // | 'tab-switch' | 'terminal-count-change'`.
+  RENDERER_TASK_REORDER_MODE_EXIT: 'renderer:task-reorder.mode-exit',
+  // Duration span around the AppState write + DOM reorder. Payload carries
+  // fromIndex / toIndex / count / layoutKind.
+  RENDERER_TASK_REORDER_COMMIT: 'renderer:task-reorder.commit',
+  // A drag that ended without changing the order (dropped on its own slot,
+  // cancelled by ESC, or released outside every slot).
+  RENDERER_TASK_REORDER_CANCEL: 'renderer:task-reorder.cancel',
+  // Custom-layout-only: post-commit forceFit because the Task landed in a
+  // slot of a different size and the PTY has to re-derive cols/rows.
+  RENDERER_TASK_REORDER_REFIT: 'renderer:task-reorder.refit',
+
   // ───────── Background — project file index + tree watch ─────────
   MAIN_FILE_INDEX_BUILD: 'main:file-index.build',
   MAIN_FILE_INDEX_UPDATE: 'main:file-index.update',

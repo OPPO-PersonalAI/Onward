@@ -7,7 +7,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, mem
 import { createPortal } from 'react-dom'
 import { LayoutMode, TerminalInfo, TerminalShortcutAction, TerminalFocusRequest } from '../../types/prompt'
 import type { GitChangeType, Prompt } from '../../types/electron'
-import { resolveLayout, isSameLayoutMode, layoutDataAttr } from '../../utils/layout-mode'
+import { resolveLayout, isSameLayoutMode, layoutDataAttr, layoutModeKey } from '../../utils/layout-mode'
 import { TerminalDropdown } from '../TerminalDropdown'
 import { TerminalTitleMenu } from '../TerminalTitleMenu'
 import { GitDiffViewer } from '../GitDiffViewer'
@@ -19,6 +19,8 @@ import { CodingAgentModal } from '../CodingAgentModal'
 import type { CodingAgentConfigInput, GitStateMirrorSnapshot, GitStateMirrorDelta, TerminalGitStatus } from '../../types/electron'
 import { BrowserPanel } from '../BrowserPanel/BrowserPanel'
 import { decideTaskNameAutoFollow } from './auto-follow-name'
+import { useTaskRearrange } from './useTaskRearrange'
+import { useModalEscape } from '../../hooks/useModalEscape'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../contexts/AppStateContext'
 import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../constants/terminal'
@@ -209,7 +211,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   }))
 
   const { getTerminalStyle, getAutoFollowGitBranchForTaskName, setAutoFollowGitBranchForTaskName } = useSettings()
-  const { notifyTerminalGitInfo, getTerminalNameState, state: appStateForLayout } = useAppState()
+  const { notifyTerminalGitInfo, getTerminalNameState, reorderTerminals, state: appStateForLayout } = useAppState()
   const currentAutoFollowEnabled = getAutoFollowGitBranchForTaskName()
   // Stable refs so auto-follow logic running inside callbacks always reads the
   // freshest values instead of capturing stale closures.
@@ -961,6 +963,94 @@ export const TerminalGrid = memo(function TerminalGrid({
     visibleTerminalIdsRef.current = visibleTerminals.map(term => term.id)
     visibleTerminalsRef.current = visibleTerminals
   }, [visibleTerminals])
+
+  // ───────── Task drag-to-rearrange ─────────
+  // Only the VISIBLE slots participate: when the Task count exceeds the
+  // layout's cell count the surplus stays parked at the tail of the array,
+  // untouched by any drag (an invisible Task must never move under the user).
+  const gridRef = useRef<HTMLDivElement>(null)
+  const getGridElement = useCallback(() => gridRef.current, [])
+  const rearrangeTerminalIds = useMemo(
+    () => visibleTerminals.map(term => term.id),
+    [visibleTerminals]
+  )
+
+  const handleRearrangeCommit = useCallback((fromIndex: number, toIndex: number) => {
+    if (!_tabId) return
+    reorderTerminals(_tabId, fromIndex, toIndex)
+  }, [reorderTerminals, _tabId])
+
+  const handleRearrangeAfterCommit = useCallback((fromIndex: number, toIndex: number) => {
+    // Preset layouts hand every Task an identically sized slot, so the moved
+    // cells keep their pixel geometry and `fit()` self-skips on the unchanged
+    // clientWidth/Height — no resize IPC, no shell repaint.
+    //
+    // Custom layouts can move a Task between differently sized rectangles, so
+    // the PTY has to re-derive cols/rows. Do it after the browser has applied
+    // the new grid-area assignments; forceFit still no-ops at the IPC level
+    // for any terminal whose cell geometry did not actually change.
+    if (resolvedDisplayLayout.kind !== 'custom') return
+    requestAnimationFrame(() => {
+      const startedAt = performance.now()
+      const ids = visibleTerminalIdsRef.current
+      const low = Math.min(fromIndex, toIndex)
+      const high = Math.max(fromIndex, toIndex)
+      let refitted = 0
+      for (let i = low; i <= high && i < ids.length; i += 1) {
+        if (terminalSessionManager.forceFit(ids[i])) refitted += 1
+      }
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_REORDER_REFIT, {
+        fromIndex,
+        toIndex,
+        refitted,
+        durationMs: Number((performance.now() - startedAt).toFixed(3))
+      })
+    })
+  }, [resolvedDisplayLayout.kind])
+
+  const rearrangeEnabled = !hidden && !globalOverlayActive && rearrangeTerminalIds.length > 1
+  const rearrangeEnabledRef = useRef({
+    enabled: rearrangeEnabled,
+    hidden,
+    overlayActive: globalOverlayActive,
+    slotCount: rearrangeTerminalIds.length
+  })
+  rearrangeEnabledRef.current = {
+    enabled: rearrangeEnabled,
+    hidden,
+    overlayActive: globalOverlayActive,
+    slotCount: rearrangeTerminalIds.length
+  }
+
+  const rearrange = useTaskRearrange({
+    terminalIds: rearrangeTerminalIds,
+    getGridElement,
+    enabled: rearrangeEnabled,
+    layoutKey: layoutModeKey(displayLayoutMode),
+    onCommit: handleRearrangeCommit,
+    onAfterCommit: handleRearrangeAfterCommit
+  })
+
+  const rearrangeActive = rearrange.state.active
+  const rearrangeExit = rearrange.exitMode
+  // Mirrored into a ref so the autotest debug API (built once inside an
+  // effect) can read the live state without re-registering on every change.
+  const rearrangeStateRef = useRef(rearrange.state)
+  useEffect(() => { rearrangeStateRef.current = rearrange.state }, [rearrange.state])
+  const handleRearrangeEscape = useCallback(() => rearrangeExit('esc'), [rearrangeExit])
+  useModalEscape(rearrangeActive, handleRearrangeEscape, 'task-rearrange')
+
+  // While rearranging, every Task cell is masked and the whole cell becomes
+  // the drag handle. The mask swallows pointer events, but a terminal that
+  // ALREADY held keyboard focus would keep receiving keystrokes behind it —
+  // so hand focus back to the document on entry. Focus is not restored on
+  // exit: clicking a cell re-focuses it the ordinary way, and force-restoring
+  // would fight the outside-click exit path.
+  useEffect(() => {
+    if (!rearrangeActive) return
+    const focusedId = terminalSessionManager.getFocusedTerminalId()
+    if (focusedId) terminalSessionManager.getTextareaElement(focusedId)?.blur()
+  }, [rearrangeActive])
 
   useLayoutEffect(() => {
     const visibleIds = new Set(visibleTerminals.map(term => term.id))
@@ -2149,6 +2239,16 @@ export const TerminalGrid = memo(function TerminalGrid({
         editingId: editingIdRef.current,
         editingTitle: editingTitleRef.current
       }),
+      getTaskRearrangeState: () => ({
+        active: rearrangeStateRef.current.active,
+        trigger: rearrangeStateRef.current.trigger,
+        draggingIndex: rearrangeStateRef.current.draggingIndex,
+        targetIndex: rearrangeStateRef.current.targetIndex,
+        enabled: rearrangeEnabledRef.current.enabled,
+        hidden: rearrangeEnabledRef.current.hidden,
+        overlayActive: rearrangeEnabledRef.current.overlayActive,
+        slotCount: rearrangeEnabledRef.current.slotCount
+      }),
       closeAllSubpages: () => {
         closeGitDiffPanelRef.current?.(false)
         closeGitHistoryPanelRef.current?.(false)
@@ -2939,7 +3039,20 @@ export const TerminalGrid = memo(function TerminalGrid({
             </button>
           </div>
         )}
-        <div className="terminal-grid" data-layout={layoutDataAttr(displayLayoutMode)}>
+        <div
+          ref={gridRef}
+          className={[
+            'terminal-grid',
+            rearrangeActive ? 'is-rearranging' : '',
+            // Scoped so the shift transition only runs DURING a drag. On drop
+            // the cells are already in their new grid slots and the transform
+            // resets to none — animating that reset would play a bogus slide
+            // from "new slot + stale offset" back to the new slot.
+            rearrange.state.draggingIndex !== null ? 'is-dragging' : ''
+          ].filter(Boolean).join(' ')}
+          data-layout={layoutDataAttr(displayLayoutMode)}
+          data-rearranging={rearrangeActive ? 'true' : undefined}
+        >
           {visibleTerminals.map((termInfo, index) => {
             const terminalInfo = terminalInfos[termInfo.id]
             const terminalStatus = terminalStatuses[termInfo.id] ?? 'idle'
@@ -3004,18 +3117,45 @@ export const TerminalGrid = memo(function TerminalGrid({
             const customCell = resolvedDisplayLayout.kind === 'custom'
               ? resolvedDisplayLayout.cells[index]
               : null
-            const cellStyle = customCell ? {
-              gridColumn: `${customCell.colStart} / span ${customCell.colSpan}`,
-              gridRow: `${customCell.rowStart} / span ${customCell.rowSpan}`
-            } : undefined
+            // Live rearrange preview. The shift transform slides this cell
+            // onto the slot it would occupy if the drag committed right now;
+            // it is pure CSS over a rectangle snapshot, so nothing here
+            // touches the terminal list, the DOM order, or the PTY.
+            const rearrangeShift = rearrangeActive ? rearrange.getCellTransform(index) : undefined
+            const isDragSource = rearrange.state.draggingIndex === index
+            const isDropTarget = rearrange.state.draggingIndex !== null
+              && rearrange.state.targetIndex === index
+              && !isDragSource
+            const isDropSettled = rearrange.state.settledIndex === index
+            const cellStyle = {
+              ...(customCell ? {
+                gridColumn: `${customCell.colStart} / span ${customCell.colSpan}`,
+                gridRow: `${customCell.rowStart} / span ${customCell.rowSpan}`
+              } : null),
+              ...(rearrangeShift ? { transform: rearrangeShift } : null)
+            }
+
+            const cellClassNames = [
+              'terminal-grid-cell',
+              activeTerminalId === termInfo.id ? 'active' : '',
+              rearrangeActive ? 'is-rearrangeable' : '',
+              isDragSource ? 'is-drag-source' : '',
+              isDropTarget ? 'is-drop-target' : '',
+              isDropSettled ? 'is-drop-settled' : ''
+            ].filter(Boolean).join(' ')
 
             return (
               <div
                 key={termInfo.id}
-                className={`terminal-grid-cell ${activeTerminalId === termInfo.id ? 'active' : ''}`}
+                className={cellClassNames}
                 data-terminal-id={termInfo.id}
-                style={cellStyle}
-                onClick={(e) => handleTerminalFocus(termInfo.id, e)}
+                data-slot-index={index}
+                style={Object.keys(cellStyle).length > 0 ? cellStyle : undefined}
+                onPointerDown={(e) => rearrange.handleCellPointerDown(index, e)}
+                // While rearranging the cell is a drag handle, not a terminal:
+                // a press that does not turn into a drag must not quietly
+                // focus a terminal the user cannot even see behind the mask.
+                onClick={(e) => { if (!rearrangeActive) handleTerminalFocus(termInfo.id, e) }}
               >
                 <div className="terminal-grid-header">
 	                  <TerminalDropdown
@@ -3052,6 +3192,8 @@ export const TerminalGrid = memo(function TerminalGrid({
                     onToggleBrowser={() => handleToggleBrowser(termInfo.id)}
                     isBrowserOpen={browserOpenTerminals.has(termInfo.id)}
                     onOpenCodingAgent={() => handleOpenCodingAgent(termInfo.id)}
+                    onRearrangeTasks={() => rearrange.enterMode('menu')}
+                    canRearrangeTasks={visibleTerminals.length > 1}
                     forceClose={hidden || globalOverlayActive}
                   />
                   <div className="terminal-grid-header-left">
@@ -3074,7 +3216,7 @@ export const TerminalGrid = memo(function TerminalGrid({
                           else titleAnchorsRef.current.delete(termInfo.id)
                         }}
                         className="terminal-grid-title"
-                        onClick={(e) => handleTitleClick(e, termInfo.id)}
+                        onClick={(e) => { if (!rearrangeActive) handleTitleClick(e, termInfo.id) }}
                         title={t('terminalGrid.editTitle')}
                       >
                         {termInfo.title}
@@ -3238,6 +3380,19 @@ export const TerminalGrid = memo(function TerminalGrid({
                     )}
                   </div>
                 )}
+                {rearrangeActive && (
+                  // Transparent shield, not an opaque cover. Its only job is to
+                  // stop the terminal from claiming the pointer (xterm would
+                  // start a text selection) while the whole cell acts as a drag
+                  // handle. Terminal content stays fully readable underneath,
+                  // which is the point: the user is deciding where to put a
+                  // Task and needs to see WHICH Task it is.
+                  <div
+                    className="terminal-grid-rearrange-shield"
+                    role="presentation"
+                    aria-hidden="true"
+                  />
+                )}
               </div>
             )
           })}
@@ -3248,6 +3403,34 @@ export const TerminalGrid = memo(function TerminalGrid({
           </div>
         )}
       </div>
+
+      {/*
+        Drag ghost. Portalled to <body> so it is never clipped by the grid's
+        `overflow: hidden`, and positioned by direct style writes from a rAF
+        (see useTaskRearrange.flushGhostPosition) rather than React state —
+        re-rendering the whole grid on every pointermove for a purely visual
+        effect would be the single most expensive thing in this feature.
+      */}
+      {rearrange.state.ghost && rearrange.state.draggingIndex !== null && createPortal(
+        <div
+          ref={rearrange.setGhostElement}
+          className="terminal-grid-rearrange-ghost"
+          role="presentation"
+          aria-hidden="true"
+          style={{
+            width: `${rearrange.state.ghost.width}px`,
+            height: `${rearrange.state.ghost.height}px`
+          }}
+        >
+          <span className="terminal-grid-rearrange-ghost-index">
+            {(rearrange.state.targetIndex ?? rearrange.state.draggingIndex) + 1}
+          </span>
+          <span className="terminal-grid-rearrange-ghost-title">
+            {visibleTerminals[rearrange.state.draggingIndex]?.title ?? ''}
+          </span>
+        </div>,
+        document.body
+      )}
 
       {!hidden && (
         <div

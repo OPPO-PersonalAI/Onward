@@ -196,6 +196,8 @@ const en = {
   'terminalDropdown.openBrowser': 'Open Browser',
   'terminalDropdown.closeBrowser': 'Close Browser',
   'terminalDropdown.codeAgent': 'Launch Code Agent',
+  'terminalDropdown.rearrangeTasks': 'Rearrange Tasks',
+  'terminalDropdown.rearrangeTasksDisabledHint': 'Add a second Task to rearrange the grid',
 
   'terminalTitleMenu.ariaLabel': 'Terminal title menu',
   'terminalTitleMenu.renameItem': 'Rename',
@@ -1667,6 +1669,8 @@ const zhCN: LocaleTranslations = {
   'terminalDropdown.openBrowser': '打开浏览器',
   'terminalDropdown.closeBrowser': '关闭浏览器',
   'terminalDropdown.codeAgent': '启动编码助手',
+  'terminalDropdown.rearrangeTasks': '重新排列 Task',
+  'terminalDropdown.rearrangeTasksDisabledHint': '至少需要两个 Task 才能重新排列',
 
   'terminalTitleMenu.ariaLabel': '终端标题菜单',
   'terminalTitleMenu.renameItem': '重命名',

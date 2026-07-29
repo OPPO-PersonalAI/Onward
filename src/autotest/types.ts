@@ -950,6 +950,24 @@ export interface TerminalDebugApi {
   finishInlineRename: (value?: string) => boolean
   cancelInlineRename: () => boolean
   getInlineRenameState: () => { editingId: string | null; editingTitle: string }
+  /**
+   * Task drag-to-rearrange state. Read-only: the suite drives the feature
+   * through real PointerEvents against the real cells so the long-press
+   * timer, pointer capture and hit-testing are all exercised for real, and
+   * uses this only to assert what the gesture produced.
+   */
+  getTaskRearrangeState: () => {
+    active: boolean
+    trigger: 'long-press' | 'menu' | null
+    draggingIndex: number | null
+    targetIndex: number | null
+    /** Whether the grid currently accepts rearrange gestures at all. */
+    enabled: boolean
+    /** The three inputs behind `enabled`, so a failure says WHICH one blocked. */
+    hidden: boolean
+    overlayActive: boolean
+    slotCount: number
+  }
   setTerminalGitInfoOverride: (
     terminalId: string,
     override: {
