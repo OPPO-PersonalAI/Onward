@@ -16,6 +16,7 @@ import {
   resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
   resolveGitDiffSnapshotSelection,
+  resolveRevealReconcile,
   shouldCompleteWarmReveal,
   shouldRestoreGitDiffSnapshotScroll,
   type DiffViewMemory
@@ -467,5 +468,107 @@ describe('warm reveal gate', () => {
     // already holds IS current, so the reopen must not idle into the 2 s
     // safety timeout.
     assert.equal(gate({ diffComputedForBoundModels: true }), true)
+  })
+})
+
+/**
+ * RRC-* — the reveal reconciliation decision table.
+ *
+ * This is the whole table. Four rows, exhaustively enumerated here, replacing
+ * a condition that used to be split across four trigger sites thousands of
+ * lines apart — two of which could not honour it (`timeout` decides on a
+ * clock; `model-bound` decides off an in-flight click-latency measurement).
+ *
+ * Read RRC-06 and RRC-07 together: they are the reason this model exists. A
+ * position applied by a trigger that had no business deciding is no longer a
+ * defect, because staleness is a state that converges rather than an instant
+ * that must be got right.
+ */
+describe('reveal reconciliation', () => {
+  const at = (over: Partial<Parameters<typeof resolveRevealReconcile>[0]> = {}) =>
+    resolveRevealReconcile({
+      appliedSignature: 'sig-A',
+      currentSignature: 'sig-A',
+      diffCurrentForBoundModels: true,
+      userOwnsViewport: false,
+      ...over
+    })
+
+  it('RRC-01: nothing applied yet is not reconciliation\'s business', () => {
+    // The ordinary reveal cycle owns a file until it has applied something.
+    assert.equal(at({ appliedSignature: null }), 'none')
+    assert.equal(at({ appliedSignature: null, currentSignature: 'sig-Z' }), 'none')
+  })
+
+  it('RRC-02: unknown current content never counts as stale', () => {
+    // null = binary, or a body still in flight. Comparing against it would be
+    // comparing against a placeholder.
+    assert.equal(at({ currentSignature: null }), 'none')
+    assert.equal(at({ appliedSignature: 'sig-A', currentSignature: null, userOwnsViewport: true }), 'none')
+  })
+
+  it('RRC-03: matching signatures need no work', () => {
+    assert.equal(at(), 'none')
+    // ...and stay 'none' regardless of the other two inputs.
+    assert.equal(at({ diffCurrentForBoundModels: false }), 'none')
+    assert.equal(at({ userOwnsViewport: true }), 'none')
+  })
+
+  it('RRC-04: stale with a diff that does not describe the bound models waits', () => {
+    assert.equal(at({ currentSignature: 'sig-B', diffCurrentForBoundModels: false }), 'wait')
+    // Waiting does not depend on who owns the viewport — there is nothing
+    // trustworthy to reconcile TO yet.
+    assert.equal(
+      at({ currentSignature: 'sig-B', diffCurrentForBoundModels: false, userOwnsViewport: true }),
+      'wait'
+    )
+  })
+
+  it('RRC-05: stale, diff current, viewport unowned reconciles silently', () => {
+    assert.equal(at({ currentSignature: 'sig-B' }), 'reconcile-silent')
+  })
+
+  it('RRC-06: stale, diff current, viewport OWNED notifies instead of moving it', () => {
+    // The one loss silent convergence could cause: yanking the viewport away
+    // from someone who scrolled there deliberately.
+    assert.equal(at({ currentSignature: 'sig-B', userOwnsViewport: true }), 'notify')
+  })
+
+  it('RRC-07: a position applied from ANY signature converges the same way', () => {
+    // Why `timeout` and `model-bound` no longer need to be correct: whatever
+    // content they computed from, the outcome is decided by whether it still
+    // matches — not by which trigger applied it.
+    for (const applied of ['sig-stale-1', 'sig-stale-2', 'sig-from-a-doomed-timeout']) {
+      assert.equal(at({ appliedSignature: applied, currentSignature: 'sig-live' }), 'reconcile-silent')
+      assert.equal(
+        at({ appliedSignature: applied, currentSignature: 'sig-live', userOwnsViewport: true }),
+        'notify'
+      )
+    }
+  })
+
+  it('RRC-08: the table is total — every input combination has an action', () => {
+    const actions = new Set<string>()
+    for (const applied of [null, 'sig-A', 'sig-B']) {
+      for (const current of [null, 'sig-A', 'sig-B']) {
+        for (const diffCurrent of [true, false]) {
+          for (const owns of [true, false]) {
+            const a = resolveRevealReconcile({
+              appliedSignature: applied,
+              currentSignature: current,
+              diffCurrentForBoundModels: diffCurrent,
+              userOwnsViewport: owns
+            })
+            assert.ok(
+              ['none', 'wait', 'reconcile-silent', 'notify'].includes(a),
+              `unmapped combination: ${applied}/${current}/${diffCurrent}/${owns} -> ${a}`
+            )
+            actions.add(a)
+          }
+        }
+      }
+    }
+    // All four actions must be reachable, or a row is dead code.
+    assert.deepEqual([...actions].sort(), ['none', 'notify', 'reconcile-silent', 'wait'])
   })
 })

@@ -71,6 +71,7 @@ import {
   resolveGitDiffSnapshotScrollTop,
   resolveGitDiffRestoredSelection,
   resolveGitDiffSnapshotSelection,
+  resolveRevealReconcile,
   shouldCompleteWarmReveal,
   shouldRestoreGitDiffSnapshotScroll,
   type DiffRestoreDecision,
@@ -155,16 +156,16 @@ const DIFF_REVEAL_TIMEOUT_MS = 2000
 // Collapse layout settles asynchronously after a diff lands; one probe per
 // settled reveal, never per layout pass.
 const COLLAPSE_STATE_PROBE_DEBOUNCE_MS = 250
-// How long after a reveal decision a later model write may still correct it.
-// Inside this window the view is still settling from an open / file switch and
-// the user is waiting for it; past it they are reading, and re-revealing
-// because a coding agent touched the file would move the viewport out from
-// under them.
-const REVEAL_CORRECTION_WINDOW_MS = 3000
 // @monaco-editor/react owns the widget's disposal and Monaco's menu /
 // context-key emitters fire late; disposing a model out from under them during
 // teardown throws. Same 100 ms the close path has always used.
 const MODEL_SWEEP_DEFER_MS = 100
+// Keys that express an intent to move the viewport. Typing an ordinary
+// character does not claim the viewport — only navigation does.
+const VIEWPORT_INTENT_KEYS = new Set([
+  'PageUp', 'PageDown', 'Home', 'End',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'
+])
 // Subpage-switch-back restore (afterEnter) polls for the previously selected
 // file to reappear in the freshly loaded diff list. On a fast host the list is
 // ready within a few hundred ms, but a cold diff file-list spawn behind an EDR
@@ -857,6 +858,14 @@ type GitDiffDebugApi = {
     diffCurrent: boolean
   } | null
   getLiveDiffModelCount: () => number
+  simulateUserViewportIntent: () => boolean
+  getRevealStaleState: () => {
+    appliedSignature: string | null
+    currentSignature: string | null
+    stale: boolean
+    userOwnsViewport: boolean
+    diffCurrent: boolean
+  } | null
   getCollapseState: () => {
     totalLines: number
     laidOutLines: number
@@ -1575,11 +1584,27 @@ export function GitDiffViewer({
   // A diff is current only when both still match.
   const modelWriteSeqRef = useRef(0)
   const diffComputedAtRef = useRef<{ seq: number; originalUri: string; modifiedUri: string } | null>(null)
-  // Set when a reveal had to be applied against a diff that was NOT provably
-  // current. The next `onDidUpdateDiff` for the same fileKey re-applies it —
-  // one corrective chance, so a misjudged gate degrades into a single viewport
-  // correction instead of stranding the user away from the change.
-  const provisionalRevealRef = useRef<{ fileKey: string; reason: string } | null>(null)
+  // ── Reveal reconciliation state ───────────────────────────────────────────
+  // Which content the currently-applied viewport position was computed from.
+  // Written ONLY at the instant a position is applied, with the signature it
+  // was computed from — that is what makes "stale" a pure state comparison
+  // (see resolveRevealReconcile) instead of a question about instants.
+  //
+  // This supersedes the earlier one-shot `provisionalRevealRef`: that repaired
+  // exactly one case (a reveal known to be provisional at apply time), whereas
+  // staleness is the general condition — it also arises when content lands
+  // AFTER a decision that was perfectly honest when it was made.
+  const revealAppliedRef = useRef<{
+    fileKey: string
+    signature: string | null
+    reason: string
+    at: number
+  } | null>(null)
+  // The user scrolled since the position was applied, so the viewport is
+  // theirs. Set by the scroll listener (which already ignores our own
+  // programmatic scrolls via suppressScrollCaptureRef), cleared whenever we
+  // apply a position.
+  const userOwnsViewportRef = useRef(false)
   // Last measured hideUnchangedRegions outcome (autotest probe + trace).
   const collapseStateRef = useRef<{
     totalLines: number
@@ -4256,24 +4281,12 @@ export function GitDiffViewer({
       // that consumes the diff between here and the next onDidUpdateDiff would
       // be reading the previous content's answer.
       modelWriteSeqRef.current += 1
-      // A reveal decision taken moments ago described the body being replaced
-      // right now. It was honest when it was made — the models held that body
-      // and Monaco's diff described them — so the currency gate had nothing to
-      // object to; the staleness only comes into existence HERE. Re-arm it so
-      // the recompute re-reveals against the body the user will actually see.
-      // Bounded to a short window after the decision: past it the user is
-      // reading rather than waiting for the view to settle, and yanking the
-      // viewport out from under them because an agent touched the file would
-      // be worse than leaving it where they put it.
-      const lastDecision = lastRestoreDecisionRef.current
-      if (
-        lastDecision &&
-        lastDecision.action === 'reveal-first-change' &&
-        lastDecision.fileKey === fileKey &&
-        Date.now() - lastDecision.at <= REVEAL_CORRECTION_WINDOW_MS
-      ) {
-        provisionalRevealRef.current = { fileKey, reason: lastDecision.reason ?? 'content-changed' }
-      }
+      // Nothing to arm here any more. A reveal applied before this write
+      // recorded the signature it was computed from; this write changes the
+      // live signature, which makes that record stale BY COMPARISON — no
+      // deadline, no window, no judgement about whether the user is "still
+      // waiting for the view to settle". Reconciliation picks it up on the
+      // next diff (see resolveRevealReconcile).
       try {
         if (plan.originalChanged) originalModel.setValue(nextOriginalContent)
         if (plan.modifiedChanged) modifiedModel.setValue(nextModifiedContent)
@@ -4309,8 +4322,19 @@ export function GitDiffViewer({
       const rebuiltViewModel = (plan.originalChanged || plan.modifiedChanged) &&
         diffComputedAtRef.current !== null
       if (rebuiltViewModel) {
+        // `setModel` resets the scroll offset, and `restoreViewState` below
+        // restores a whole view state (cursor, folding, collapse) whose pixel
+        // mapping depends on a layout that has just changed — occasionally
+        // landing far from where the user was (measured 1212 px off on a
+        // 6900 px document, 1 trial in 24, while the other 23 drifted 29 px).
+        // The offset itself is the thing the user cares about, so carry it
+        // explicitly rather than inferring it from the restored state.
+        const scrollTopBeforeRebuild = modifiedEditor.getScrollTop()
         try {
           editor.setModel({ original: originalModel, modified: modifiedModel })
+          if (scrollTopBeforeRebuild > 0) {
+            modifiedEditor.setScrollTop(scrollTopBeforeRebuild)
+          }
           // The previous stamp described a diff that no longer exists.
           diffComputedAtRef.current = null
           perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_VIEW_MODEL_REBUILT, {
@@ -5022,6 +5046,9 @@ export function GitDiffViewer({
       warmRevealSettleRunIdRef.current += 1
       pendingFirstChangeRevealRef.current = null
       pendingViewportGoalRef.current = null
+      // A new file: no position applied yet, and no viewport the user owns.
+      revealAppliedRef.current = null
+      userOwnsViewportRef.current = false
       enterDiffWaiting()
     }
     if (memory) {
@@ -5387,33 +5414,61 @@ export function GitDiffViewer({
         diffNavigationIndexRef.current = -1
         scheduleDiffHunkActionWidgetInstall('diff-updated')
         const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
-        // One corrective chance: a reveal that had to run against a diff we
-        // could not prove current gets re-applied now that a real one landed.
-        // Without this, `requestDiffRevealRestore` above is a no-op (the phase
-        // is already 'idle') and a misjudged gate strands the viewport for the
-        // rest of the session — exactly what the 2026-07-26 bundle recorded.
-        const provisional = provisionalRevealRef.current
-        if (provisional) {
-          // Disarm only when it is spent or can never apply — NOT merely
-          // because this particular onDidUpdateDiff arrived. Monaco emits one
-          // per computation, and a write landing between two computations
-          // makes an intermediate emission fail the currency check; consuming
-          // the arming there would throw away the correction and leave the
-          // viewport on the superseded body with nothing left to fix it.
-          if (provisional.fileKey !== liveFileKey) {
-            provisionalRevealRef.current = null
-          } else if (isDiffCurrentForBoundModels(editor)) {
-            provisionalRevealRef.current = null
+        // ── Reconciliation ────────────────────────────────────────────────
+        // Replaces the earlier one-shot "corrective reveal". That repaired a
+        // single case — a reveal known at apply time to be provisional —
+        // whereas staleness is the general condition: it equally arises when
+        // content lands AFTER a decision that was perfectly honest when made.
+        // Deciding here is a pure comparison of "what the applied position was
+        // computed from" against "what is loaded now"; no instants involved.
+        const liveFile = selectedFileRef.current
+        const applied = revealAppliedRef.current
+        if (liveFile && liveFileKey && applied && applied.fileKey === liveFileKey) {
+          const liveState = fileContentsRef.current[liveFileKey]
+          const currentSignature = liveState && !liveState.isBinary && !liveState.loading
+            ? buildDiffSignature(
+              liveState.originalContent ?? '',
+              liveState.draftContent ?? liveState.modifiedContent ?? ''
+            )
+            : null
+          const action = resolveRevealReconcile({
+            appliedSignature: applied.signature,
+            currentSignature,
+            diffCurrentForBoundModels: isDiffCurrentForBoundModels(editor),
+            userOwnsViewport: userOwnsViewportRef.current
+          })
+          if (action !== 'none') {
+            perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_REVEAL_RECONCILE, {
+              cwd: activeCwd ?? '',
+              terminalId,
+              filename: liveFile.filename,
+              changeType: liveFile.changeType,
+              action,
+              userOwnsViewport: userOwnsViewportRef.current,
+              appliedReason: applied.reason
+            })
+          }
+          if (action === 'reconcile-silent') {
             const changes = editor.getLineChanges()
             if (changes && changes.length > 0) {
               const firstChange = changes[0]
               const targetLine = firstChange.modifiedStartLineNumber
                 || firstChange.originalStartLineNumber
                 || 1
+              suppressScrollCaptureRef.current = true
               revealLineNearTopSafe(editor.getModifiedEditor(), targetLine)
+              // Re-record: the position now describes THIS content.
+              revealAppliedRef.current = {
+                fileKey: liveFileKey,
+                signature: currentSignature,
+                reason: applied.reason,
+                at: Date.now()
+              }
+              userOwnsViewportRef.current = false
+              window.setTimeout(() => { suppressScrollCaptureRef.current = false }, 120)
               lastRestoreDecisionRef.current = {
                 action: 'reveal-first-change',
-                reason: provisional.reason,
+                reason: applied.reason,
                 trigger: 'deferred-diff-computed',
                 fileKey: liveFileKey,
                 at: Date.now(),
@@ -5423,12 +5478,33 @@ export function GitDiffViewer({
                 cwd: activeCwd ?? '',
                 terminalId,
                 action: 'reveal-first-change',
-                reason: provisional.reason,
+                reason: applied.reason,
                 trigger: 'deferred-diff-computed',
                 revealTargetLine: targetLine,
-                filename: selectedFileRef.current?.filename,
+                filename: liveFile.filename,
+                changeType: liveFile.changeType,
+                diffCurrent: true,
                 corrective: true
               })
+            }
+          } else if (action === 'notify') {
+            // The viewport is the user's — moving it would take away the one
+            // thing silent convergence can destroy. Tell them instead; the
+            // banner's existing "jump to change" action re-reveals on demand.
+            setDiffRestoreNotice({
+              type: 'changed',
+              message: t('gitDiff.restore.contentUpdatedExternally', { fileName: liveFile.filename }),
+              fileName: liveFile.filename
+            })
+            // Stop re-notifying for this same content: record that the applied
+            // position now corresponds to the live signature as far as
+            // reconciliation is concerned. The user has been told; nagging on
+            // every subsequent recompute of the same body would be noise.
+            revealAppliedRef.current = {
+              fileKey: liveFileKey,
+              signature: currentSignature,
+              reason: applied.reason,
+              at: Date.now()
             }
           }
         }
@@ -5601,6 +5677,33 @@ export function GitDiffViewer({
       }))
 
       // Scroll capture (replacing DOM scroll monitoring)
+      // ── Viewport ownership ────────────────────────────────────────────────
+      // Deliberately NOT derived from onDidScrollChange. That event fires for
+      // every scroll-offset change including ones nobody asked for: collapse
+      // layout settling, a view-model rebuild resetting scroll, content-height
+      // changes as regions expand. Inferring intent from it marked the viewport
+      // as the user's when Monaco had merely re-laid-out — measured as 90
+      // `notify` against 4 `reconcile-silent` in a regression run, i.e. almost
+      // every convergence degraded into a banner. `suppressScrollCaptureRef`
+      // cannot fix that: it guards the code paths that KNOW they are scrolling,
+      // and layout-induced scrolls belong to none of them.
+      //
+      // Real input events carry the intent unambiguously.
+      const modifiedDom = modifiedEditor.getDomNode()
+      if (modifiedDom) {
+        const claimViewport = () => { userOwnsViewportRef.current = true }
+        modifiedDom.addEventListener('wheel', claimViewport, { passive: true })
+        const onKey = (event: KeyboardEvent) => {
+          if (VIEWPORT_INTENT_KEYS.has(event.key)) claimViewport()
+        }
+        modifiedDom.addEventListener('keydown', onKey)
+        diffEditorBindingDisposablesRef.current.push({
+          dispose: () => {
+            modifiedDom.removeEventListener('wheel', claimViewport)
+            modifiedDom.removeEventListener('keydown', onKey)
+          }
+        })
+      }
       diffEditorBindingDisposablesRef.current.push(modifiedEditor.onDidScrollChange(() => {
         if (suppressScrollCaptureRef.current) return
         if (diffScrollCaptureTimerRef.current) {
@@ -5873,14 +5976,11 @@ export function GitDiffViewer({
       // old scroll offset (2026-07-18 warm-reopen staleness bundle).
       const changes = editor.getLineChanges()
       // The reveal target comes from `getLineChanges()`, which answers about
-      // whatever content Monaco last diffed. On the paths that can reach here
-      // before a recompute lands (the safety timeout, a model write racing the
-      // 200 ms debounce) the answer belongs to the PREVIOUS content, so record
-      // that fact and let onDidUpdateDiff correct the viewport once.
-      const diffCurrent = isDiffCurrentForBoundModels(editor)
-      if (!diffCurrent && fileKey && decision?.action === 'reveal-first-change') {
-        provisionalRevealRef.current = { fileKey, reason: decision.reason }
-      }
+      // whatever content Monaco last diffed — on the timeout path, or when a
+      // model write races the 200 ms debounce, that is the PREVIOUS content.
+      // We no longer try to detect that here: §  the applied signature is
+      // recorded below, and a mismatch against the live content is what
+      // reconciliation acts on.
       if (changes && changes.length > 0) {
         const firstChange = changes[0]
         const targetLine = firstChange.modifiedStartLineNumber || firstChange.originalStartLineNumber || 1
@@ -5923,6 +6023,26 @@ export function GitDiffViewer({
       revealTargetLine
     }
     lastRestoreDecisionRef.current = decisionRecord
+    // Record WHICH content this position was computed from. This single write
+    // is what makes staleness a state comparison instead of a race: whatever
+    // trigger got us here, and whether or not its diff was current, the record
+    // is honest about its own provenance and reconciliation can judge it later.
+    if (fileKey) {
+      const appliedState = fileContentsRef.current[fileKey]
+      revealAppliedRef.current = {
+        fileKey,
+        signature: appliedState && !appliedState.isBinary && !appliedState.loading
+          ? buildDiffSignature(
+            appliedState.originalContent ?? '',
+            appliedState.draftContent ?? appliedState.modifiedContent ?? ''
+          )
+          : null,
+        reason: decisionRecord.reason ?? 'no-entry',
+        at: Date.now()
+      }
+      // We just placed the viewport; the user has not touched it since.
+      userOwnsViewportRef.current = false
+    }
     perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_RESTORE_DECISION, {
       cwd: activeCwd ?? '',
       terminalId,
@@ -6861,6 +6981,42 @@ export function GitDiffViewer({
         return monaco.editor.getModels()
           .filter((model) => model.uri.toString().startsWith(GIT_DIFF_MODEL_URI_PREFIX))
           .length
+      },
+      // The reveal-reconciliation invariant, readable at ANY moment: `stale`
+      // false must mean the applied position was computed from the content
+      // currently loaded. Being a pure state comparison it needs no timing to
+      // observe, which is what lets every existing runner double as a detector.
+      // Dispatches a REAL wheel event on the editor DOM so the test travels the
+      // same listener a user does. Asserting ownership by poking the ref would
+      // prove nothing about whether genuine input is recognised.
+      simulateUserViewportIntent: () => {
+        const dom = diffEditorRef.current?.getModifiedEditor().getDomNode()
+        if (!dom) return false
+        dom.dispatchEvent(new WheelEvent('wheel', { deltaY: 240, bubbles: true, cancelable: true }))
+        return true
+      },
+      getRevealStaleState: () => {
+        const file = selectedFileRef.current
+        const editor = diffEditorRef.current
+        if (!file) return null
+        const fileKey = getFileKey(file)
+        const state = fileContentsRef.current[fileKey]
+        const currentSignature = state && !state.isBinary && !state.loading
+          ? buildDiffSignature(
+            state.originalContent ?? '',
+            state.draftContent ?? state.modifiedContent ?? ''
+          )
+          : null
+        const applied = revealAppliedRef.current
+        const appliedSignature = applied && applied.fileKey === fileKey ? applied.signature : null
+        return {
+          appliedSignature,
+          currentSignature,
+          stale: appliedSignature !== null && currentSignature !== null &&
+            appliedSignature !== currentSignature,
+          userOwnsViewport: userOwnsViewportRef.current,
+          diffCurrent: editor ? isDiffCurrentForBoundModels(editor) : false
+        }
       },
       // Measured on demand rather than served from the debounced probe so a
       // test never races the 250 ms emission window.

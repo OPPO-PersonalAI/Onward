@@ -174,6 +174,18 @@ export interface GitDiffDebugApi {
   // Live onward-git-diff model count — bounds the leak that content-identity
   // URIs create when the working tree keeps changing.
   getLiveDiffModelCount?: () => number
+  // Dispatches a real wheel event on the diff editor DOM — the same path a
+  // user's scroll takes, so a test cannot pass by poking internal state.
+  simulateUserViewportIntent?: () => boolean
+  // Reveal-reconciliation invariant probe: `stale === false` must mean the
+  // applied viewport position was computed from the content loaded right now.
+  getRevealStaleState?: () => {
+    appliedSignature: string | null
+    currentSignature: string | null
+    stale: boolean
+    userOwnsViewport: boolean
+    diffCurrent: boolean
+  } | null
   // hideUnchangedRegions outcome, measured on demand.
   getCollapseState?: () => {
     totalLines: number

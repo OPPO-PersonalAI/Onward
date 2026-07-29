@@ -295,6 +295,67 @@ export function shouldCompleteWarmReveal(input: WarmRevealGateInput): boolean {
   return input.diffComputedForBoundModels
 }
 
+// ── Reveal reconciliation ────────────────────────────────────────────────────
+//
+// The problem this replaces: the reveal cycle can be advanced from four
+// different places (`diff-computed`, `model-bound`, `warm-ready`, `timeout`),
+// and each carried its own local notion of "am I allowed to decide now". Two
+// of them could not honour the contract at all — `timeout` fires on a clock,
+// and `model-bound` fires off an in-flight click-latency measurement — so
+// whether the viewport landed correctly depended on which path happened to win
+// a race. Reasoning about that requires reasoning about instants, which is
+// exactly where defects kept coming from.
+//
+// The reconciliation model removes instants from the correctness argument.
+// Every applied position records WHICH content it was computed from. A
+// position whose recorded signature no longer matches the live content is
+// stale — a pure state comparison, checkable at any moment, with no notion of
+// "when". Staleness then converges: silently when the user has not taken
+// ownership of the viewport, and by telling them when they have (moving the
+// viewport out from under someone who scrolled there deliberately is the one
+// loss silent convergence could cause).
+//
+// The consequence worth stating: `timeout` and `model-bound` no longer need to
+// be correct. They may apply a provisional position and record whatever
+// signature they computed from; reconciliation repairs it once a real diff
+// lands. Which trigger won the race stops being a correctness question.
+//
+// Invariant, assertable continuously and without constructing any timing:
+//   not stale  =>  the applied position was computed from the current content
+
+export type RevealReconcileAction =
+  /** Applied position still describes the live content (or nothing is applied). */
+  | 'none'
+  /** Stale, but Monaco's diff does not yet describe the bound models — try again on the next diff. */
+  | 'wait'
+  /** Stale and repairable without the user noticing. */
+  | 'reconcile-silent'
+  /** Stale, but the user owns the viewport — leave it alone and surface it instead. */
+  | 'notify'
+
+export type RevealReconcileInput = {
+  /** Signature of the content the applied position was computed from; null = nothing applied yet. */
+  appliedSignature: string | null
+  /** Signature of the content currently loaded; null = unknown (binary / still loading). */
+  currentSignature: string | null
+  /** Monaco's computed diff describes the models bound right now. */
+  diffCurrentForBoundModels: boolean
+  /** The user scrolled since the position was applied, so the viewport is theirs. */
+  userOwnsViewport: boolean
+}
+
+export function resolveRevealReconcile(input: RevealReconcileInput): RevealReconcileAction {
+  // Nothing applied yet: the ordinary reveal cycle owns this file, not reconciliation.
+  if (input.appliedSignature === null) return 'none'
+  // Content identity unknown (binary, or a body still in flight) — comparing
+  // against it would be comparing against a placeholder.
+  if (input.currentSignature === null) return 'none'
+  if (input.appliedSignature === input.currentSignature) return 'none'
+  // Stale from here down.
+  if (!input.diffCurrentForBoundModels) return 'wait'
+  return input.userOwnsViewport ? 'notify' : 'reconcile-silent'
+}
+
 export function resolveGitDiffSnapshotScrollTop(
   scrollTop: number | null | undefined,
   scrollHeight: number,

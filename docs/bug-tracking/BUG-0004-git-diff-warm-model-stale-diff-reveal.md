@@ -220,6 +220,102 @@ Every one was caught by a test; none reached a commit. The pattern is uniform an
 
 GDS-52's original blind spot — v1 and v2 both editing line 600, so a stale read and a fresh read produce the same number — was reproduced by me twice more: in GDS-54's first draft (identical bytes per trial) and in the MT suite (same). **A case whose correct and incorrect answers are indistinguishable cannot fail.** Every fixture here now moves the edit between versions/trials so a stale read is a wrong ANSWER, not a coincidence.
 
+## 10. Round 2 — the reconciliation model (2026-07-28/29)
+
+The § 9 fix made the reveal *correct*; it did not make it *simple*. Four trigger
+paths still each carried their own local answer to "may I decide now", two of
+which structurally could not honour the contract (`timeout` decides on a clock;
+`model-bound` decides off an in-flight click-latency measurement, i.e. the
+viewport's correctness depended on whether performance instrumentation happened
+to be running). Round 2 replaced that with a state that converges.
+
+### The shape
+
+Every applied position records WHICH content it was computed from. A record
+that no longer matches the live content is **stale** — a pure comparison,
+checkable at any instant, with no notion of "when". Staleness then converges,
+silently unless the user owns the viewport.
+
+    not stale  =>  the applied position was computed from the current content
+
+`resolveRevealReconcile()` is the whole decision, four rows, unit-pinned
+exhaustively (RRC-01..08, including a 36-combination totality check).
+
+**What this deleted**: `REVEAL_CORRECTION_WINDOW_MS` (a 3 s deadline — pure
+instant-reasoning), the entire `provisionalRevealRef` mechanism (it repaired one
+case; staleness is the general condition), and the requirement that the four
+triggers be correct at all. They may apply a provisional position and record
+their own provenance; convergence repairs it. **Which trigger wins a race
+stopped being a correctness question.**
+
+### Three more defects, and the pattern behind all three
+
+| # | Defect | The Monaco API I leaned on | What it actually guarantees | What I assumed |
+|---|---|---|---|---|
+| 9 | Our own reconciling reveal marked the viewport as user-owned, so only the FIRST convergence was silent and every later one degraded into a banner | `onDidScrollChange` | the scroll offset changed | the user scrolled |
+| 10 | MT-06's premise ("user scrolled away") was unachievable on its own fixture — a 1200-line file with one edit collapses to ~9 laid-out lines, so `scrollToFraction(1)` left `scrollTop` at 0 | — | — | that a collapsed diff is scrollable |
+| 11 | The view-model rebuild lost the user's scroll offset, 1212 px on a 6900 px document, 1 trial in 24 | `restoreViewState` | the view state is approximately restored | the scroll offset is preserved exactly |
+
+**The pattern**: relying on a mechanism that is *nearly* what you need to carry a
+meaning it does not promise. Round 1 had the same shape with
+`getLineChanges() !== null` ("a diff was computed once" ≠ "this diff is
+current"). Four instances across two rounds.
+
+**The remedy is the same every time: stop inferring, carry the quantity
+explicitly.** Content signature instead of "is the diff current". Real `wheel`
+and navigation-key events instead of scroll-offset changes. `getScrollTop()`
+captured and re-applied instead of `restoreViewState`.
+
+### What found them — not assertion failures
+
+Defect 9 was found by **branch-frequency analysis**, with every assertion green:
+`notify` fired 49 times against `reconcile-silent` 4 across a regression run.
+The assertions all checked that the *final state* was right, and it was — the
+implementation reached a correct end state by a wrong route (banner instead of
+silent convergence).
+
+> Assertions check whether the result is right. Frequency distributions check
+> whether the route is right. An implementation that reaches a correct result by
+> the wrong route is invisible to the first and obvious to the second.
+
+Defect 10 is worse than an uncovered path: MT-06 had complete assertions and had
+been *passing*, but its precondition never held, so it was exercising a scenario
+that did not exist. **A case whose premise cannot be established has zero
+coverage while looking fully covered** — more dangerous than no test, because it
+advertises protection that is not there.
+
+Defect 11 showed as a **bimodal distribution**: 23 trials at 29 px drift, one at
+1212 px. The bimodality was the signature; after the fix all 24 sit at 29 px.
+
+### Coverage measured by execution, not by assertion count
+
+Verified from trace-event counts over a regression run (a path that never
+executes is uncovered no matter how many assertions name it):
+
+| Path | Executions | |
+|---|---|---|
+| `model-sync` (promoted tier) | 111 | ✓ |
+| `reveal-reconcile` | 132 silent + 10 notify | ✓ both live branches |
+| `view-model-rebuilt` | 24 | ✓ |
+| `collapse-state` | 24 | ✓ |
+| `model-sweep` | 50 detach + 3 bind | ✓ |
+| triggers | diff-computed 44 / model-bound 14 / deferred 9 / timeout 5 | ✓ all four |
+| `wait` branch | 0 | label absent, but its only failure mode (never converging) is what INV-5 asserts — not manufacturing a case to light up a label |
+
+### Assertions added
+
+- **INV-5** in the mutation-timing matrix: `getRevealStaleState().stale === false`
+  after settle. A pure state comparison, so it is meaningful at every instant of
+  every case rather than only in the scenario it was written for.
+- **MT-05**: two consecutive external writes with no user scroll between them —
+  both must converge silently. The second is the defect-9 gate.
+- **MT-06**: rewritten onto a scattered-edit fixture (collapsed view stays
+  scrollable) and driven by a real `WheelEvent` through
+  `simulateUserViewportIntent()`, so the test travels the listener a user
+  travels rather than poking internal state. Gates ownership detection AND
+  offset preservation, with the drift budget expressed at document scale plus an
+  explicit "was not yanked to the reveal position".
+
 ## Update history (append-only)
 
 | Date | Author | Change |

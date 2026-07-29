@@ -872,6 +872,16 @@ export const PERF_TRACE_EVENT = {
   // changed a side, so it is selection / external-write frequency, not a hot
   // path. Diagnostic tier, ph='i'.
   RENDERER_GIT_DIFF_VIEW_MODEL_REBUILT: 'renderer:git-diff.view-model-rebuilt',
+  // Reveal reconciliation outcome. The applied viewport position records which
+  // content it was computed from; when that no longer matches what is loaded,
+  // this event says how it converged: `wait` (diff not yet current),
+  // `reconcile-silent` (repositioned without disturbing the user), or `notify`
+  // (the user had scrolled, so the viewport is theirs and we surfaced it
+  // instead). It exists because staleness is now a state that converges rather
+  // than an instant that had to be got right — the trace should show which
+  // path each convergence took. Emitted only when action !== 'none', i.e. on
+  // real staleness, not on every recompute. Diagnostic tier, ph='i'.
+  RENDERER_GIT_DIFF_REVEAL_RECONCILE: 'renderer:git-diff.reveal-reconcile',
   RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
   RENDERER_GIT_DIFF_CACHE_INVALIDATION: 'renderer:git-diff.cache-invalidation',
   // Optimistic local list patch after a known single-file mutation

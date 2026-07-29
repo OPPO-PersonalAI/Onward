@@ -46,6 +46,11 @@
  *   INV-3  a 1200-line file with one edited line is collapsed
  *   INV-4  the live onward-git-diff model count stays bounded (the leak that
  *          content-identity URIs would otherwise create under a mutating tree)
+ *   INV-5  the applied viewport position was computed from the content that is
+ *          loaded now (`getRevealStaleState().stale === false`). This one is a
+ *          pure state comparison rather than a scenario assertion, so it is
+ *          meaningful at every instant of every case — it is the detector the
+ *          four scattered trigger conditions never had.
  *
  * ── Aggregation ───────────────────────────────────────────────────────────
  * Every case is boolean-correctness and timing-sensitive (the defect is a race
@@ -75,6 +80,9 @@ const TRIALS = 3
 // draft-protected pair, so anything beyond a small constant means superseded
 // models are accumulating.
 const MAX_LIVE_DIFF_MODELS = 6
+// Editor line height (font size 13 x 1.5, rounded) — used only to express the
+// viewport-drift budget in lines rather than raw pixels.
+const DIFF_LINE_HEIGHT_PX = 20
 
 function dirOf(p: string): string {
   const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
@@ -141,6 +149,16 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
   // diff" into a wrong ANSWER rather than an indistinguishable one.
   const highForTrial = (trial: number) => HIGH - trial * 60
   const editedHighForTrial = (trial: number) => bodyWithEditAt(highForTrial(trial))
+  // Scattered edits, so hideUnchangedRegions still leaves a tall document.
+  // A single-edit file collapses to ~9 laid-out lines, i.e. a viewport with
+  // nothing to scroll — "the user scrolled away" is unestablishable on it.
+  const scatteredBody = (marker: string): string => {
+    const lines = Array.from({ length: TALL }, (_, i) => `baseline line ${i + 1}`)
+    for (let line = 40; line < TALL; line += 40) {
+      lines[line - 1] = `baseline line ${line} EDITED-${marker}`
+    }
+    return lines.join('\n') + '\n'
+  }
 
   // ── UI drivers ────────────────────────────────────────────────────────────
   const api = () => window.__onwardGitDiffDebug
@@ -179,7 +197,8 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
     const bound = api()?.getBoundModelUris?.() ?? null
     const collapse = api()?.getCollapseState?.() ?? null
     const liveModels = api()?.getLiveDiffModelCount?.() ?? -1
-    return { decision, bound, collapse, liveModels }
+    const revealState = api()?.getRevealStaleState?.() ?? null
+    return { decision, bound, collapse, liveModels, revealState }
   }
   type Probe = Awaited<ReturnType<typeof settleAndProbe>>
 
@@ -196,7 +215,13 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
     // INV-3
     collapsed: Boolean(p.collapse?.collapsed && p.collapse.hiddenLineCount > 500),
     // INV-4
-    modelsBounded: p.liveModels >= 0 && p.liveModels <= MAX_LIVE_DIFF_MODELS
+    modelsBounded: p.liveModels >= 0 && p.liveModels <= MAX_LIVE_DIFF_MODELS,
+    // INV-5 — the reconciliation invariant. Unlike INV-1..4 this one needs no
+    // scenario to be meaningful: it is a pure state comparison, so it holds (or
+    // does not) at every instant of every case. `stale` still true after the
+    // view has settled means a position computed from content that no longer
+    // exists was left standing — the whole defect class in one boolean.
+    notStale: p.revealState !== null && !p.revealState.stale
   })
   const allInvariants = (p: Probe) => Object.values(invariantsHold(p)).every(Boolean)
   const near = (value: number | null | undefined, target: number, slack = 12) =>
@@ -248,7 +273,8 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
           t, selected, decided, expected: highForTrial(t),
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
           trigger: probe.decision?.trigger ?? null,
-          ...invariantsHold(probe), liveModels: probe.liveModels, ok
+          ...invariantsHold(probe), liveModels: probe.liveModels,
+          revealState: probe.revealState, ok
         })
         await closeDiff(`MT-01-t${t}-close`)
       }
@@ -301,7 +327,7 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
           t, selected, decided, expected: expect,
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
           onCurrent, onStale, trigger: probe.decision?.trigger ?? null,
-          ...invariantsHold(probe), liveModels: probe.liveModels, ok
+          ...invariantsHold(probe), liveModels: probe.liveModels, revealState: probe.revealState, ok
         })
         await closeDiff(`MT-02-${label}-t${t}-final-close`)
       }
@@ -341,7 +367,7 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
           t, selected, decided,
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
           trigger: probe.decision?.trigger ?? null,
-          ...invariantsHold(probe), liveModels: probe.liveModels, ok
+          ...invariantsHold(probe), liveModels: probe.liveModels, revealState: probe.revealState, ok
         })
         await closeDiff(`MT-03-t${t}-close`)
       }
@@ -377,7 +403,7 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
           t, selected, decided,
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
           trigger: probe.decision?.trigger ?? null,
-          ...invariantsHold(probe), liveModels: probe.liveModels, ok
+          ...invariantsHold(probe), liveModels: probe.liveModels, revealState: probe.revealState, ok
         })
         await closeDiff(`MT-04-t${t}-close`)
       }
@@ -405,52 +431,89 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
         await sleep(900)
         const selected = selectBy(rel, 'unstaged')
         await sleep(1200)
+        // Two consecutive external writes with NO user scroll in between.
+        // Both must converge silently. The second one is the assertion that
+        // matters: our own reconciling reveal must not be mistaken for a user
+        // scroll, or the viewport gets marked as the user's and every later
+        // convergence degrades into a banner — measured 49 notify vs 4 silent
+        // before the suppression fix, with every test still green.
         await write(rel, editedHighForTrial(t))
+        await sleep(900)
+        const midOwns = api()?.getRevealStaleState?.()?.userOwnsViewport ?? null
+        await write(rel, bodyWithEditAt(highForTrial(t) - 30))
         const probe = await settleAndProbe()
-        const ok = Boolean(selected && allInvariants(probe))
+        const stillUnowned = probe.revealState?.userOwnsViewport === false
+        const ok = Boolean(selected && allInvariants(probe) && midOwns === false && stillUnowned)
         if (ok) passed += 1
         trials.push({
-          t, selected,
+          t, selected, midOwns, stillUnowned,
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
-          ...invariantsHold(probe), liveModels: probe.liveModels, ok
+          ...invariantsHold(probe), liveModels: probe.liveModels, revealState: probe.revealState, ok
         })
         await closeDiff(`MT-05-t${t}-close`)
       }
       aggregate('MT-05-change-while-viewing-keeps-models-current', trials, passed,
-        'P5 while-viewing: the worktree side updates in place, so this is the case the diff-currency gate (not the URI identity) has to carry')
+        'P5 while-viewing: the worktree side updates in place, so this is the case the diff-currency gate carries. Also gates that a SILENT reconcile does not mark the viewport as user-owned — otherwise only the first convergence is silent and the rest become banners')
       await resetTarget(manifest.targets.whileViewing)
     }
 
     // ── MT-06 (P6): changed after the user scrolled away ───────────────────
+    // Uses the SCATTERED target: a single-edit file collapses to a viewport
+    // with nothing to scroll, so the case's own premise cannot be established
+    // on it (measured scrollTop 0 after scrollToFraction(1)).
     {
-      const rel = manifest.targets.afterScroll
+      const rel = manifest.targets.scatteredScroll
       const trials: Array<Record<string, unknown>> = []
       let passed = 0
       for (let t = 0; t < TRIALS && !cancelled(); t += 1) {
         await resetTarget(rel)
-        await write(rel, editedLow)
+        await write(rel, scatteredBody(`V1-${t}`))
         await sleep(300)
         await openDiff(`MT-06-t${t}-open`)
         await listed(`MT-06-t${t}-listed`, rel, 'unstaged')
         await sleep(900)
         const selected = selectBy(rel, 'unstaged')
         await sleep(1200)
-        api()?.scrollToFraction(1)
-        await sleep(300)
-        await write(rel, editedHighForTrial(t))
+        // Genuine input: a real wheel event on the editor DOM, the same path a
+        // user's scroll takes. Ownership derived from onDidScrollChange would
+        // have been claimed by layout settling long before this point.
+        api()?.simulateUserViewportIntent?.()
+        api()?.scrollToFraction(0.8)
+        await sleep(400)
+        const ownsAfterScroll = api()?.getRevealStaleState?.()?.userOwnsViewport ?? null
+        const scrolledTop = api()?.getScrollTop() ?? -1
+        await write(rel, scatteredBody(`V2-${t}`))
         const probe = await settleAndProbe()
-        const ok = Boolean(selected && allInvariants(probe))
+        const finalTop = api()?.getScrollTop() ?? -1
+        const metrics = api()?.getScrollMetrics() ?? null
+        const maxTop = metrics?.maxScrollTop ?? 0
+        const drift = Math.abs(finalTop - scrolledTop)
+        // The contract is "convergence did not move the user to a DIFFERENT
+        // part of the document", not "scrollTop is byte-identical". We take the
+        // notify branch here and call no scroll API at all, but Monaco still
+        // settles its collapse layout after a recompute, which shifts the
+        // offset by a line or two (measured 29 px against a ~5.5k px document).
+        // A genuine breach looks nothing like that: it is a jump to the first
+        // change, i.e. thousands of pixels, usually near the top. So gate on
+        // "stayed in place at document scale" AND on "did not land where a
+        // reveal would have put it".
+        const driftBudget = Math.max(2 * DIFF_LINE_HEIGHT_PX, maxTop * 0.02)
+        const stayedInPlace = scrolledTop > 0 && drift <= driftBudget
+        const notYankedToReveal = finalTop > maxTop * 0.5
+        const viewportPreserved = stayedInPlace && notYankedToReveal
+        const ok = Boolean(selected && allInvariants(probe) && ownsAfterScroll === true && viewportPreserved)
         if (ok) passed += 1
         trials.push({
-          t, selected,
+          t, selected, ownsAfterScroll, scrolledTop, finalTop, drift, driftBudget,
+          maxTop, stayedInPlace, notYankedToReveal, viewportPreserved,
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
-          ...invariantsHold(probe), liveModels: probe.liveModels, ok
+          ...invariantsHold(probe), liveModels: probe.liveModels, revealState: probe.revealState, ok
         })
         await closeDiff(`MT-06-t${t}-close`)
       }
       aggregate('MT-06-change-after-scroll-away-keeps-models-current', trials, passed,
-        'P6 after-scroll: a saved offset belongs to content the user has now not seen; the view must still rest on current models')
-      await resetTarget(manifest.targets.afterScroll)
+        'P6 after-scroll: the user owns the viewport, so convergence must NOT move it — it notifies instead. Gates both halves: ownership is detected, and the scroll offset survives the external write')
+      await resetTarget(manifest.targets.scatteredScroll)
     }
 
     // ── MT-07 (P7): changed during close, checked on reopen ─────────────────
@@ -488,7 +551,7 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
           t, selected, decided, expected: highForTrial(t),
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
           trigger: probe.decision?.trigger ?? null,
-          ...invariantsHold(probe), liveModels: probe.liveModels, ok
+          ...invariantsHold(probe), liveModels: probe.liveModels, revealState: probe.revealState, ok
         })
         await closeDiff(`MT-07-t${t}-final-close`)
       }
@@ -530,7 +593,7 @@ export async function testGitDiffMutationTiming(ctx: AutotestContext): Promise<T
         trials.push({
           t, selected, beforeModels, afterModels, bounded,
           revealTargetLine: probe.decision?.revealTargetLine ?? null,
-          ...invariantsHold(probe), ok
+          ...invariantsHold(probe), revealState: probe.revealState, ok
         })
         await closeDiff(`MT-08-t${t}-close`)
       }

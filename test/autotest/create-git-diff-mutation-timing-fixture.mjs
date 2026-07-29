@@ -69,7 +69,13 @@ const targets = {
   whileViewing: 'mt-while-viewing.txt',
   afterScroll: 'mt-after-scroll.txt',
   duringClose: 'mt-during-close.txt',
-  burst: 'mt-burst.txt'
+  burst: 'mt-burst.txt',
+  // A file whose changes are SCATTERED. The other targets carry a single edit,
+  // which hideUnchangedRegions collapses to roughly nine laid-out lines — a
+  // viewport with nothing to scroll, so "the user scrolled away" cannot be
+  // established on them at all (measured: scrollToFraction(1) left scrollTop
+  // at 0). Scattered edits keep the collapsed document tall enough to scroll.
+  scatteredScroll: 'mt-scattered-scroll.txt'
 }
 
 for (const rel of Object.values(targets)) {

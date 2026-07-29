@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git Diff 揭示周期：隐式状态机是什么问题</title>
+<style>
+:root{
+  --bg:#0e1116; --bg2:#151a21; --panel:#171d26; --panel2:#1d2530; --panel3:#212b38;
+  --line:#2a3441; --line2:#37424f;
+  --tx:#dde3ea; --tx2:#9aa7b6; --tx3:#6b7887;
+  --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --info:#38bdf8; --purple:#c084fc;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:auto}
+body{
+  margin:0;background:var(--bg);color:var(--tx);
+  font:15px/1.78 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--mono);font-size:.87em;background:#0b0f14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#a7c5ee}
+
+#toc{position:fixed;top:0;left:0;width:290px;height:100vh;overflow-y:auto;background:var(--bg2);border-right:1px solid var(--line);padding:26px 18px 40px}
+#toc .brand{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx3);margin-bottom:6px}
+#toc .ttl{font-size:15px;font-weight:650;line-height:1.45;margin-bottom:20px}
+#toc ol{list-style:none;margin:0;padding:0;counter-reset:t}
+#toc li{counter-increment:t;margin:1px 0}
+#toc a{display:block;padding:7px 10px 7px 32px;border-radius:6px;color:var(--tx2);font-size:13.5px;line-height:1.45;position:relative}
+#toc a::before{content:counter(t);position:absolute;left:9px;color:var(--tx3);font-family:var(--mono);font-size:11.5px}
+#toc a:hover{background:var(--panel);color:var(--tx);text-decoration:none}
+#toc a.on{background:rgba(110,168,254,.14);color:var(--accent);font-weight:600}
+#toc a.on::before{color:var(--accent)}
+@media(max-width:1080px){#toc{display:none}main{margin-left:0!important;padding:28px 20px 100px!important}}
+
+main{margin-left:290px;padding:44px 52px 130px;max-width:1060px}
+h1{font-size:27px;line-height:1.35;margin:0 0 8px;font-weight:680;letter-spacing:-.01em}
+.sub{color:var(--tx2);font-size:14px;margin-bottom:32px}
+h2{font-size:20px;margin:54px 0 16px;padding-bottom:9px;border-bottom:1px solid var(--line);font-weight:660;scroll-margin-top:20px}
+h2 .n{color:var(--tx3);font-family:var(--mono);font-size:15px;margin-right:9px}
+h3{font-size:15.5px;margin:28px 0 10px;font-weight:640;color:#c7d3e1}
+h4{font-size:14px;margin:18px 0 8px;font-weight:640;color:var(--tx2)}
+p{margin:11px 0}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:17px 19px;margin:15px 0}
+.grid{display:grid;gap:13px}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:900px){.g2,.g3{grid-template-columns:1fr}}
+
+.callout{border-left:3px solid var(--accent);background:rgba(110,168,254,.07);border-radius:0 9px 9px 0;padding:13px 17px;margin:15px 0}
+.callout.bad{border-left-color:var(--bad);background:rgba(248,113,113,.07)}
+.callout.ok{border-left-color:var(--ok);background:rgba(74,222,128,.07)}
+.callout.warn{border-left-color:var(--warn);background:rgba(251,191,36,.07)}
+.callout.def{border-left-color:var(--purple);background:rgba(192,132,252,.07)}
+.callout .h{font-weight:660;margin-bottom:5px;font-size:14px}
+
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:640;vertical-align:middle}
+.b-ok{background:rgba(74,222,128,.16);color:var(--ok);border:1px solid rgba(74,222,128,.3)}
+.b-bad{background:rgba(248,113,113,.16);color:var(--bad);border:1px solid rgba(248,113,113,.3)}
+.b-warn{background:rgba(251,191,36,.16);color:var(--warn);border:1px solid rgba(251,191,36,.3)}
+.b-n{background:var(--panel2);color:var(--tx2);border:1px solid var(--line2)}
+.b-p{background:rgba(192,132,252,.16);color:var(--purple);border:1px solid rgba(192,132,252,.3)}
+
+table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--tx2);font-weight:640;font-size:12.5px;letter-spacing:.03em;text-transform:uppercase;background:var(--bg2)}
+tbody tr:hover{background:rgba(255,255,255,.018)}
+td.mono,.mono{font-family:var(--mono);font-size:12.3px}
+
+pre{background:#0a0e13;border:1px solid var(--line);border-radius:9px;padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.4px;line-height:1.66;margin:13px 0}
+pre .c{color:var(--tx3)}
+pre .k{color:#c084fc}
+pre .s{color:#7dd3a0}
+pre .n{color:#fbbf24}
+pre .hl{background:rgba(248,113,113,.14);display:block;margin:0 -16px;padding:0 16px}
+pre .hlok{background:rgba(74,222,128,.12);display:block;margin:0 -16px;padding:0 16px}
+
+.ba{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin:15px 0}
+@media(max-width:900px){.ba{grid-template-columns:1fr}}
+.ba .p{border-radius:10px;padding:14px 16px;border:1px solid var(--line);background:var(--panel)}
+.ba .p.now{border-color:rgba(248,113,113,.28)}
+.ba .p.want{border-color:rgba(74,222,128,.28)}
+.ba .p h4{margin:0 0 9px;font-size:12.5px;letter-spacing:.05em;text-transform:uppercase}
+.ba .p.now h4{color:var(--bad)}
+.ba .p.want h4{color:var(--ok)}
+
+ul.tk{list-style:none;padding:0;margin:11px 0}
+ul.tk li{padding:5px 0 5px 24px;position:relative;font-size:13.8px}
+ul.tk li::before{content:"▸";position:absolute;left:6px;color:var(--tx3)}
+ul.tk li.no::before{content:"✕";color:var(--bad)}
+ul.tk li.ye::before{content:"✓";color:var(--ok)}
+
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:13px 15px;text-align:center}
+.stat .v{font-family:var(--mono);font-size:22px;font-weight:680;color:var(--accent)}
+.stat .v.bad{color:var(--bad)}
+.stat .l{font-size:12px;color:var(--tx2);margin-top:3px}
+
+svg{display:block;max-width:100%;height:auto;margin:16px 0}
+.figcap{font-size:12.5px;color:var(--tx3);margin:-6px 0 18px;text-align:center}
+
+dl.kv{display:grid;grid-template-columns:auto 1fr;gap:5px 16px;font-size:13.5px;margin:0}
+dl.kv dt{color:var(--tx2)}
+dl.kv dd{margin:0}
+
+footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--line);color:var(--tx2);font-size:13px}
+</style>
+</head>
+<body>
+
+<nav id="toc">
+  <div class="brand">Onward · 设计说明</div>
+  <div class="ttl">Git Diff 揭示周期：<br>隐式状态机是什么问题</div>
+  <ol>
+    <li><a href="#s1">先把名词定义清楚</a></li>
+    <li><a href="#s2">这个周期要解决什么</a></li>
+    <li><a href="#s3">显式的部分：三个相位</a></li>
+    <li><a href="#s4">隐式的部分：问题所在</a></li>
+    <li><a href="#s5">四条触发路径的真实条件</a></li>
+    <li><a href="#s6">为什么这会系统性产生缺陷</a></li>
+    <li><a href="#s7">四个实例逐一解剖</a></li>
+    <li><a href="#s8">显式化之后是什么样</a></li>
+    <li><a href="#s9">代价、风险与取舍</a></li>
+    <li><a href="#s10">你需要决定什么</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<h1>Git Diff 揭示周期：「隐式状态机」到底是什么问题</h1>
+<div class="sub">
+  面向 <code>src/components/GitDiffViewer/GitDiffViewer.tsx</code> · 代码基线 <code>d93ae6e</code>（master）<br>
+  这份文档只做一件事：把「揭示周期是个隐式状态机」这句话拆开，讲到能判断该不该动它。
+</div>
+
+<div class="callout def">
+  <div class="h">阅读约定</div>
+  第 1 节把所有名词从零定义，后面每一节都只使用已定义过的词。文中每一处代码断言都带行号，可以对着
+  <code>d93ae6e</code> 逐条核对。
+</div>
+
+<!-- ═════════════════════════ 1 ═════════════════════════ -->
+<h2 id="s1"><span class="n">01</span>先把名词定义清楚</h2>
+
+<p>要讲清楚问题，得先有五个精确的名词。它们都不是通用术语，是这份代码里的具体东西。</p>
+
+<h3>1.1 Monaco 与 model</h3>
+<div class="callout def">
+  <div class="h">定义：model（文本模型）</div>
+  <b>Monaco</b> 是 VS Code 的编辑器内核，本项目用它渲染 Git Diff。Monaco 不直接持有字符串，它持有
+  <b>model</b>——一个带唯一标识（URI）的文本文档对象。一个 diff 视图需要<b>一对</b> model：
+  <code>original</code>（基线侧，比如 HEAD 或索引里的版本）和 <code>modified</code>（工作区侧，你正在编辑的版本）。
+</div>
+
+<h3>1.2 diff 是异步算出来的</h3>
+<div class="callout def">
+  <div class="h">定义：diff 计算</div>
+  Monaco 不在你设置内容的那一刻就算出差异。它把计算<b>排入队列</b>（去抖 200 ms），交给后台线程，
+  算完后触发 <code>onDidUpdateDiff</code> 事件。在这之前，<code>editor.getLineChanges()</code>
+  返回的是<b>上一次</b>算出的结果，而不是 <code>null</code>——这一点是后面所有麻烦的起点。
+</div>
+
+<h3>1.3 揭示（reveal）</h3>
+<div class="callout def">
+  <div class="h">定义：揭示</div>
+  用户点开一个变更文件后，视口应当落在<b>第一处改动</b>上，而不是文件开头。把视口移到那一行的动作，
+  本文称为<b>揭示</b>。它需要知道「第一处改动在第几行」——而这个信息只能从
+  <code>getLineChanges()</code> 里拿，也就是<b>只能从 diff 计算结果里拿</b>。
+</div>
+
+<h3>1.4 折叠（hideUnchangedRegions）</h3>
+<div class="callout def">
+  <div class="h">定义：折叠</div>
+  Monaco 的 <code>hideUnchangedRegions</code> 会把大段未改动的内容收起来，只留改动附近的上下文。
+  它同样依赖 diff 结果——没有 diff 就不知道哪些区域「未改动」。
+</div>
+
+<h3>1.5 揭示周期</h3>
+<div class="callout def">
+  <div class="h">定义：揭示周期（reveal cycle）</div>
+  从「用户选中一个文件」到「视口停在正确位置、折叠正确呈现」之间的这一整段过程，
+  代码里用一个状态变量 <code>diffRevealPhase</code> 管理，本文称为<b>揭示周期</b>。
+  它的存在理由是：内容和 diff 都是异步到达的，不能在内容刚到时就定位视口，
+  否则会出现「先跳到开头、再闪一下跳到改动处」的抖动。
+</div>
+
+<h3>1.6 一句话概括这五个名词的关系</h3>
+<pre><span class="c">// 想把视口放对位置，必须先知道第一处改动在哪</span>
+<span class="c">// 想知道第一处改动在哪，必须等 diff 算完</span>
+<span class="c">// diff 是异步算的，而且算之前 getLineChanges() 会返回旧答案</span>
+<span class="c">//   ↓</span>
+<span class="c">// 所以需要一个「等待 → 定位 → 完成」的过程管理，这就是揭示周期</span></pre>
+
+<!-- ═════════════════════════ 2 ═════════════════════════ -->
+<h2 id="s2"><span class="n">02</span>这个周期要解决什么</h2>
+
+<p>把需求写成一句可判定的话：</p>
+
+<div class="callout">
+  <div class="h">揭示周期的契约</div>
+  当揭示周期结束（回到 <code>idle</code>）时，视口的位置和折叠的状态，
+  必须是根据<b>「此刻两个 model 里实际装的内容」</b>算出来的 diff 得到的。
+</div>
+
+<p>
+这句话看着简单，难点全在<b>「此刻」</b>两个字。因为有三样东西在各自独立地变化：
+</p>
+
+<div class="grid g3">
+  <div class="card">
+    <b style="color:var(--info)">① 用户的选择</b>
+    <p style="font-size:13.4px;margin:7px 0 0">点了哪个文件、什么时候点的、点完有没有滚动。</p>
+  </div>
+  <div class="card">
+    <b style="color:var(--warn)">② 磁盘上的内容</b>
+    <p style="font-size:13.4px;margin:7px 0 0">agent 随时在改文件，也可能 <code>git add</code> / 提交，改变基线。</p>
+  </div>
+  <div class="card">
+    <b style="color:var(--purple)">③ Monaco 的内部状态</b>
+    <p style="font-size:13.4px;margin:7px 0 0">model 里装了什么、diff 算到哪一步、折叠区记录的是哪一版。</p>
+  </div>
+</div>
+
+<p>
+三者互不同步。揭示周期的职责就是：<b>在这三者达成一致的那个瞬间</b>做决策，
+早了会读到旧数据，晚了用户会看到抖动。
+</p>
+
+<!-- ═════════════════════════ 3 ═════════════════════════ -->
+<h2 id="s3"><span class="n">03</span>显式的部分：三个相位</h2>
+
+<p>代码里<b>确实有</b>一个显式的状态变量，只有三个取值（<code>GitDiffViewer.tsx:698</code>）：</p>
+
+<pre>type DiffRevealPhase = <span class="s">'idle'</span> | <span class="s">'waiting-diff'</span> | <span class="s">'restoring-scroll'</span></pre>
+
+<svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="三个相位的状态转移图">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#6b7887"/>
+    </marker>
+  </defs>
+  <rect x="30" y="70" width="180" height="58" rx="10" fill="#1d2530" stroke="#37424f"/>
+  <text x="120" y="95" fill="#dde3ea" font-size="14" font-family="ui-monospace,monospace" text-anchor="middle">idle</text>
+  <text x="120" y="114" fill="#6b7887" font-size="11" text-anchor="middle">静止 · 内容已呈现</text>
+
+  <rect x="330" y="70" width="200" height="58" rx="10" fill="#1d2530" stroke="#fbbf24"/>
+  <text x="430" y="95" fill="#dde3ea" font-size="14" font-family="ui-monospace,monospace" text-anchor="middle">waiting-diff</text>
+  <text x="430" y="114" fill="#6b7887" font-size="11" text-anchor="middle">等 diff · 内容隐藏</text>
+
+  <rect x="650" y="70" width="180" height="58" rx="10" fill="#1d2530" stroke="#4ade80"/>
+  <text x="740" y="92" fill="#dde3ea" font-size="13" font-family="ui-monospace,monospace" text-anchor="middle">restoring-scroll</text>
+  <text x="740" y="111" fill="#6b7887" font-size="11" text-anchor="middle">做决策 · 定位视口</text>
+
+  <line x1="210" y1="99" x2="322" y2="99" stroke="#6b7887" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="266" y="90" fill="#9aa7b6" font-size="10.5" text-anchor="middle">选中文件</text>
+  <text x="266" y="118" fill="#6b7887" font-size="10" text-anchor="middle" font-family="ui-monospace,monospace">enterDiffWaiting()</text>
+
+  <line x1="530" y1="99" x2="642" y2="99" stroke="#6b7887" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="586" y="90" fill="#f87171" font-size="10.5" text-anchor="middle">四条路径之一</text>
+  <text x="586" y="118" fill="#6b7887" font-size="10" text-anchor="middle" font-family="ui-monospace,monospace">requestDiffRevealRestore()</text>
+
+  <path d="M740,128 C740,168 120,168 120,132" fill="none" stroke="#6b7887" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="430" y="182" fill="#9aa7b6" font-size="10.5" text-anchor="middle">决策完成，淡入呈现</text>
+</svg>
+<div class="figcap">图 1 · 显式相位机：三个状态、两条正向转移、一条回边</div>
+
+<div class="callout ok">
+  <div class="h">这部分设计是清楚的</div>
+  三个相位、转移边、以及「<code>waiting-diff</code> 期间内容隐藏，避免抖动」的意图，都写在代码里，
+  有类型约束，读一遍就能懂。<b>问题不在这里。</b>
+</div>
+
+<!-- ═════════════════════════ 4 ═════════════════════════ -->
+<h2 id="s4"><span class="n">04</span>隐式的部分：问题所在</h2>
+
+<p>
+问题在图 1 中间那条边上写的「<b>四条路径之一</b>」。<code>waiting-diff → restoring-scroll</code>
+这一步，代码里有<b>四个不同的地方</b>可以触发（<code>GitDiffViewer.tsx:232</code>）：
+</p>
+
+<pre>type DiffRevealTrigger = <span class="s">'diff-computed'</span> | <span class="s">'model-bound'</span> | <span class="s">'warm-ready'</span> | <span class="s">'timeout'</span></pre>
+
+<p>四个触发点分散在文件的四处，相距数千行：</p>
+
+<table>
+  <thead><tr><th style="width:20%">触发路径</th><th style="width:12%">行号</th><th>它代表的意思</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">diff-computed</td><td class="mono">5386</td><td>Monaco 通知「diff 算完了」</td></tr>
+    <tr><td class="mono">model-bound</td><td class="mono">5739</td><td>model 刚绑定好（在点击延迟测量的回调里）</td></tr>
+    <tr><td class="mono">warm-ready</td><td class="mono">1947</td><td>温重开快速通道：判断「已有可用的 diff」</td></tr>
+    <tr><td class="mono">timeout</td><td class="mono">1881</td><td>等了 2 秒没等到任何信号，兜底</td></tr>
+  </tbody>
+</table>
+
+<div class="callout bad">
+  <div class="h">核心问题，一句话</div>
+  代码里<b>没有任何一处</b>写着「在什么条件下，允许做揭示决策」。
+  这个条件被<b>拆散成四份</b>，分别隐含在四个触发点各自的局部判断里；
+  而它们要保证的是<b>同一个</b>不变量（§2 的契约）。
+</div>
+
+<p>
+换个说法。一个显式状态机长这样：<b>状态 × 事件 → 下一状态</b>，转移表写在一处，
+所有分支穷举可见。而这里是：四个互不相识的地方各自决定「我现在可以推进了」，
+它们唯一的共同约束是一句守卫（<code>GitDiffViewer.tsx:1857</code>）：
+</p>
+
+<pre>const requestDiffRevealRestore = useCallback((reason: DiffRevealTrigger) =&gt; {
+<span class="hl">  if (diffRevealPhaseRef.current !== <span class="s">'waiting-diff'</span>) return   <span class="c">// ← 唯一的共同约束</span></span>
+  ...
+  setDiffRevealPhase(<span class="s">'restoring-scroll'</span>)
+}, [...])</pre>
+
+<p>
+这句守卫只保证<b>「不重复推进」</b>——先到的那条路径赢，其余的静默返回。
+它<b>完全不检查</b>「先到的这条路径，此刻读到的 diff 是否对应 model 里的内容」。
+那个判断，是每条路径自己的事。
+</p>
+
+<!-- ═════════════════════════ 5 ═════════════════════════ -->
+<h2 id="s5"><span class="n">05</span>四条触发路径的真实条件</h2>
+
+<p>把四条路径各自实际检查了什么列出来，问题会变得很直观。</p>
+
+<h3>5.1 <code>diff-computed</code> — 唯一真正正确的那条</h3>
+<div class="card">
+<pre>editor.onDidUpdateDiff(() =&gt; {
+  diffComputedAtRef.current = { seq: modelWriteSeqRef.current, originalUri, modifiedUri }
+  requestDiffRevealRestore(<span class="s">'diff-computed'</span>)
+  ...
+})</pre>
+<p style="margin-bottom:0">
+Monaco 亲口说「算完了」，所以此刻 diff 与 model 内容一致。<span class="badge b-ok">条件正确</span>
+</p>
+</div>
+
+<h3>5.2 <code>timeout</code> — 明知可能不对的兜底</h3>
+<div class="card">
+<pre>diffRevealTimeoutRef.current = window.setTimeout(() =&gt; {
+  requestDiffRevealRestore(<span class="s">'timeout'</span>)
+}, DIFF_REVEAL_TIMEOUT_MS)   <span class="c">// 2000 ms</span></pre>
+<p style="margin-bottom:0">
+条件是<b>「时间到了」</b>——与 diff 是否算完毫无关系。它的存在理由是「宁可位置错，也不能永远不显示内容」。
+这是合理的工程取舍，<b>但它意味着契约在这条路径上被明确放弃了</b>。
+<span class="badge b-warn">条件与契约无关</span>
+</p>
+</div>
+
+<h3>5.3 <code>warm-ready</code> — 修复前是错的，现在是对的</h3>
+<div class="card">
+<div class="ba" style="margin-top:0">
+  <div class="p now">
+    <h4>修复前（引发 2026-07-26 报障）</h4>
+    <pre style="margin:0"><span class="hl">editor.getLineChanges() !== null</span></pre>
+    <p style="font-size:13.2px;margin:9px 0 0">
+    语义是「<b>这个控件历史上算过某一版 diff</b>」。因为 Monaco 在内容变化时保留旧结果，
+    这个判断在「答案已经过期」的整个窗口里都成立。
+    </p>
+  </div>
+  <div class="p want">
+    <h4>修复后</h4>
+    <pre style="margin:0"><span class="hlok">isDiffCurrentForBoundModels(editor)</span>
+<span class="c">// 已绑定 URI 对 + 写入序号都匹配</span></pre>
+    <p style="font-size:13.2px;margin:9px 0 0">
+    语义是「<b>已算出的 diff 正是为当前这对 model 算的，且此后没有写入</b>」。
+    </p>
+  </div>
+</div>
+<p style="margin-bottom:0"><span class="badge b-ok">条件已修正</span> 但注意：这个修正只发生在<b>这一条</b>路径上。</p>
+</div>
+
+<h3>5.4 <code>model-bound</code> — 最能说明问题的一条</h3>
+<div class="card">
+<pre><span class="c">// GitDiffViewer.tsx:5723-5740（节选）</span>
+const active = clickLatencyTrackerRef.current.getActive()
+<span class="hl">if (!active || active.fileKey !== selectedFileKey || active.stateSetAt === null) return</span>
+
+clickLatencyTrackerRef.current.markModelBound(selectedFileKey)
+...
+const editor = diffEditorRef.current
+if (editor) {
+  requestDiffRevealRestore(<span class="s">'model-bound'</span>)     <span class="c">// ← 推进揭示周期</span>
+}</pre>
+
+<div class="callout bad" style="margin-bottom:0">
+  <div class="h">请注意高亮那行的含义</div>
+  <code>clickLatencyTracker</code> 是<b>性能测量</b>组件——它的职责是统计「用户点击到内容呈现」花了多久。
+  这里的判断是：<b>「当前是否有一次进行中的点击延迟测量」</b>。
+  <p style="margin:9px 0 0">
+  也就是说：<b>视口能否被正确定位，取决于此刻是否恰好有一次性能测量在进行。</b>
+  没有测量在飞（例如面板重开、程序化选中、测量已封板），这条路径就不触发；
+  有测量在飞，它就可能<b>抢在 diff 算完之前</b>推进周期。
+  </p>
+  <p style="margin:9px 0 0">
+  它检查的东西<b>与「diff 是否对应当前内容」完全无关</b>。
+  <span class="badge b-bad">条件与契约无关，且耦合了不该耦合的模块</span>
+  </p>
+</div>
+</div>
+
+<h3>5.5 汇总：四条路径对同一个契约的保证程度</h3>
+<table>
+  <thead><tr><th style="width:17%">路径</th><th style="width:31%">实际检查的条件</th><th style="width:22%">与契约的关系</th><th>后果</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="mono">diff-computed</td><td>Monaco 事件</td>
+      <td><span class="badge b-ok">保证</span></td><td>正确</td>
+    </tr>
+    <tr>
+      <td class="mono">warm-ready</td><td>URI 对 + 写入序号匹配</td>
+      <td><span class="badge b-ok">保证（修复后）</span></td><td>正确</td>
+    </tr>
+    <tr>
+      <td class="mono">timeout</td><td>经过 2000 ms</td>
+      <td><span class="badge b-warn">明确放弃</span></td>
+      <td>位置可能属于旧内容；靠事后纠正补救</td>
+    </tr>
+    <tr>
+      <td class="mono">model-bound</td><td>有点击延迟测量在进行</td>
+      <td><span class="badge b-bad">无关</span></td>
+      <td>位置可能属于旧内容；且行为随「是否在测量」而变</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <div class="h">这就是「隐式」的确切含义</div>
+  契约（§2）是<b>一个</b>；实现它的条件是<b>四份</b>，其中两份不保证契约。
+  而<b>没有任何一处代码或文档陈述这个事实</b>——你必须把四个相距数千行的地方全部读完，
+  才能知道「揭示决策可能在 diff 过期时发生」。
+</div>
+
+<!-- ═════════════════════════ 6 ═════════════════════════ -->
+<h2 id="s6"><span class="n">06</span>为什么这会系统性产生缺陷</h2>
+
+<p>
+到这里，「隐式」是一个可以精确陈述的属性。但为什么它<b>危险</b>？因为它决定了修改者的<b>提问方式</b>。
+</p>
+
+<div class="ba">
+  <div class="p now">
+    <h4>隐式状态机诱导的提问</h4>
+    <p style="font-size:13.5px">「这个地方<b>要不要</b>加处理？」</p>
+    <p style="font-size:13.2px;color:var(--tx2);margin-bottom:0">
+    这是一个<b>局部</b>问题。回答它只需要看眼前这几十行。
+    答完就改，改完测试通过，看起来完成了。
+    </p>
+  </div>
+  <div class="p want">
+    <h4>显式状态机诱导的提问</h4>
+    <p style="font-size:13.5px">「这个缺陷的<b>存在条件</b>是什么？」</p>
+    <p style="font-size:13.2px;color:var(--tx2);margin-bottom:0">
+    这是一个<b>全局</b>问题。回答它必须先说清「在哪些状态组合下会出错」，
+    答案自然落到转移表的某几格，改动位置也就唯一确定了。
+    </p>
+  </div>
+</div>
+
+<div class="callout bad">
+  <div class="h">2026-07-27 那轮修复的实测数据</div>
+  在一次会话里，为修复本报障共引入 <b>8 个</b>新缺陷（全部被测试拦住，无一进入提交）。
+  其中 <b>4 个</b>直接源于这个面。四个的共同点：<b>都是在回答「要不要加处理」，而没有先问「存在条件是什么」</b>。
+</div>
+
+<div class="grid g3" style="margin-bottom:6px">
+  <div class="stat"><div class="v bad">8</div><div class="l">单次会话引入的缺陷</div></div>
+  <div class="stat"><div class="v bad">4</div><div class="l">源于揭示周期这一面</div></div>
+  <div class="stat"><div class="v">0</div><div class="l">逃逸到提交的</div></div>
+</div>
+
+<p style="color:var(--tx2);font-size:13.5px">
+第三个数字很重要：<b>测试遏制住了这一类缺陷，但没有消除它</b>。
+测试把「带缺陷发布」变成了「修复要花 8 轮」。这是很大的改善，不是治愈——
+利息已经付过一次，下一个改这块代码的人还会再付。
+</p>
+
+<!-- ═════════════════════════ 7 ═════════════════════════ -->
+<h2 id="s7"><span class="n">07</span>四个实例逐一解剖</h2>
+
+<p>
+抽象讲完，看四个具体的。每一个都按同样的格式：我加了什么干预 → 忽略了什么前提 → 显式转移表会怎样避免它。
+</p>
+
+<h3>实例 1：清扫的保留集在错误的时刻求值</h3>
+<div class="card">
+  <dl class="kv">
+    <dt>干预</dt><dd>销毁不再需要的 model，防止内存无界增长</dd>
+    <dt>做法</dt><dd>调度时算出「要保留哪些 URI」，100 ms 后执行销毁</dd>
+    <dt style="color:var(--bad)">忽略的前提</dt><dd style="color:var(--bad)">这 100 ms 里可以完成一次「解绑 → 重新挂载」，于是保留集记录的是<b>旧</b>绑定</dd>
+    <dt>后果</dt><dd>把新挂载刚绑好的 model 销毁了；探针返回 <code>null</code>，每个等待都烧满预算，单个用例从 35 s 变成 227 s</dd>
+    <dt style="color:var(--ok)">转移表会怎样避免</dt><dd style="color:var(--ok)">「销毁」是一个动作，转移表要求它声明<b>前置状态</b>。写下来就会发现前置状态必须在<b>执行时刻</b>成立，而不是调度时刻</dd>
+  </dl>
+</div>
+
+<h3>实例 2：中间态的事件把一次性纠正吃掉</h3>
+<div class="card">
+  <dl class="kv">
+    <dt>干预</dt><dd>若揭示是在 diff 未确证时做出的，武装一次纠正，等下次 <code>onDidUpdateDiff</code> 重做</dd>
+    <dt>做法</dt><dd><code>if (provisional) { provisional = null; if (条件成立) 执行纠正 }</code></dd>
+    <dt style="color:var(--bad)">忽略的前提</dt><dd style="color:var(--bad)"><code>onDidUpdateDiff</code> 每次计算都会触发一次，<b>不是每次都是终态</b>。中间态那次条件不成立，却已经把纠正清空了</dd>
+    <dt>后果</dt><dd>真正的 diff 到达时无枪可用，视口永久停在错误位置</dd>
+    <dt style="color:var(--ok)">转移表会怎样避免</dt><dd style="color:var(--ok)">「一次性纠正」是一个状态位，转移表必须为它写出<b>置位</b>和<b>清位</b>两组条件。一旦分开写，「收到事件」和「纠正已用掉」是两件事就显而易见了</dd>
+  </dl>
+</div>
+
+<h3>实例 3：防御性判断在另一条路径上反噬</h3>
+<div class="card">
+  <dl class="kv">
+    <dt>干预</dt><dd>为避免实例 1 复发，改为「保留活控件当前持有的 model」</dd>
+    <dt style="color:var(--bad)">忽略的前提</dt><dd style="color:var(--bad)">面板模式下 <code>detachDiffEditor</code> <b>故意不清空</b> <code>diffEditorRef</code>，所以「非空」不等于「控件还活着」</dd>
+    <dt>后果</dt><dd>解绑路径上读到已卸载控件持有的旧 model，把它们保护了下来——正好保住了清扫本该回收的那一对，原 bug 复活</dd>
+    <dt style="color:var(--ok)">转移表会怎样避免</dt><dd style="color:var(--ok)">转移表要求为每个状态写<b>判定依据</b>。写「控件是否存活」时就必须回答「用什么判定」，而 <code>ref !== null</code> 会立刻暴露为不充分</dd>
+  </dl>
+</div>
+
+<h3>实例 4：重建条件过宽，破坏了首次载入</h3>
+<div class="card">
+  <dl class="kv">
+    <dt>干预</dt><dd>全量写入内容后重建 diff 视图模型，让折叠区从头计算</dd>
+    <dt>做法</dt><dd>只要有一侧内容变化就重建</dd>
+    <dt style="color:var(--bad)">忽略的前提</dt><dd style="color:var(--bad)">缺陷的<b>存在条件</b>是「有旧折叠状态可继承」。首次填充内容时根本没有旧状态，重建纯属破坏——它把揭示周期正在等待的那次计算一并丢掉</dd>
+    <dt>后果</dt><dd>冷启动那次试验反复走 <code>timeout</code> 兜底，揭示落到第 1 行</dd>
+    <dt style="color:var(--ok)">转移表会怎样避免</dt><dd style="color:var(--ok)">这是最直接的一例。转移表的每一格<b>就是</b>一个存在条件。填格子的动作强制你回答「哪些状态下需要重建」，而不是「写入后要不要重建」</dd>
+  </dl>
+</div>
+
+<div class="callout">
+  <div class="h">四个实例的共同结构</div>
+  <ul class="tk" style="margin:6px 0 0">
+    <li>每一个都是<b>正确的意图</b>加在了<b>条件不完整的位置</b>上</li>
+    <li>每一个的错误前提，都是一句<b>没人写下来过</b>的隐含假设</li>
+    <li>四个假设分别关于：<b>时刻</b>（实例 1）、<b>事件语义</b>（实例 2）、<b>判定依据</b>（实例 3）、<b>存在条件</b>（实例 4）</li>
+    <li>它们全都是<b>转移表天然会强制你填写的字段</b></li>
+  </ul>
+</div>
+
+<!-- ═════════════════════════ 8 ═════════════════════════ -->
+<h2 id="s8"><span class="n">08</span>显式化之后是什么样</h2>
+
+<p>
+「显式化」不是加注释，也不是重写渲染逻辑。它是把<b>「什么时候允许做揭示决策」这个判断，
+从四个触发点里抽出来，收成一个纯函数</b>，然后让四条路径都去问它。
+</p>
+
+<h3>8.1 结构上的变化</h3>
+<div class="ba">
+  <div class="p now">
+    <h4>现在</h4>
+    <pre style="margin:0;font-size:11.8px">L1881  timeout       → 时间到？ → 推进
+L1947  warm-ready    → URI+序号？ → 推进
+L5386  diff-computed → Monaco 事件 → 推进
+L5739  model-bound   → <span class="hl">有测量在飞？</span> → 推进
+              ↓
+       requestDiffRevealRestore
+         只查「是否已在推进」</pre>
+    <p style="font-size:13px;margin:9px 0 0;color:var(--tx2)">四份条件，两份不保证契约，无处陈述。</p>
+  </div>
+  <div class="p want">
+    <h4>显式化后</h4>
+    <pre style="margin:0;font-size:11.8px">L1881  timeout       ┐
+L1947  warm-ready    ├→ resolveRevealAction(
+L5386  diff-computed │     phase, trigger,
+L5739  model-bound   ┘     diffCurrent,
+                          contentReady, ...)
+              ↓
+   <span class="hlok">'apply' | 'defer' | 'apply-provisional'</span>
+              ↓
+       单一执行点</pre>
+    <p style="font-size:13px;margin:9px 0 0;color:var(--tx2)">一份条件，穷举可见，可单测。</p>
+  </div>
+</div>
+
+<h3>8.2 转移表的形状（示意，不是最终设计）</h3>
+<p style="color:var(--tx2);font-size:13.5px">
+下表只为说明「表长什么样」。真正的取值集合需要在实现前和你逐格确认，
+因为每一格都是一个产品行为决定，不是实现细节。
+</p>
+<table>
+  <thead><tr><th>触发</th><th>diff 是否对应当前 model</th><th>内容是否就绪</th><th>决策</th><th>理由</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">diff-computed</td><td>是</td><td>是</td><td><span class="badge b-ok">apply</span></td><td>唯一无条件正确的组合</td></tr>
+    <tr><td class="mono">warm-ready</td><td>是</td><td>是</td><td><span class="badge b-ok">apply</span></td><td>温重开快速通道，保留 4891fc9 的收益</td></tr>
+    <tr><td class="mono">任意</td><td>是</td><td>否</td><td><span class="badge b-n">defer</span></td><td>正文还在取，签名会与占位内容比较</td></tr>
+    <tr><td class="mono">model-bound</td><td>否</td><td>是</td><td><span class="badge b-p">apply-provisional</span></td><td>先给用户看到东西，武装一次纠正</td></tr>
+    <tr><td class="mono">timeout</td><td>否</td><td>是</td><td><span class="badge b-p">apply-provisional</span></td><td>同上；兜底不能变成永久错误</td></tr>
+    <tr><td class="mono">timeout</td><td>否</td><td>否</td><td colspan="2"><b>需要你决定</b>：继续等（可能永不显示），还是显示空态？</td></tr>
+  </tbody>
+</table>
+
+<div class="callout ok">
+  <div class="h">这张表本身就是交付物</div>
+  注意最后一行——它是一个<b>今天代码里没有答案</b>的组合。现在的行为是「碰巧怎样就怎样」。
+  把表填出来的过程，会把这类「从未被决定过」的格子全部暴露出来。
+  这比任何重构都更有价值：<b>它把未知变成已知</b>。
+</div>
+
+<h3>8.3 与已有工作的衔接</h3>
+<ul class="tk">
+  <li class="ye"><code>shouldCompleteWarmReveal()</code> 已经是这个形状的<b>四分之一</b>——纯函数、有单测（WRG-01..07）。显式化是把它扩展成完整的表，而不是从零开始</li>
+  <li class="ye">时序敏感的端到端覆盖已就位：MT-01..08 覆盖「文件在揭示周期任意时刻被改动」的八个相位，GDS-52/54/55 覆盖跨 git 状态重开。<b>重构有护栏</b></li>
+  <li class="ye"><code>renderer:git-diff.warm-ready-gate</code> 已经在上报 <code>diffCurrent</code>，线上能观察到「决策时 diff 是否过期」的真实分布</li>
+</ul>
+
+<!-- ═════════════════════════ 9 ═════════════════════════ -->
+<h2 id="s9"><span class="n">09</span>代价、风险与取舍</h2>
+
+<div class="grid g2">
+  <div class="card">
+    <b style="color:var(--ok)">收益</b>
+    <ul class="tk" style="margin:8px 0 0">
+      <li>把「4/8 的缺陷注入率」的结构成因去掉</li>
+      <li>暴露「从未被决定过」的状态组合（见 8.2 最后一行）</li>
+      <li>解开 <code>model-bound</code> 对性能测量组件的耦合</li>
+      <li>转移表可单测穷举，不需要构建应用</li>
+    </ul>
+  </div>
+  <div class="card">
+    <b style="color:var(--bad)">风险</b>
+    <ul class="tk" style="margin:8px 0 0">
+      <li class="no">动的是<b>已经修好并验证过</b>的代码——引入新回归的可能真实存在</li>
+      <li class="no">四条路径的<b>现有</b>行为里，可能有我尚未理解的意图（尤其 <code>model-bound</code> 为何与测量耦合）</li>
+      <li class="no">填表过程会问出若干产品决策，需要你的时间</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout warn">
+  <div class="h">诚实的判断</div>
+  这不是紧急项。<b>用户当前看到的行为是正确的</b>（回归 108 通过 / 0 失败 / 零抖动）。
+  这笔债的成本不落在用户身上，落在<b>下一次改这块代码的人</b>身上。
+  <p style="margin:9px 0 0">
+  所以合理的时机是：<b>在下一次需要改揭示逻辑之前</b>做，而不是现在为了做而做。
+  如果短期内没有触及这块的计划，把这份文档留在库里、等到那时再读，也是完全站得住的选择。
+  </p>
+</div>
+
+<!-- ═════════════════════════ 10 ═════════════════════════ -->
+<h2 id="s10"><span class="n">10</span>你需要决定什么</h2>
+
+<table>
+  <thead><tr><th style="width:26%">选项</th><th style="width:16%">成本</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>先只填表，不改代码</b></td>
+      <td><span class="badge b-ok">低</span></td>
+      <td>我把 8.2 那张表按真实取值集合完整列出，逐格标「现有行为 / 应有行为 / 未定义」，交给你审。看完你再决定要不要动代码。<b>这一步没有回归风险。</b></td>
+    </tr>
+    <tr>
+      <td><b>填表 + 抽纯函数 + 单测</b></td>
+      <td><span class="badge b-warn">中</span></td>
+      <td>把决策抽成 <code>resolveRevealAction()</code> 并单测穷举，但四个触发点<b>暂不改</b>——先让新函数与现有行为并行运行、比对差异并上报。零行为变更，能拿到真实分歧数据。</td>
+    </tr>
+    <tr>
+      <td><b>完整显式化</b></td>
+      <td><span class="badge b-bad">高</span></td>
+      <td>四个触发点全部改为查表，删掉各自的局部条件。需要跑完整回归 + MT 矩阵 + 稳定性重复验证。</td>
+    </tr>
+    <tr>
+      <td><b>暂不处理</b></td>
+      <td>—</td>
+      <td>本文档留库。等下次需要改揭示逻辑时先读它。<b>这是一个合理选择</b>，不是拖延。</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <div class="h">我的建议</div>
+  选<b>第一项</b>。理由：这笔债的核心危害是「隐含假设无处陈述」，而填表<b>直接消除</b>这个危害——
+  哪怕代码一行不动，下一个人读到表就不会再踩实例 1–4 那四种前提。
+  代码层面的显式化可以等到真正要改那块逻辑时再做，届时收益最大、边际成本最低。
+</div>
+
+<footer>
+  <h3 style="margin-top:0">文档元数据</h3>
+  <dl class="kv">
+    <dt>生成分支</dt><dd class="mono">master</dd>
+    <dt>代码基线</dt><dd class="mono">d93ae6e — fix(git-diff): content-identity model URIs so a reopen cannot reveal a stale diff</dd>
+    <dt>应用版本</dt><dd class="mono">2.0.1 · Electron 43.2.0 · monaco-editor 0.55.1 · @monaco-editor/react 4.7.0</dd>
+    <dt>相关文档</dt><dd class="mono">docs/bug-tracking/BUG-0004-git-diff-warm-model-stale-diff-reveal.md（§ 9 记录了这 8 个缺陷）</dd>
+    <dt>文档版本</dt><dd class="mono">v1.0</dd>
+  </dl>
+
+  <h3>更新历史（仅追加）</h3>
+  <table>
+    <thead><tr><th style="width:9%">版本</th><th style="width:13%">日期</th><th style="width:11%">分支</th><th>变更摘要</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>v1.0</td><td>2026-07-28</td><td>master</td>
+        <td>首版。从名词定义出发，说明「揭示周期是隐式状态机」的确切含义：契约唯一而实现条件分成四份，
+        其中 <code>timeout</code> 明确放弃契约、<code>model-bound</code> 与契约无关且耦合了点击延迟测量组件。
+        以 2026-07-27 修复中引入的 4 个缺陷为实例，逐一给出被忽略的前提及转移表本会如何强制暴露它。
+        附显式化的结构示意、转移表形状（含一格今天没有答案的组合）、代价与四个可选路径。</td>
+      </tr>
+    </tbody>
+  </table>
+</footer>
+
+</main>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+  var secs  = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+
+  links.forEach(function(a){
+    a.addEventListener('click', function(e){
+      e.preventDefault();
+      var el = document.querySelector(a.getAttribute('href'));
+      if(!el) return;
+      window.scrollTo(0, el.getBoundingClientRect().top + window.pageYOffset - 12);
+      history.replaceState(null, '', a.getAttribute('href'));
+      mark();
+    });
+  });
+
+  function mark(){
+    var y = window.pageYOffset + 96, idx = 0;
+    for (var i = 0; i < secs.length; i++){
+      if (secs[i] && secs[i].offsetTop <= y) idx = i;
+    }
+    links.forEach(function(a, i){ a.classList.toggle('on', i === idx); });
+  }
+  var tick = false;
+  window.addEventListener('scroll', function(){
+    if (tick) return;
+    tick = true;
+    requestAnimationFrame(function(){ mark(); tick = false; });
+  }, {passive:true});
+  mark();
+})();
+</script>
+</body>
+</html>
