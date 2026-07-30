@@ -6,6 +6,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect, memo, startTransition } from 'react'
 import { Prompt, PromptSendRecord } from '../../types/electron'
 import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
+import type { ResolvedLayout } from '../../utils/layout-mode'
 import type { EditorDraft, PromptCleanupConfig, PromptSchedule } from '../../types/tab.d.ts'
 import { usePromptActions } from '../../contexts/PromptActionsContext'
 import { buildAccelerator } from '../../utils/keyboard'
@@ -44,6 +45,8 @@ interface PromptTaskFilterOption {
 
 interface PromptNotebookProps {
   terminals: TerminalInfo[]
+  /** Active Task layout, mirrored by the sender's Task selector. */
+  taskLayout: ResolvedLayout
   onSend: (terminalIds: string[], content: string) => Promise<TerminalBatchResult>
   onExecute: (terminalIds: string[]) => Promise<TerminalBatchResult>
   onSendAndExecute: (terminalIds: string[], content: string) => Promise<TerminalBatchResult>
@@ -123,6 +126,7 @@ interface RetentionConfirmState {
 
 export const PromptNotebook = memo(function PromptNotebook({
   terminals,
+  taskLayout,
   onSend,
   onExecute,
   onSendAndExecute,
@@ -1345,6 +1349,7 @@ export const PromptNotebook = memo(function PromptNotebook({
         {/* Send control area */}
         <PromptSender
           terminals={terminals}
+          taskLayout={taskLayout}
           promptContent={contentToSend}
           onSend={handleSendToTerminal}
           onExecute={handleExecuteTerminal}

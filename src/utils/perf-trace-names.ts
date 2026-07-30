@@ -302,6 +302,14 @@ export const PERF_TRACE_EVENT = {
   RENDERER_PROMPT_EDITOR_SUBMIT: 'renderer:prompt.editor.submit',
   RENDERER_PROMPT_EDITOR_CANCEL: 'renderer:prompt.editor.cancel-edit',
   RENDERER_PROMPT_SENDER_DISPATCH: 'renderer:prompt.sender.dispatch',
+  // The Task selector re-derived its grid geometry from the active Task
+  // layout (preset track counts, or a custom preset's rectangles). Instant
+  // marker (ph='i'), emitted only when the resulting shape actually changes
+  // — i.e. on layout switch, custom-preset edit, or Task count change, never
+  // per render. Payload is pure geometry (columns / rows / slot count and
+  // the layout kind), which is exactly what a "left panel does not match the
+  // right grid" report needs to be triaged from a trace alone.
+  RENDERER_PROMPT_SENDER_LAYOUT_SYNC: 'renderer:prompt.sender.layout-sync',
   // Right-click on the prompt input textarea opens a custom context menu
   // (cut/copy/paste/paste-plain, import pinned, save-as-pinned, insert
   // cwd/branch/task title, history, format tools, send-to-task, clear).

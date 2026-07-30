@@ -120,6 +120,31 @@ export async function testTaskLayout(ctx: AutotestContext): Promise<TestResult[]
     terminals: lastActiveTabTerminalCount
   })
 
+  // ── TLM-14: the Prompt panel's Task selector follows the layout switch ──
+  // Free to assert here (the 8-grid is already up) and it covers the exact
+  // regression the selector was rebuilt for: the grid moved to 4x2 while the
+  // selector stayed on its old hardcoded 2-column list.
+  if (flippedToEight) {
+    const selectorFollowed = await waitFor(
+      'task-selector-mirrors-eight-grid',
+      () => {
+        const layout = window.__onwardPromptSenderDebug?.getGridLayout()
+        return layout?.columns === 4 && layout?.rows === 2
+      },
+      8000,
+      120
+    )
+    const selectorLayout = window.__onwardPromptSenderDebug?.getGridLayout() ?? null
+    record('TLM-14-task-selector-mirrors-layout', selectorFollowed, {
+      gridLayout: activeGridLayoutAttr(),
+      selectorColumns: selectorLayout?.columns ?? null,
+      selectorRows: selectorLayout?.rows ?? null,
+      selectorSlots: selectorLayout?.slots.length ?? null
+    })
+  } else {
+    record('TLM-14-task-selector-mirrors-layout', false, { reason: 'grid-never-flipped-to-eight' })
+  }
+
   // ── TLM-04: switching back to single shrinks the grid ──
   // We just expanded to 8; clicking Single (1) requests a downsize from 8
   // current Tasks to 1. The downsize dialog should appear (because
@@ -489,6 +514,30 @@ async function runRearrangeAssertions(
   record('TLM-10-drag-reorders-tasks', swapped, {
     before: orderBefore.slice(0, 2),
     after: orderAfter.slice(0, 2)
+  })
+
+  // ── TLM-15: the Prompt panel's Task selector follows the reorder ──
+  // Both surfaces derive their order from the same Task array, so this is a
+  // consequence of the design rather than a second code path — which is
+  // exactly why it needs a test: nothing in the selector would fail loudly if
+  // someone reintroduced a locally sorted or cached copy of the Task list.
+  const selectorOrderFollowed = await waitFor(
+    'task-selector-order-follows-reorder',
+    () => {
+      const ids = (window.__onwardPromptSenderDebug?.getTerminalCards() ?? []).map(card => card.id)
+      return ids.length >= 2 && ids[0] === orderAfter[0] && ids[1] === orderAfter[1]
+    },
+    5000,
+    100
+  )
+  const selectorCardIds = (window.__onwardPromptSenderDebug?.getTerminalCards() ?? []).map(c => c.id)
+  const selectorDomIds = Array.from(
+    document.querySelectorAll<HTMLElement>('.prompt-sender-terminal')
+  ).map(card => card.dataset.terminalId ?? '')
+  record('TLM-15-task-selector-follows-reorder', selectorOrderFollowed, {
+    gridOrder: orderAfter.slice(0, 2),
+    selectorOrder: selectorCardIds.slice(0, 2),
+    selectorDomOrder: selectorDomIds.slice(0, 2)
   })
 
   const tailAfter = debug.getTailText(markerId, 40) ?? ''
