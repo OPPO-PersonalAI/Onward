@@ -326,7 +326,25 @@ export interface PromptSenderDebugApi {
   getSelectionIndicatorStates: () => Array<{ id: string; isActive: boolean }>
   getSelectedTerminalIds: () => string[]
   getActionButtons: () => Array<{ label: string; disabled: boolean }>
-  getGridLayout: () => { columns: number; rows: number; totalCards: number }
+  /**
+   * Selector geometry mirrored from the active Task layout. `slots` is in
+   * render order — index i is the i-th Task — and carries the 1-based grid
+   * rectangle each card occupies, which is what makes a custom layout's
+   * shape assertable.
+   */
+  getGridLayout: () => {
+    columns: number
+    rows: number
+    totalCards: number
+    layoutKind: 'preset' | 'custom'
+    slots: Array<{
+      terminalId: string
+      colStart: number
+      colSpan: number
+      rowStart: number
+      rowSpan: number
+    }>
+  }
   getNotice: () => string | null
   isSubmitting: () => boolean
   clickAction: (action: 'sendAndExecute' | 'execute' | 'send' | 'sendAllAndExecute') => Promise<boolean>
@@ -982,6 +1000,24 @@ export interface TerminalDebugApi {
   finishInlineRename: (value?: string) => boolean
   cancelInlineRename: () => boolean
   getInlineRenameState: () => { editingId: string | null; editingTitle: string }
+  /**
+   * Task drag-to-rearrange state. Read-only: the suite drives the feature
+   * through real PointerEvents against the real cells so the long-press
+   * timer, pointer capture and hit-testing are all exercised for real, and
+   * uses this only to assert what the gesture produced.
+   */
+  getTaskRearrangeState: () => {
+    active: boolean
+    trigger: 'long-press' | 'menu' | null
+    draggingIndex: number | null
+    targetIndex: number | null
+    /** Whether the grid currently accepts rearrange gestures at all. */
+    enabled: boolean
+    /** The three inputs behind `enabled`, so a failure says WHICH one blocked. */
+    hidden: boolean
+    overlayActive: boolean
+    slotCount: number
+  }
   setTerminalGitInfoOverride: (
     terminalId: string,
     override: {

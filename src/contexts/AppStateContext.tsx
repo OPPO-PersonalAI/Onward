@@ -17,6 +17,7 @@ import {
 import { perfTrace, perfTraceDiagnostic } from '../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
 import { migrateLayoutMode, DEFAULT_LAYOUT_MODE } from '../utils/layout-mode'
+import { reorderByInsert } from '../utils/task-reorder'
 import { isValidCustomLayoutCells } from '../utils/custom-layout-validator'
 import { canonicalizeTerminalCwdForPersist } from '../utils/terminal-cwd-osc'
 import { appStateContentChanged } from '../utils/app-state-diff'
@@ -383,6 +384,17 @@ interface AppStateContextValue {
   renameTab: (tabId: string, customName: string | null) => void
   updateActiveTab: (updates: Partial<TabState>) => void
   reorderTabs: (fromIndex: number, toIndex: number) => void
+  /**
+   * Move a Task within its Tab using insert-shift semantics (the item is
+   * pulled out of fromIndex and spliced back in at toIndex; everything in
+   * between closes the gap and keeps its relative order).
+   *
+   * Task display numbers are derived from array position, so reordering
+   * renumbers the grid rather than carrying numbers along with the terminal —
+   * "Task 1" always means the first slot. Terminal identity (id, PTY session,
+   * customName, cwd) travels with the entry, so no session is disturbed.
+   */
+  reorderTerminals: (tabId: string, fromIndex: number, toIndex: number) => void
   canCreateTab: () => boolean
   getTabDisplayName: (tab: TabState, index: number) => string
   getTerminalDisplayName: (index: number, customName: string | null) => string
@@ -968,6 +980,26 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       return {
         ...prev,
         tabs: newTabs
+      }
+    })
+  }, [updateState])
+
+  // Reorder Tasks inside one Tab (drag-to-rearrange). Insert-shift semantics
+  // live in the pure `reorderByInsert`, which returns the SAME array reference
+  // for a no-op or out-of-range move — used here as the "skip the write"
+  // guard so a cancelled drag never touches persisted state.
+  const reorderTerminals = useCallback((tabId: string, fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return
+    updateState(prev => {
+      const tab = prev.tabs.find(t => t.id === tabId)
+      if (!tab) return prev
+      const nextTerminals = reorderByInsert(tab.terminals, fromIndex, toIndex)
+      if (nextTerminals === tab.terminals) return prev
+      return {
+        ...prev,
+        tabs: prev.tabs.map(t =>
+          t.id === tabId ? { ...t, terminals: nextTerminals as PersistedTerminalState[] } : t
+        )
       }
     })
   }, [updateState])
@@ -1733,6 +1765,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     updatePromptEditorHeightForTab,
     setTerminalLastCwd,
     reorderTabs,
+    reorderTerminals,
     canCreateTab,
     getTabDisplayName,
     getTerminalDisplayName,

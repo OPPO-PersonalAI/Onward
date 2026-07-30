@@ -3,16 +3,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef, memo } from 'react'
+import { useState, useEffect, useMemo, useRef, memo } from 'react'
 import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react'
 import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { performanceTrace } from '../../utils/performance-trace'
+import type { ResolvedLayout } from '../../utils/layout-mode'
+import {
+  getTaskSelectorGeometry,
+  taskSelectorGeometrySignature,
+  type TaskSelectorSlot
+} from '../../utils/task-selector-geometry'
+
+/** How many rainbow accent slots App.css defines (`--rainbow-1`..`--rainbow-6`). */
+const RAINBOW_SLOT_COUNT = 6
 
 interface PromptSenderProps {
   terminals: TerminalInfo[]
+  /**
+   * The Task layout currently rendered by TerminalGrid. The selector mirrors
+   * its shape so "the second card, top-right" means the same Task on both
+   * sides of the window.
+   */
+  taskLayout: ResolvedLayout
   promptContent: string
   onSend: (terminalIds: string[], content: string) => Promise<TerminalBatchResult>
   onExecute: (terminalIds: string[]) => Promise<TerminalBatchResult>
@@ -21,8 +36,18 @@ interface PromptSenderProps {
   onChangeWorkDir?: (terminalIds: string[], directory: string) => void
 }
 
+/** Inline grid placement for one mirrored slot. */
+function slotStyle(slot: TaskSelectorSlot | undefined): CSSProperties {
+  if (!slot) return {}
+  return {
+    gridColumn: `${slot.colStart} / span ${slot.colSpan}`,
+    gridRow: `${slot.rowStart} / span ${slot.rowSpan}`
+  }
+}
+
 export const PromptSender = memo(function PromptSender({
   terminals,
+  taskLayout,
   promptContent,
   onSend,
   onExecute,
@@ -49,9 +74,22 @@ export const PromptSender = memo(function PromptSender({
   const handleExecuteRef = useRef<() => Promise<void>>(async () => {})
   const handleSendAndExecuteRef = useRef<() => Promise<void>>(async () => {})
   const handleSendAllAndExecuteRef = useRef<() => Promise<void>>(async () => {})
-  const terminalRows = Math.max(1, Math.ceil(terminals.length / 2))
-  const terminalGridStyle = { '--terminal-rows': terminalRows } as CSSProperties
-  const selectionIndicatorStyle = { '--selection-indicator-rows': terminalRows } as CSSProperties
+  // Mirror of the right-hand Task grid: same column / row track counts, and
+  // for a custom layout the same per-Task rectangles. This component
+  // re-renders on every keystroke in the prompt editor (promptContent is a
+  // prop), so the mapping, its signature and the style object are all pinned
+  // to the layout rather than recomputed per character.
+  const geometry = useMemo(
+    () => getTaskSelectorGeometry(taskLayout, terminals.length),
+    [taskLayout, terminals.length]
+  )
+  const geometrySignature = useMemo(() => taskSelectorGeometrySignature(geometry), [geometry])
+  const gridTrackStyle = useMemo(() => ({
+    '--task-slot-cols': geometry.columns,
+    '--task-slot-rows': geometry.rows
+  }) as CSSProperties, [geometry])
+  const geometryRef = useRef(geometry)
+  const taskLayoutKindRef = useRef(taskLayout.kind)
   const selectedCount = selectedTerminals.size
 
   terminalsRef.current = terminals
@@ -59,6 +97,21 @@ export const PromptSender = memo(function PromptSender({
   selectedTerminalsRef.current = selectedTerminals
   selectionNoticeRef.current = selectionNotice
   isSubmittingRef.current = isSubmitting
+  geometryRef.current = geometry
+  taskLayoutKindRef.current = taskLayout.kind
+
+  // Diagnostic breadcrumb for "the selector no longer matches the grid".
+  // Keyed on the geometry signature, so this fires on a layout switch, a
+  // custom-preset edit or a Task count change — not on every render.
+  useEffect(() => {
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_SENDER_LAYOUT_SYNC, {
+      kind: taskLayoutKindRef.current,
+      columns: geometryRef.current.columns,
+      rows: geometryRef.current.rows,
+      slots: geometryRef.current.slots.length,
+      signature: geometrySignature
+    })
+  }, [geometrySignature])
 
   const recordTaskSelectionTrace = (id: string, selected: boolean, selectedCount: number) => {
     if (!performanceTrace.enabled) return
@@ -297,9 +350,17 @@ export const PromptSender = memo(function PromptSender({
         }))
       },
       getGridLayout: () => ({
-        columns: 2,
-        rows: Math.max(1, Math.ceil(terminalsRef.current.length / 2)),
-        totalCards: terminalsRef.current.length
+        columns: geometryRef.current.columns,
+        rows: geometryRef.current.rows,
+        totalCards: terminalsRef.current.length,
+        layoutKind: taskLayoutKindRef.current,
+        slots: geometryRef.current.slots.map((slot, index) => ({
+          terminalId: terminalsRef.current[index]?.id ?? '',
+          colStart: slot.colStart,
+          colSpan: slot.colSpan,
+          rowStart: slot.rowStart,
+          rowSpan: slot.rowSpan
+        }))
       }),
       getNotice: () => selectionNoticeRef.current || null,
       isSubmitting: () => submittingRef.current || isSubmittingRef.current,
@@ -356,7 +417,13 @@ export const PromptSender = memo(function PromptSender({
 
   return (
     <div className="prompt-sender">
-      <div className="prompt-sender-terminals" style={terminalGridStyle}>
+      <div
+        className="prompt-sender-terminals"
+        style={gridTrackStyle}
+        data-task-columns={geometry.columns}
+        data-task-rows={geometry.rows}
+        data-task-layout-kind={taskLayout.kind}
+      >
         {terminals.length === 0 ? (
           <div className="prompt-sender-empty">{t('promptSender.noTerminals')}</div>
         ) : (
@@ -364,7 +431,15 @@ export const PromptSender = memo(function PromptSender({
             <div
               key={terminal.id}
               className={`prompt-sender-terminal ${selectedTerminals.has(terminal.id) ? 'is-selected' : ''}`}
-              style={{ '--t-color': `var(--rainbow-${index + 1})` } as React.CSSProperties}
+              // Only six rainbow accents exist; an 8-Task layout would
+              // otherwise resolve `var(--rainbow-7)` to nothing and drop the
+              // card's border colour entirely.
+              style={{
+                ...slotStyle(geometry.slots[index]),
+                '--t-color': `var(--rainbow-${(index % RAINBOW_SLOT_COUNT) + 1})`
+              } as React.CSSProperties}
+              data-terminal-id={terminal.id}
+              data-slot-index={index}
               role="button"
               tabIndex={0}
               aria-pressed={selectedTerminals.has(terminal.id)}
@@ -392,12 +467,33 @@ export const PromptSender = memo(function PromptSender({
                   placeholder={`Task ${index + 1}`}
                 />
               ) : (
-                <span
-                  className="prompt-sender-terminal-name"
-                  title={t('promptSender.doubleClickToRename')}
-                >
-                  {terminal.title || `Task ${index + 1}`}
-                </span>
+                <>
+                  {/*
+                    A slot too narrow for a name shows the Task's position
+                    number instead: a truncated "Tas…" identifies nothing,
+                    while the number is the same handle Cmd+N uses. The swap
+                    is a container query on the card itself, so it tracks the
+                    real slot width rather than the panel width — measured
+                    crossover for an 8-Task 4x2 layout is a panel around
+                    250-280px; the 320px default keeps names.
+                  */}
+                  <span
+                    className="prompt-sender-terminal-name"
+                    title={t('promptSender.taskCardTitle', {
+                      name: terminal.title || `Task ${index + 1}`
+                    })}
+                  >
+                    {terminal.title || `Task ${index + 1}`}
+                  </span>
+                  <span
+                    className="prompt-sender-terminal-index"
+                    title={t('promptSender.taskCardTitle', {
+                      name: terminal.title || `Task ${index + 1}`
+                    })}
+                  >
+                    {index + 1}
+                  </span>
+                </>
               )}
             </div>
           ))
@@ -408,15 +504,16 @@ export const PromptSender = memo(function PromptSender({
         {terminals.length > 0 && (
           <div
             className="prompt-sender-selection-indicator"
-            style={selectionIndicatorStyle}
+            style={gridTrackStyle}
             role="status"
             aria-live="polite"
             aria-label={t('promptSender.selection.aria', { count: selectedCount })}
           >
-            {terminals.map((terminal) => (
+            {terminals.map((terminal, index) => (
               <span
                 key={terminal.id}
                 className={`prompt-sender-selection-cell${selectedTerminals.has(terminal.id) ? ' is-active' : ''}`}
+                style={slotStyle(geometry.slots[index])}
                 data-terminal-id={terminal.id}
                 aria-hidden="true"
               />

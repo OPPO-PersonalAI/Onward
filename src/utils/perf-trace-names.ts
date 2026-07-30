@@ -201,6 +201,26 @@ export const PERF_TRACE_EVENT = {
   RENDERER_SETTINGS_OPEN: 'renderer:settings.open',
   RENDERER_CHANGELOG_OPEN: 'renderer:changelog.open',
 
+  // ───────── Task drag-to-rearrange ─────────
+  // Diagnostic breadcrumbs for "my Tasks jumped around / the order did not
+  // stick". Off the hot path by construction: the pointermove path emits
+  // NOTHING (it runs every frame and only writes CSS transforms), so a trace
+  // shows mode transitions and committed drops only.
+  // Payload carries `trigger: 'long-press' | 'menu'`.
+  RENDERER_TASK_REORDER_MODE_ENTER: 'renderer:task-reorder.mode-enter',
+  // Payload carries `reason: 'esc' | 'outside-click' | 'drop' | 'layout-change'
+  // | 'tab-switch' | 'terminal-count-change'`.
+  RENDERER_TASK_REORDER_MODE_EXIT: 'renderer:task-reorder.mode-exit',
+  // Duration span around the AppState write + DOM reorder. Payload carries
+  // fromIndex / toIndex / count / layoutKind.
+  RENDERER_TASK_REORDER_COMMIT: 'renderer:task-reorder.commit',
+  // A drag that ended without changing the order (dropped on its own slot,
+  // cancelled by ESC, or released outside every slot).
+  RENDERER_TASK_REORDER_CANCEL: 'renderer:task-reorder.cancel',
+  // Custom-layout-only: post-commit forceFit because the Task landed in a
+  // slot of a different size and the PTY has to re-derive cols/rows.
+  RENDERER_TASK_REORDER_REFIT: 'renderer:task-reorder.refit',
+
   // ───────── Background — project file index + tree watch ─────────
   MAIN_FILE_INDEX_BUILD: 'main:file-index.build',
   MAIN_FILE_INDEX_UPDATE: 'main:file-index.update',
@@ -282,6 +302,14 @@ export const PERF_TRACE_EVENT = {
   RENDERER_PROMPT_EDITOR_SUBMIT: 'renderer:prompt.editor.submit',
   RENDERER_PROMPT_EDITOR_CANCEL: 'renderer:prompt.editor.cancel-edit',
   RENDERER_PROMPT_SENDER_DISPATCH: 'renderer:prompt.sender.dispatch',
+  // The Task selector re-derived its grid geometry from the active Task
+  // layout (preset track counts, or a custom preset's rectangles). Instant
+  // marker (ph='i'), emitted only when the resulting shape actually changes
+  // — i.e. on layout switch, custom-preset edit, or Task count change, never
+  // per render. Payload is pure geometry (columns / rows / slot count and
+  // the layout kind), which is exactly what a "left panel does not match the
+  // right grid" report needs to be triaged from a trace alone.
+  RENDERER_PROMPT_SENDER_LAYOUT_SYNC: 'renderer:prompt.sender.layout-sync',
   // Right-click on the prompt input textarea opens a custom context menu
   // (cut/copy/paste/paste-plain, import pinned, save-as-pinned, insert
   // cwd/branch/task title, history, format tools, send-to-task, clear).

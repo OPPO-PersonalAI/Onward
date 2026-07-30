@@ -8,6 +8,50 @@
  */
 import type { AutotestContext, TestResult } from './types'
 
+/** The Task grid of the currently visible Tab. */
+function visibleTaskGridElement(): HTMLElement | null {
+  const wrappers = Array.from(document.querySelectorAll<HTMLElement>('.terminal-grid-wrapper'))
+  const visible = wrappers.find(w => !w.classList.contains('terminal-grid-hidden')) ?? wrappers[0] ?? null
+  return visible?.querySelector<HTMLElement>('.terminal-grid') ?? null
+}
+
+/** The Task selector inside the Prompt panel. */
+function senderGridElement(): HTMLElement | null {
+  const notebooks = Array.from(document.querySelectorAll<HTMLElement>('.prompt-notebook'))
+  const notebook = notebooks.find(n => !n.classList.contains('prompt-notebook-hidden')) ?? notebooks[0] ?? null
+  return notebook?.querySelector<HTMLElement>('.prompt-sender-terminals') ?? null
+}
+
+/**
+ * Track counts as the engine actually resolved them. `grid-template-*`
+ * computes to used pixel sizes ("70px 70px 70px 70px"), so counting the
+ * entries reads the real rendered shape rather than the authored shorthand.
+ */
+function readGridTracks(element: HTMLElement): { columns: number; rows: number } {
+  const style = window.getComputedStyle(element)
+  const count = (value: string) => value.trim().split(/\s+/).filter(part => part && part !== 'none').length
+  return {
+    columns: count(style.gridTemplateColumns),
+    rows: count(style.gridTemplateRows)
+  }
+}
+
+/** 1-based grid rectangle an element occupies, read back from computed style. */
+function readGridArea(element: HTMLElement): { colStart: number; colSpan: number; rowStart: number; rowSpan: number } {
+  const style = window.getComputedStyle(element)
+  const parse = (start: string, end: string) => {
+    const startLine = Number.parseInt(start, 10)
+    const spanMatch = /span\s+(\d+)/.exec(end)
+    return {
+      start: Number.isFinite(startLine) ? startLine : Number.NaN,
+      span: spanMatch ? Number(spanMatch[1]) : 1
+    }
+  }
+  const col = parse(style.gridColumnStart, style.gridColumnEnd)
+  const row = parse(style.gridRowStart, style.gridRowEnd)
+  return { colStart: col.start, colSpan: col.span, rowStart: row.start, rowSpan: row.span }
+}
+
 export async function testPromptSender(ctx: AutotestContext): Promise<TestResult[]> {
   const { log, sleep, waitFor, assert, cancelled } = ctx
   const results: TestResult[] = []
@@ -38,19 +82,35 @@ export async function testPromptSender(ctx: AutotestContext): Promise<TestResult
     })
   }
 
-  // PS-02: 2-column Grid layout
+  // PS-02: the Task selector is the same shape as the Task grid.
+  // Read BOTH sides from real computed CSS rather than from the expected
+  // mapping: a table that agrees with itself proves nothing, and the failure
+  // mode we care about ("the grid moved to 4x2 and the selector stayed 2xN")
+  // only shows up when the two are compared directly.
   if (!cancelled()) {
     const api = getApi()!
     const layout = api.getGridLayout()
-    const expectedRows = Math.max(1, Math.ceil(layout.totalCards / 2))
-    const gridElement = document.querySelector('.prompt-sender-terminals') as HTMLElement | null
-    const gridAutoFlow = gridElement ? window.getComputedStyle(gridElement).gridAutoFlow : null
+    const senderGrid = senderGridElement()
+    const taskGrid = visibleTaskGridElement()
+    const senderTracks = senderGrid ? readGridTracks(senderGrid) : null
+    const taskTracks = taskGrid ? readGridTracks(taskGrid) : null
+    const gridAutoFlow = senderGrid ? window.getComputedStyle(senderGrid).gridAutoFlow : null
     const isRowFlow = typeof gridAutoFlow === 'string' && gridAutoFlow.startsWith('row')
-    _assert('PS-02-grid-layout', layout.columns === 2 && layout.rows === expectedRows && isRowFlow, {
-      columns: layout.columns,
-      rows: layout.rows,
+    const mirrored = senderTracks !== null
+      && taskTracks !== null
+      && senderTracks.columns === taskTracks.columns
+      && senderTracks.rows === taskTracks.rows
+    const apiAgrees = senderTracks !== null
+      && layout.columns === senderTracks.columns
+      && layout.rows === senderTracks.rows
+    _assert('PS-02-grid-layout-mirrors-task-grid', mirrored && apiAgrees && isRowFlow, {
+      dataLayout: taskGrid?.getAttribute('data-layout') ?? null,
+      layoutKind: layout.layoutKind,
+      senderTracks,
+      taskTracks,
+      apiColumns: layout.columns,
+      apiRows: layout.rows,
       totalCards: layout.totalCards,
-      expectedRows,
       gridAutoFlow
     })
   }
@@ -343,6 +403,126 @@ export async function testPromptSender(ctx: AutotestContext): Promise<TestResult
       })
     } else {
       _assert('PS-33-editor-compressible-with-floor', false, { reason: 'editor element not found' })
+    }
+  }
+
+  // PS-34: every card sits on the rectangle its Task occupies in the grid,
+  // in the same DOM order as the Task array. This is the assertion that keeps
+  // drag-to-rearrange honest: reordering rewrites the Task array, and BOTH
+  // grids re-derive placement from it, so card N and grid cell N must always
+  // name the same terminal.
+  if (!cancelled()) {
+    const api = getApi()!
+    const layout = api.getGridLayout()
+    const senderGrid = senderGridElement()
+    const cards = senderGrid
+      ? Array.from(senderGrid.querySelectorAll<HTMLElement>('.prompt-sender-terminal'))
+      : []
+    const cardIds = cards.map(card => card.dataset.terminalId ?? '')
+    const slotIds = layout.slots.map(slot => slot.terminalId)
+    const gridCellIds = Array.from(
+      visibleTaskGridElement()?.querySelectorAll<HTMLElement>('.terminal-grid-cell') ?? []
+    ).map(cell => cell.dataset.terminalId ?? '')
+    const areas = cards.map(readGridArea)
+    const areasMatch = areas.every((area, index) => {
+      const slot = layout.slots[index]
+      return slot
+        && area.colStart === slot.colStart
+        && area.colSpan === slot.colSpan
+        && area.rowStart === slot.rowStart
+        && area.rowSpan === slot.rowSpan
+    })
+    // The grid can hold MORE cells than the selector shows only if the two
+    // disagree about the effective Task count, so compare the shared prefix
+    // and require the selector to cover every visible grid cell.
+    const orderMatchesGrid = cardIds.length === gridCellIds.length
+      && cardIds.every((id, index) => id === gridCellIds[index])
+    _assert(
+      'PS-34-cards-mirror-grid-slots',
+      cards.length > 0 && areasMatch && orderMatchesGrid && cardIds.join('|') === slotIds.join('|'),
+      { cardIds, slotIds, gridCellIds, areas, slots: layout.slots }
+    )
+  }
+
+  // PS-35: the selection swatch beside the action buttons uses the same
+  // scale model — same tracks, same rectangles — so it reads as a miniature
+  // of the layout rather than a second, contradictory one.
+  if (!cancelled()) {
+    const api = getApi()!
+    const layout = api.getGridLayout()
+    const notebook = getLayoutNotebook()
+    const indicator = notebook?.querySelector<HTMLElement>('.prompt-sender-selection-indicator') ?? null
+    const cells = indicator
+      ? Array.from(indicator.querySelectorAll<HTMLElement>('.prompt-sender-selection-cell'))
+      : []
+    const tracks = indicator ? readGridTracks(indicator) : null
+    const areasMatch = cells.every((cell, index) => {
+      const slot = layout.slots[index]
+      const area = readGridArea(cell)
+      return slot
+        && area.colStart === slot.colStart
+        && area.colSpan === slot.colSpan
+        && area.rowStart === slot.rowStart
+        && area.rowSpan === slot.rowSpan
+    })
+    _assert(
+      'PS-35-selection-indicator-mirrors-layout',
+      tracks !== null
+        && tracks.columns === layout.columns
+        && tracks.rows === layout.rows
+        && cells.length === layout.slots.length
+        && areasMatch,
+      { tracks, apiColumns: layout.columns, apiRows: layout.rows, cells: cells.length }
+    )
+  }
+
+  // PS-36: a slot too narrow for a name shows the Task's position number
+  // instead. Both branches are asserted from a real layout pass — the grid is
+  // temporarily forced narrow and then wide, because the panel width alone
+  // cannot reach both sides of the threshold in one run. The override is
+  // reverted before the assertion returns.
+  if (!cancelled()) {
+    const senderGrid = senderGridElement()
+    const firstCard = senderGrid?.querySelector<HTMLElement>('.prompt-sender-terminal') ?? null
+    const name = firstCard?.querySelector<HTMLElement>('.prompt-sender-terminal-name') ?? null
+    const index = firstCard?.querySelector<HTMLElement>('.prompt-sender-terminal-index') ?? null
+    if (senderGrid && firstCard && name && index) {
+      const originalWidth = senderGrid.style.width
+      const measure = async (width: string) => {
+        senderGrid.style.width = width
+        // Two frames: one for the style change to land, one for the container
+        // query to re-evaluate against the new layout.
+        await sleep(120)
+        return {
+          cardWidth: Math.round(firstCard.getBoundingClientRect().width),
+          nameShown: window.getComputedStyle(name).display !== 'none',
+          indexShown: window.getComputedStyle(index).display !== 'none'
+        }
+      }
+      // 40px is under the 44px content-box threshold even for a ONE-column
+      // layout (6px padding + 1px border each side), so the narrow branch is
+      // reachable whatever layout the suite inherited; 640px clears it for
+      // every layout up to 4 columns.
+      const narrow = await measure('40px')
+      const wide = await measure('640px')
+      senderGrid.style.width = originalWidth
+      await sleep(80)
+
+      const narrowOk = !narrow.nameShown && narrow.indexShown
+      const wideOk = wide.nameShown && !wide.indexShown
+      _assert('PS-36-narrow-slot-shows-position-number', narrowOk && wideOk, {
+        narrow,
+        wide
+      })
+      // The override must leave nothing behind: a stuck inline width would
+      // silently break every later suite that reads this panel.
+      _assert('PS-36b-width-override-reverted', senderGrid.style.width === originalWidth, {
+        inlineWidth: senderGrid.style.width,
+        originalWidth,
+        widthAfterRestore: Math.round(firstCard.getBoundingClientRect().width)
+      })
+    } else {
+      _assert('PS-36-narrow-slot-shows-position-number', false, { reason: 'card or labels not found' })
     }
   }
 

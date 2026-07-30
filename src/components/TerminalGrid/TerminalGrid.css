@@ -721,3 +721,134 @@
 .terminal-grid-workdir-notice-close:hover {
   color: var(--text-1);
 }
+
+/* ───────────────────────── Task drag-to-rearrange ─────────────────────────
+ *
+ * Desktop reorder conventions, not mobile ones. Atlassian's pragmatic
+ * drag-and-drop guidelines are explicit that the dragged item stays in place
+ * and dims to 40% while a preview tracks the cursor, and that the preview must
+ * NOT be rotated (Trello's 4deg tilt is called out as a rare exception). The
+ * iOS jiggle has no equivalent in VS Code, Chrome tabs, Figma or Finder — it
+ * reads as "delete mode" on desktop and fights the eye while you are trying to
+ * judge where a Task should land.
+ *
+ * Terminal content therefore stays fully visible for the entire gesture: the
+ * user is choosing WHICH Task goes WHERE, and a grey box tells them neither.
+ *
+ * Layer split (a single element cannot animate two independent transforms):
+ *   .terminal-grid-cell               shift transform (live let-out preview)
+ *   .terminal-grid-rearrange-shield   transparent pointer shield + affordance
+ *   .terminal-grid-rearrange-ghost    cursor-tracking preview, portalled
+ */
+
+.terminal-grid.is-rearranging .terminal-grid-cell {
+  cursor: grab;
+}
+
+.terminal-grid.is-dragging .terminal-grid-cell,
+.terminal-grid.is-dragging .terminal-grid-cell * {
+  cursor: grabbing;
+}
+
+/* Shift transitions run ONLY while a drag is in flight — see the matching
+ * comment in TerminalGrid.tsx where `is-dragging` is applied. */
+.terminal-grid.is-dragging .terminal-grid-cell {
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+  transform-origin: 0 0;
+}
+
+/* Armed-but-idle: a calm, static affordance. An inset accent ring says "this
+ * is grabbable" without animating anything. */
+.terminal-grid.is-rearranging .terminal-grid-rearrange-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  background: transparent;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+/* The slot the drop would land in: a clear target, still see-through. */
+.terminal-grid.is-dragging .terminal-grid-cell.is-drop-target .terminal-grid-rearrange-shield {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* The dragged item stays put and dims to 40% — its stand-in is the ghost.
+ * Dimming (rather than hiding) keeps the source slot legible as "this is the
+ * thing in flight" instead of leaving a hole in the grid. */
+.terminal-grid-cell.is-drag-source {
+  opacity: 0.4;
+}
+
+.terminal-grid-cell.is-drag-source .terminal-grid-rearrange-shield {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+  background: transparent;
+}
+
+/* Cursor-tracking preview. Deliberately lightweight: a WebGL terminal canvas
+ * cannot be cloned into a drag image, so the ghost carries the Task's identity
+ * (number + name) on a lifted, slightly translucent card. No rotation. */
+.terminal-grid-rearrange-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 4000;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--bg-2) 92%, var(--accent) 8%);
+  /* The "lift": a soft, large shadow reads as height above the grid. */
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
+  opacity: 0.95;
+  user-select: none;
+}
+
+.terminal-grid-rearrange-ghost-index {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.terminal-grid-rearrange-ghost-title {
+  font-size: var(--font-sm);
+  color: var(--text-1);
+  max-width: 90%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Post-drop confirmation flash on the slot the Task landed in — the spec's
+ * 700ms settle, so the eye can follow where the thing went after release. */
+.terminal-grid-cell.is-drop-settled::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  animation: terminal-grid-rearrange-settle 700ms cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
+}
+
+@keyframes terminal-grid-rearrange-settle {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* Respect the OS "reduce motion" setting: everything stays usable, it just
+ * snaps instead of sliding. */
+@media (prefers-reduced-motion: reduce) {
+  .terminal-grid.is-dragging .terminal-grid-cell {
+    transition: none;
+  }
+  .terminal-grid-cell.is-drop-settled::after {
+    animation-duration: 1ms;
+  }
+}

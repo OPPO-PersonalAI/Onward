@@ -382,10 +382,14 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
     setTerminalCustomName
   } = useAppState()
 
-  const tabEffectiveCount = useMemo(
-    () => getEffectiveCount(tab.layoutMode, state.customLayoutPresets),
+  // Resolved once and passed down: the Prompt panel's Task selector mirrors
+  // this layout's shape, so it must read the SAME resolution the grid uses
+  // (including the degrade-to-single fallback for a deleted custom preset).
+  const tabResolvedLayout = useMemo(
+    () => resolveLayout(tab.layoutMode, state.customLayoutPresets),
     [tab.layoutMode, state.customLayoutPresets]
   )
+  const tabEffectiveCount = tabResolvedLayout.effectiveCount
 
   const terminals: TerminalInfo[] = useMemo(() => {
     return tab.terminals.slice(0, tabEffectiveCount).map((t, index) => ({
@@ -512,6 +516,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   return (
     <PromptNotebook
       terminals={terminals}
+      taskLayout={tabResolvedLayout}
       onSend={onSend}
       onExecute={onExecute}
       onSendAndExecute={onSendAndExecute}

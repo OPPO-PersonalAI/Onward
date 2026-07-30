@@ -196,6 +196,8 @@ const en = {
   'terminalDropdown.openBrowser': 'Open Browser',
   'terminalDropdown.closeBrowser': 'Close Browser',
   'terminalDropdown.codeAgent': 'Launch Code Agent',
+  'terminalDropdown.rearrangeTasks': 'Rearrange Tasks',
+  'terminalDropdown.rearrangeTasksDisabledHint': 'Add a second Task to rearrange the grid',
 
   'terminalTitleMenu.ariaLabel': 'Terminal title menu',
   'terminalTitleMenu.renameItem': 'Rename',
@@ -442,7 +444,11 @@ const en = {
   'promptSearch.clear': 'Clear search',
 
   'promptSender.noTerminals': 'No terminals',
-  'promptSender.doubleClickToRename': 'Double-click to edit name',
+  // Task card tooltip. Carries the full name because a narrow slot shows only
+  // the Task's position number, and the name may be truncated even when shown.
+  // Replaced the former bare `doubleClickToRename` hint, which said what the
+  // card does but not which Task it is.
+  'promptSender.taskCardTitle': '{{name}}\nDouble-click to edit name',
   'promptSender.selectTerminalFirst': 'Select at least one terminal first',
   'promptSender.action.send': 'send',
   'promptSender.action.execute': 'execute',
@@ -1668,6 +1674,8 @@ const zhCN: LocaleTranslations = {
   'terminalDropdown.openBrowser': '打开浏览器',
   'terminalDropdown.closeBrowser': '关闭浏览器',
   'terminalDropdown.codeAgent': '启动编码助手',
+  'terminalDropdown.rearrangeTasks': '重新排列 Task',
+  'terminalDropdown.rearrangeTasksDisabledHint': '至少需要两个 Task 才能重新排列',
 
   'terminalTitleMenu.ariaLabel': '终端标题菜单',
   'terminalTitleMenu.renameItem': '重命名',
@@ -1914,7 +1922,7 @@ const zhCN: LocaleTranslations = {
   'promptSearch.clear': '清除搜索',
 
   'promptSender.noTerminals': '暂无终端',
-  'promptSender.doubleClickToRename': '双击编辑名称',
+  'promptSender.taskCardTitle': '{{name}}\n双击编辑名称',
   'promptSender.selectTerminalFirst': '请先选择一个终端',
   'promptSender.action.send': '发送',
   'promptSender.action.execute': '执行',
