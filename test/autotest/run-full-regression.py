@@ -144,6 +144,9 @@ SCRIPTS: List[str] = [
     # stays in run-git-state-mirror-quit-autotest.sh (runnable whole, default 5).
     "test/autotest/run-git-state-mirror-quit-a-autotest.sh",
     "test/autotest/run-git-state-mirror-quit-b-autotest.sh",
+    # POSIX-only: SIGTERM/SIGINT must drive the bounded no-confirm graceful
+    # quit (2026-07-31 fix) instead of parking on the confirm dialog.
+    "test/autotest/run-signal-quit-autotest.sh",
     # Split into 4 sub-5-min runners: the whole suite overran 1500s (class-2).
     # static (fast, EDR-independent) + gsm17 + gsm18 baseline groups + the 3
     # watcher-failure-injection passes. gsm17/gsm18 can still fail on an EDR host
@@ -835,9 +838,25 @@ def kill_app(app_name: str) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     else:
-        # `pkill -x` requires an exact match against the comm name.
+        # `pkill -x` requires an exact match against the comm name. SIGTERM
+        # now drives the app's bounded graceful quit (signal handlers in
+        # electron/main/index.ts); the SIGKILL escalation below is
+        # defence-in-depth for a wedged teardown so the next runner always
+        # starts from a clean process table.
         subprocess.run(
             ["pkill", "-x", app_name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        for _ in range(16):  # up to ~8s for the graceful teardown
+            alive = subprocess.run(
+                ["pgrep", "-x", app_name],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode == 0
+            if not alive:
+                return
+            time.sleep(0.5)
+        subprocess.run(
+            ["pkill", "-9", "-x", app_name],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 

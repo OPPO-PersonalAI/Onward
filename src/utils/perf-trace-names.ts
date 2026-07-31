@@ -33,6 +33,11 @@ export const PERF_TRACE_EVENT = {
   MAIN_TRACE_START: 'main:trace-start',
   MAIN_TRACE_STOP: 'main:trace-stop',
   MAIN_APP_BEFORE_QUIT: 'main:app.before-quit',
+  // Main: a POSIX termination signal (SIGTERM/SIGINT) reached the main process
+  // and was routed to the bounded no-confirm graceful quit (ph=i; payload:
+  // signal, isQuitting, ready). Before this handler existed the signal parked
+  // on the confirm dialog's modal runloop forever (2026-07-31 investigation).
+  MAIN_APP_SIGNAL_QUIT: 'main:app.signal-quit',
   MAIN_APP_WILL_QUIT: 'main:app.will-quit',
 
   // ───────── Main process — event-loop + stall monitor ─────────

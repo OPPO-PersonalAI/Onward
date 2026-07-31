@@ -527,6 +527,9 @@ export async function requestRelaunchForRecovery(): Promise<{ success: boolean; 
   return { success: true }
 }
 
+// Bounded graceful quit WITHOUT the confirm dialog. Shared by every caller
+// whose quit decision is already made: the DEBUG_QUIT IPC (autotest suites),
+// the smoke-launch probe, and the SIGTERM/SIGINT handlers below.
 export async function requestQuitForDebug(): Promise<{ success: boolean; error?: string }> {
   if (isQuitting) {
     return { success: false, error: 'Application is already quitting.' }
@@ -956,6 +959,9 @@ app.whenReady().then(async () => {
   performanceTrace.start()
   performanceTrace.startEventLoopMonitor()
   performanceTrace.initialize()
+  // Post-ready on purpose — see registerSignalQuitHandlers' header: a
+  // pre-ready registration loses the sigaction slot to Chromium.
+  registerSignalQuitHandlers()
 
   // Trace-rotation autotest hook: when ONWARD_TRACE_ROTATION_STRESS_MB is
   // set, write that many MB of synthetic events through the store and quit
@@ -1172,6 +1178,44 @@ app.on('window-all-closed', async () => {
   }
 })
 
+// A termination signal is a DECIDED quit (OS shutdown/logout, pkill, test
+// harness) — it must never park on the interactive confirm dialog. Chromium's
+// default converts SIGTERM into the quit flow, which lands in before-quit →
+// confirmQuit() → -[NSAlert runModal] blocking forever with nobody to click
+// (2026-07-31 SIGTERM investigation: 3/3 SURVIVED_SIGTERM, stack sampled in
+// runModal). Route signals through the same bounded no-confirm teardown the
+// debug quit uses; its hard-exit floor keeps termination bounded even when a
+// teardown step wedges.
+//
+// MUST be called from app.whenReady(): Chromium installs its own native
+// sigaction during browser startup, replacing any libuv handler registered at
+// module-import time (a pre-ready `process.on` silently loses the slot — the
+// dialog still appeared with the handler in the bundle). Post-ready
+// registration wins the slot back, exactly like performance-trace's
+// flush-only handlers do; when both are installed they share libuv's
+// dispatch and both fire (flush first is harmless, this one decides exit).
+function registerSignalQuitHandlers(): void {
+  for (const terminationSignal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(terminationSignal, () => {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_SIGNAL_QUIT, {
+        signal: terminationSignal,
+        isQuitting,
+        ready: app.isReady()
+      })
+      if (isQuitting) return
+      if (!app.isReady()) {
+        isQuitting = true
+        app.exit(0)
+        return
+      }
+      void requestQuitForDebug().catch((error) => {
+        console.warn('[Lifecycle] signal quit failed:', error)
+        app.exit(1)
+      })
+    })
+  }
+}
+
 app.on('before-quit', async (e) => {
   performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_BEFORE_QUIT, {
     isQuitting,
@@ -1184,13 +1228,23 @@ app.on('before-quit', async (e) => {
     return
   }
 
-  // Prevent default exit and show confirmation dialog
+  // Reaching here un-armed means the quit was EXTERNALLY initiated: Chromium's
+  // SIGTERM conversion (when its sigaction beat libuv's — the process.on
+  // handlers above are registered post-ready yet the slot ownership races per
+  // profile), a macOS logout/shutdown AppleEvent, or a stray app.quit(). The
+  // decision is already made and nobody is present to answer a dialog — the
+  // pre-fix confirmQuit() here parked -[NSAlert runModal] forever and made the
+  // app unkillable by SIGTERM. Run the bounded no-confirm teardown instead.
+  // Interactive quits never arrive un-armed: menu Cmd+Q, tray quit, and the
+  // window-close path all call requestQuit() (confirm dialog included)
+  // themselves and set isQuitting before any app.quit().
   e.preventDefault()
 
   try {
-    await requestQuit()
+    await requestQuitForDebug()
   } catch (error) {
-    console.warn('[Lifecycle] before-quit confirmation failed:', error)
+    console.warn('[Lifecycle] external quit teardown failed:', error)
+    app.exit(1)
   }
 })
 

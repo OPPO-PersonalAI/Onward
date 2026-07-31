@@ -17,6 +17,7 @@ import { isMainThread, parentPort } from 'worker_threads'
 
 import { traceStore, TRACE_STORE_ENABLED, type TraceStoreEvent } from './trace-store'
 import { wallNowUs } from './trace-clock'
+import { shouldReRaiseSignalAfterTraceFlush } from './perf-trace-signal-policy'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type ElectronApp = {
@@ -438,13 +439,23 @@ class PerformanceTrace {
     // Register signal handlers so SIGTERM / SIGINT (tests, CI, Ctrl-C)
     // still flush the trace store. The class is a singleton so these
     // handlers attach at most once; Electron `app.on('will-quit')`
-    // still covers graceful menu-quit paths.
+    // still covers graceful menu-quit paths. Exit sequencing is NOT this
+    // module's job: in the Electron main process the lifecycle signal
+    // handlers (electron/main/index.ts) drive the bounded graceful quit,
+    // while worker processes must RE-RAISE so the default termination still
+    // happens — a flush-only `once` handler used to swallow the signal.
+    const electronApp = loadElectronApp()
     const shutdown = () => {
       try { this.stop() } catch { /* already closing */ }
     }
-    process.once('SIGTERM', shutdown)
-    process.once('SIGINT', shutdown)
-    const electronApp = loadElectronApp()
+    const onTerminationSignal = (signal: NodeJS.Signals) => {
+      shutdown()
+      if (shouldReRaiseSignalAfterTraceFlush(Boolean(electronApp))) {
+        process.kill(process.pid, signal)
+      }
+    }
+    process.once('SIGTERM', () => onTerminationSignal('SIGTERM'))
+    process.once('SIGINT', () => onTerminationSignal('SIGINT'))
     if (electronApp) {
       try { electronApp.once('will-quit', shutdown) } catch { /* lifecycle missing */ }
       try { electronApp.once('before-quit', shutdown) } catch { /* lifecycle missing */ }

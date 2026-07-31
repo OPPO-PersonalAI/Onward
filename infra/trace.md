@@ -192,6 +192,7 @@ append new names, never rename existing ones.
 | `MAIN_TRACE_START` | `main:trace-start` | `i` (g) | `performance-trace.ts::initialize()` first call |
 | `MAIN_TRACE_STOP` | `main:trace-stop` | `i` (t) | `performance-trace.ts::stop()` |
 | `MAIN_APP_BEFORE_QUIT` | `main:app.before-quit` | `i` | `electron/main/index.ts` `app.on('before-quit')` |
+| `MAIN_APP_SIGNAL_QUIT` | `main:app.signal-quit` | `i` | `electron/main/index.ts` SIGTERM/SIGINT handlers — a POSIX termination signal was routed to the bounded no-confirm graceful quit (pre-fix it parked forever on the confirmQuit modal). Tagged `signal`, `isQuitting`, `ready`. |
 | `MAIN_APP_WILL_QUIT` | `main:app.will-quit` | `i` | `electron/main/index.ts` `app.on('will-quit')` |
 
 #### Monitors (1 s tick)
