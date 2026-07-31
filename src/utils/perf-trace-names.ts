@@ -1092,6 +1092,34 @@ export const PERF_TRACE_EVENT = {
   // Renderer: a link click resolved to the URL the preview frame already
   // shows; the host reloaded in place instead of a dead src push (ph=i).
   RENDERER_PROJECT_EDITOR_HTML_SAME_URL_RELOAD: 'renderer:project-editor.html-same-url-reload',
+  // Main: an HTML Preview link click was classified into a navigation route
+  // (ph=i; payload: kind, ext). Breadcrumb for "clicking a link broke the
+  // preview / opened the wrong surface" reports — shows what the router saw.
+  MAIN_HTML_PREVIEW_LINK_CLASSIFIED: 'main:html-preview.link-classified',
+  // Renderer: a preview link (HTML or Markdown preview) dispatched a local
+  // project file to the Project Editor's viewer stack (ph=i; payload:
+  // sourceKind, ext). The "open in matching viewer" happy-path breadcrumb.
+  RENDERER_PROJECT_EDITOR_PREVIEW_LINK_OPEN_FILE: 'renderer:project-editor.preview-link-open-file',
+  // Renderer: a preview link was refused (outside-root / invalid / unresolvable)
+  // and surfaced as a status message instead of navigating (ph=i; payload:
+  // sourceKind, reason). The rejection branch's breadcrumb.
+  RENDERER_PROJECT_EDITOR_PREVIEW_LINK_BLOCKED: 'renderer:project-editor.preview-link-blocked',
+  // Renderer: the return bar jumped back to the preview file a link came from
+  // (ph=i; payload: sourceKind). Closes the link round-trip evidence chain.
+  RENDERER_PROJECT_EDITOR_PREVIEW_LINK_RETURN: 'renderer:project-editor.preview-link-return',
+  // Renderer: the open-choice dialog routed a file to the OS default app
+  // (ph=i; payload: ext, remembered). Covers the 'system' FileOpenChoiceMode.
+  RENDERER_PROJECT_EDITOR_OPEN_CHOICE_SYSTEM_APP: 'renderer:project-editor.open-choice-system-app',
+  // Renderer: an external http(s) preview link handed off to the Open Browser
+  // panel (editor soft-closes with retention first; ph=i; payload: host,
+  // urlLen). The fix for the "external link white-screens the iframe" bug.
+  RENDERER_PROJECT_EDITOR_PREVIEW_LINK_EXTERNAL_TO_BROWSER: 'renderer:project-editor.preview-link-external-to-browser',
+  // Renderer: a mailto:/tel: preview link routed to the OS default handler
+  // (ph=i; payload: protocol, sourceKind).
+  RENDERER_PROJECT_EDITOR_PREVIEW_LINK_EXTERNAL_PROTOCOL: 'renderer:project-editor.preview-link-external-protocol',
+  // Renderer: closing an editor-initiated Open Browser session auto-reopened
+  // the Project Editor (one-shot round-trip return; ph=i).
+  RENDERER_TERMINAL_GRID_BROWSER_RETURN_TO_EDITOR: 'renderer:terminal-grid.browser-return-to-editor',
   // Renderer: persist refused to write an active file that was opened under a
   // different scope (cross-Task contamination guard; site=snapshot|restore-null).
   RENDERER_PROJECT_EDITOR_PERSIST_ACTIVE_FILE_GUARDED: 'renderer:project-editor.persist-active-file-guarded',

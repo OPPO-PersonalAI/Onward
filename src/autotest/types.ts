@@ -534,6 +534,12 @@ export interface ProjectEditorDebugApi {
     activeFilePath: string | null
   }
   triggerSourceReturnBack?: () => Promise<boolean>
+  getPreviewLinkReturnState?: () => {
+    sourceFilePath: string
+    sourceKind: 'html' | 'markdown'
+  } | null
+  triggerPreviewLinkReturnBack?: () => Promise<boolean>
+  getLastMarkdownPreviewLinkClick?: () => { href: string; route: string; at: number } | null
   getDiffReturnBarState?: () => {
     visible: boolean
     backEnabled: boolean

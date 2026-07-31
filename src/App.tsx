@@ -1781,6 +1781,13 @@ function AppContent({
       const anchor = target?.closest('a[href]') as HTMLAnchorElement | null
       if (!anchor) return
 
+      // The Markdown preview owns its own links (anchor scroll, viewer
+      // dispatch for project files, external confirm — see ProjectEditor's
+      // handleMarkdownPreviewLinkClick). Without this exclusion the guard
+      // double-handles http links and swallows file:// links at capture
+      // phase before the preview handler can route them.
+      if (anchor.closest('.project-editor-preview-body')) return
+
       const href = anchor.getAttribute('href')
       if (!href) return
 

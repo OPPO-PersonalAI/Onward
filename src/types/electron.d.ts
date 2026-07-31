@@ -1205,6 +1205,7 @@ export interface DebugAPI {
   shellReset: () => Promise<void>
   shellGetLastOpenedPath: () => Promise<string | null>
   shellGetLastRevealedPath: () => Promise<string | null>
+  shellGetLastExternalUrl: () => Promise<string | null>
   readTelemetryLog: () => Promise<string>
   /**
    * Autotest-only: synchronously record an `autotest:bundle-marker`
@@ -1290,6 +1291,14 @@ export interface BrowserAPI {
   onWebviewInput: (callback: (webContentsId: number, action: 'escape' | 'reload' | 'zoom-in' | 'zoom-out' | 'zoom-reset') => void) => () => void
 }
 
+export type HtmlPreviewLinkClassification =
+  | { kind: 'external' }
+  | { kind: 'external-protocol' }
+  | { kind: 'in-frame'; filePath: string; url: string }
+  | { kind: 'project-file'; filePath: string; relativePath: string }
+  | { kind: 'outside-root' }
+  | { kind: 'invalid'; reason: string }
+
 export interface HtmlPreviewAPI {
   createSession: (rootPath: string, filePath: string, reloadKey: number) => Promise<{
     success: boolean
@@ -1299,6 +1308,7 @@ export interface HtmlPreviewAPI {
   }>
   releaseSession: (sessionId: string) => Promise<boolean>
   validateNavigation: (sessionId: string, url: string) => Promise<boolean>
+  classifyNavigation: (sessionId: string, url: string) => Promise<HtmlPreviewLinkClassification>
 }
 
 export interface FeedbackDiagnosticBundleVerificationCheck {

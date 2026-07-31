@@ -1462,5 +1462,355 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
     }
   }
 
+  // ── Preview-link viewer dispatch + one-click return (PHTML-41..45) ──
+  // A link inside the HTML preview that targets a non-HTML project file must
+  // open the matching Project Editor viewer (not navigate the iframe into an
+  // octet-stream dead end), arm the one-click return bar, and the Markdown
+  // preview must dispatch its local links through the same pipeline.
+  const MD_FIXTURE_PATH = 'html-preview/linked-notes.md'
+  const PY_FIXTURE_PATH = 'html-preview/linked-script.py'
+  const MD_LINKED_MARKER = 'MD_LINKED_MARKER'
+  const PY_LINKED_MARKER = 'PY_LINKED_MARKER'
+  const returnBarButton = () =>
+    document.querySelector<HTMLButtonElement>('[data-testid="project-editor-preview-link-return-back"]')
+  const clickPreviewLinkWithRetry = async (linkId: string, timeoutMs = 8000): Promise<boolean> => {
+    const start = performance.now()
+    while (performance.now() - start < timeoutMs) {
+      if (await clickPreviewLink(linkId)) return true
+      await sleep(200)
+    }
+    return false
+  }
+  const waitForMarkdownPreviewText = (label: string, marker: string) => waitFor(
+    label,
+    () => Boolean(document.querySelector('.project-editor-preview-content')?.textContent?.includes(marker)),
+    15000,
+    150
+  )
+  const markdownPreviewLink = (hrefSuffix: string): HTMLAnchorElement | null => {
+    const anchors = document.querySelectorAll<HTMLAnchorElement>('.project-editor-preview-content a[href]')
+    for (const anchor of anchors) {
+      if ((anchor.getAttribute('href') ?? '').endsWith(hrefSuffix)) return anchor
+    }
+    return null
+  }
+  // Rendered-markdown clicks race the preview's re-render (a session-cache
+  // reveal followed by a fresh worker render replaces the innerHTML, detaching
+  // a previously queried anchor). Re-query + click per attempt and observe the
+  // outcome, logging each attempt so a failure explains itself.
+  const clickMarkdownPreviewLink = async (
+    hrefSuffix: string,
+    waitLabel: string,
+    landed: () => boolean
+  ): Promise<{ ok: boolean; attempts: Array<Record<string, unknown>> }> => {
+    const attempts: Array<Record<string, unknown>> = []
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const link = markdownPreviewLink(hrefSuffix)
+      const detail: Record<string, unknown> = {
+        attempt,
+        href: link?.getAttribute('href') ?? null,
+        connected: link?.isConnected ?? null
+      }
+      attempts.push(detail)
+      link?.click()
+      const opened = await waitFor(`${waitLabel}-${attempt}`, landed, 2500, 100)
+      detail.statusError = Boolean(document.querySelector('.project-editor-status.error'))
+      detail.returnState = getApi()?.getPreviewLinkReturnState?.() ?? null
+      detail.activeFilePath = getApi()?.getActiveFilePath?.() ?? null
+      detail.lastClick = getApi()?.getLastMarkdownPreviewLinkClick?.() ?? null
+      if (opened) return { ok: true, attempts }
+    }
+    ctx.log('md-preview-link-click-exhausted', { hrefSuffix, attempts })
+    return { ok: false, attempts }
+  }
+
+  const mdLinkClicked = await clickPreviewLinkWithRetry('nav-md-link')
+  const mdOpened = await waitFor(
+    'phtml-md-link-open',
+    () => getApi()?.getActiveFilePath?.() === MD_FIXTURE_PATH,
+    10000,
+    100
+  )
+  const mdPreviewRendered = await waitForMarkdownPreviewText('phtml-md-preview-rendered', MD_LINKED_MARKER)
+  record('PHTML-41-html-link-opens-markdown-viewer', Boolean(mdLinkClicked && mdOpened && mdPreviewRendered), {
+    mdLinkClicked,
+    activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
+    mdPreviewRendered
+  })
+  if (!mdOpened || cancelled()) return results
+
+  const armedReturnState = getApi()?.getPreviewLinkReturnState?.() ?? null
+  record('PHTML-42-preview-link-return-bar-armed', Boolean(
+    armedReturnState &&
+    armedReturnState.sourceFilePath === fixturePath &&
+    armedReturnState.sourceKind === 'html' &&
+    returnBarButton()
+  ), {
+    returnState: armedReturnState,
+    hasReturnButton: Boolean(returnBarButton())
+  })
+  if (cancelled()) return results
+
+  const returnTriggered = await (getApi()?.triggerPreviewLinkReturnBack?.() ?? Promise.resolve(false))
+  const backOnHtml = await waitFor(
+    'phtml-return-back-to-html',
+    () => getApi()?.getActiveFilePath?.() === fixturePath,
+    10000,
+    100
+  )
+  const readerBackVisible = await waitFor(
+    'phtml-return-reader-visible',
+    () => Boolean(getApi()?.isHtmlReaderVisible?.() && getApi()?.getHtmlReaderState?.()?.browserId),
+    10000,
+    100
+  )
+  const returnCleared = await waitFor(
+    'phtml-return-context-cleared',
+    () => (getApi()?.getPreviewLinkReturnState?.() ?? null) === null && !returnBarButton(),
+    5000,
+    100
+  )
+  record('PHTML-43-return-bar-restores-source-html', Boolean(
+    returnTriggered && backOnHtml && readerBackVisible && returnCleared
+  ), {
+    returnTriggered,
+    activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
+    readerBackVisible,
+    returnCleared
+  })
+  if (!backOnHtml || cancelled()) return results
+
+  // Markdown preview → local source file dispatch, then the return round trip.
+  const mdReClicked = await clickPreviewLinkWithRetry('nav-md-link')
+  const mdReOpened = await waitFor(
+    'phtml-md-link-reopen',
+    () => getApi()?.getActiveFilePath?.() === MD_FIXTURE_PATH,
+    10000,
+    100
+  )
+  const mdRenderedAgain = await waitForMarkdownPreviewText('phtml-md-preview-rendered-again', MD_LINKED_MARKER)
+  const pyClick = await clickMarkdownPreviewLink(
+    'linked-script.py',
+    'phtml-md-source-link-open',
+    () => getApi()?.getActiveFilePath?.() === PY_FIXTURE_PATH
+  )
+  const pyEditorHasContent = pyClick.ok && await waitFor(
+    'phtml-md-source-link-content',
+    () => Boolean(getApi()?.getEditorContent?.().includes(PY_LINKED_MARKER)),
+    10000,
+    100
+  )
+  const mdReturnState = getApi()?.getPreviewLinkReturnState?.() ?? null
+  const mdReturnTriggered = await (getApi()?.triggerPreviewLinkReturnBack?.() ?? Promise.resolve(false))
+  const backOnMd = await waitFor(
+    'phtml-md-return-back',
+    () => getApi()?.getActiveFilePath?.() === MD_FIXTURE_PATH,
+    10000,
+    100
+  )
+  record('PHTML-44-md-preview-link-opens-source-and-returns', Boolean(
+    mdReClicked && mdReOpened && mdRenderedAgain && pyClick.ok && pyEditorHasContent &&
+    mdReturnState?.sourceFilePath === MD_FIXTURE_PATH &&
+    mdReturnState?.sourceKind === 'markdown' &&
+    mdReturnTriggered && backOnMd
+  ), {
+    mdReClicked,
+    pyClickAttempts: pyClick.attempts,
+    pyOpened: pyClick.ok,
+    pyEditorHasContent,
+    mdReturnState,
+    backOnMd
+  })
+  if (!backOnMd || cancelled()) return results
+
+  // A markdown link that escapes the project root survives as a raw relative
+  // href; clicking it must keep the active file and surface an error status
+  // (the pre-fix behaviour was a silent no-op). The status toast auto-clears
+  // after 2s, so the DOM poll races it with a tight interval.
+  const mdRenderedForBlocked = await waitForMarkdownPreviewText('phtml-md-preview-blocked-ready', MD_LINKED_MARKER)
+  const blockedClick = await clickMarkdownPreviewLink(
+    'outside-preview-root.md',
+    'phtml-md-blocked-status',
+    () => Boolean(document.querySelector('.project-editor-status.error'))
+  )
+  const stillOnMd = getApi()?.getActiveFilePath?.() === MD_FIXTURE_PATH
+  record('PHTML-45-md-outside-root-link-blocked-with-status', Boolean(
+    mdRenderedForBlocked && blockedClick.ok && stillOnMd
+  ), {
+    blockedClickAttempts: blockedClick.attempts,
+    blockedStatusSeen: blockedClick.ok,
+    activeFilePath: getApi()?.getActiveFilePath?.() ?? null
+  })
+
+  // ── Link-matrix acceptance: file:// routes, mailto, data:, and the
+  //    external-link → Open Browser panel handoff round trips (PHTML-46..49) ──
+  interface BrowserPanelDebugApiLite {
+    getBrowserId: () => string | null
+    evaluate: (script: string) => Promise<unknown>
+    closeKeepAlive: () => void
+  }
+  const browserDbg = (): BrowserPanelDebugApiLite | undefined =>
+    (window as Window & { __onwardBrowserPanelDebug?: BrowserPanelDebugApiLite }).__onwardBrowserPanelDebug
+  const LINK_MATRIX_PATH = 'html-preview/link-matrix.html'
+  const LINK_MATRIX_MARKER = 'LINK_MATRIX_MARKER'
+
+  const openLinkMatrix = async (label: string): Promise<boolean> => {
+    if (getApi()?.getActiveFilePath?.() !== LINK_MATRIX_PATH || !(getApi()?.isOpen?.() ?? false)) {
+      await openFileInEditor(LINK_MATRIX_PATH)
+    }
+    const active = await waitFor(
+      `${label}-active`,
+      () => getApi()?.getActiveFilePath?.() === LINK_MATRIX_PATH,
+      10000,
+      100
+    )
+    const rendered = active && (await waitForDocumentState(
+      `${label}-rendered`,
+      (state) => Boolean(state.bodyText?.includes(LINK_MATRIX_MARKER))
+    )).ok
+    return Boolean(active && rendered)
+  }
+
+  const matrixReady = await openLinkMatrix('phtml-link-matrix-open')
+  record('PHTML-46-link-matrix-renders', matrixReady, {
+    activeFilePath: getApi()?.getActiveFilePath?.() ?? null
+  })
+  if (!matrixReady || cancelled()) return results
+
+  // file:// absolute inside root → viewer dispatch + return; outside → blocked.
+  const fileInRootClicked = await clickPreviewLinkWithRetry('lm-file-in-root')
+  const fileInRootOpened = await waitFor(
+    'phtml-file-in-root-open',
+    () => getApi()?.getActiveFilePath?.() === MD_FIXTURE_PATH,
+    10000,
+    100
+  )
+  const fileInRootReturnState = getApi()?.getPreviewLinkReturnState?.() ?? null
+  const fileInRootReturned = await (getApi()?.triggerPreviewLinkReturnBack?.() ?? Promise.resolve(false))
+  const backOnMatrixAfterFile = await openLinkMatrix('phtml-file-in-root-return')
+  const fileOutsideClicked = await clickPreviewLinkWithRetry('lm-file-outside')
+  const fileOutsideBlocked = await waitFor(
+    'phtml-file-outside-blocked',
+    () => Boolean(document.querySelector('.project-editor-status.error')),
+    5000,
+    80
+  )
+  const stillOnMatrixAfterOutside = getApi()?.getActiveFilePath?.() === LINK_MATRIX_PATH
+  record('PHTML-47-file-url-routes', Boolean(
+    fileInRootClicked && fileInRootOpened &&
+    fileInRootReturnState?.sourceFilePath === LINK_MATRIX_PATH &&
+    fileInRootReturned && backOnMatrixAfterFile &&
+    fileOutsideClicked && fileOutsideBlocked && stillOnMatrixAfterOutside
+  ), {
+    fileInRootOpened,
+    fileInRootReturnState,
+    backOnMatrixAfterFile,
+    fileOutsideBlocked,
+    activeFilePath: getApi()?.getActiveFilePath?.() ?? null
+  })
+  if (!backOnMatrixAfterFile || cancelled()) return results
+
+  // mailto → OS handler (autotest stub records the URL); data: → blocked.
+  // Re-anchor on the matrix page first so a prior case's drift cannot cascade.
+  const matrixReadyForMailto = await openLinkMatrix('phtml-mailto-prepare')
+  if (!matrixReadyForMailto || cancelled()) return results
+  await window.electronAPI.debug.shellReset()
+  const mailtoClicked = await clickPreviewLinkWithRetry('lm-mailto')
+  const mailtoRouted = await (async () => {
+    const start = performance.now()
+    while (performance.now() - start < 5000) {
+      const lastUrl = await window.electronAPI.debug.shellGetLastExternalUrl()
+      if (lastUrl === 'mailto:test@example.com') return true
+      await sleep(120)
+    }
+    return false
+  })()
+  const editorAliveAfterMailto = Boolean(getApi()?.isOpen?.())
+  const dataClicked = await clickPreviewLinkWithRetry('lm-data')
+  const dataBlocked = await waitFor(
+    'phtml-data-blocked',
+    () => Boolean(document.querySelector('.project-editor-status.error')),
+    5000,
+    80
+  )
+  record('PHTML-48-mailto-system-and-data-blocked', Boolean(
+    mailtoClicked && mailtoRouted && editorAliveAfterMailto && dataClicked && dataBlocked &&
+    getApi()?.getActiveFilePath?.() === LINK_MATRIX_PATH
+  ), {
+    mailtoRouted,
+    editorAliveAfterMailto,
+    dataBlocked,
+    activeFilePath: getApi()?.getActiveFilePath?.() ?? null
+  })
+  if (cancelled()) return results
+
+  // External-link handoff round trip, exercised for all three jump shapes:
+  // plain click, target=_blank, window.open. Each must close the editor,
+  // render the mock external site in the Open Browser webview (which ignores
+  // frame-ancestors), and auto-reopen the editor on browser close.
+  const runExternalRoundTrip = async (label: string, trigger: () => Promise<boolean>): Promise<{
+    ok: boolean
+    detail: Record<string, unknown>
+  }> => {
+    const ready = await openLinkMatrix(`${label}-prepare`)
+    const triggered = ready && await trigger()
+    const editorClosed = triggered && await waitFor(
+      `${label}-editor-closed`,
+      () => (getApi()?.isOpen?.() ?? false) === false,
+      10000,
+      100
+    )
+    let externalRendered = false
+    if (editorClosed) {
+      const start = performance.now()
+      while (performance.now() - start < 15000) {
+        try {
+          const text = await browserDbg()?.evaluate('document.body ? document.body.innerText : ""')
+          if (typeof text === 'string' && text.includes('EXTERNAL_SITE_MARKER')) {
+            externalRendered = true
+            break
+          }
+        } catch {
+          // webview still mounting/navigating — retry
+        }
+        await sleep(200)
+      }
+    }
+    if (externalRendered) browserDbg()?.closeKeepAlive()
+    const editorReturned = externalRendered && await waitFor(
+      `${label}-editor-returned`,
+      () => Boolean(getApi()?.isOpen?.()) && getApi()?.getActiveFilePath?.() === LINK_MATRIX_PATH,
+      15000,
+      150
+    )
+    const previewRestored = editorReturned && (await waitForDocumentState(
+      `${label}-preview-restored`,
+      (state) => Boolean(state.bodyText?.includes(LINK_MATRIX_MARKER))
+    )).ok
+    return {
+      ok: Boolean(ready && triggered && editorClosed && externalRendered && editorReturned && previewRestored),
+      detail: { ready, triggered, editorClosed, externalRendered, editorReturned, previewRestored }
+    }
+  }
+
+  const plainTrip = await runExternalRoundTrip('phtml-ext-plain', () => clickPreviewLinkWithRetry('lm-external'))
+  record('PHTML-49-external-plain-click-browser-round-trip', plainTrip.ok, plainTrip.detail)
+  if (!plainTrip.ok || cancelled()) return results
+
+  const blankTrip = await runExternalRoundTrip('phtml-ext-blank', () => clickPreviewLinkWithRetry('lm-external-blank'))
+  record('PHTML-50-external-target-blank-browser-round-trip', blankTrip.ok, blankTrip.detail)
+  if (!blankTrip.ok || cancelled()) return results
+
+  const windowOpenTrip = await runExternalRoundTrip('phtml-ext-window-open', async () => {
+    const result = await getApi()?.evaluateHtmlPreviewForTest?.(`(() => {
+      const btn = document.getElementById('lm-window-open');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`)
+    return Boolean(result?.success) && result?.value === true
+  })
+  record('PHTML-51-external-window-open-browser-round-trip', windowOpenTrip.ok, windowOpenTrip.detail)
+
   return results
 }

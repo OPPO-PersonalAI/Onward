@@ -1325,6 +1325,7 @@ export interface DebugAPI {
   shellReset: () => Promise<void>
   shellGetLastOpenedPath: () => Promise<string | null>
   shellGetLastRevealedPath: () => Promise<string | null>
+  shellGetLastExternalUrl: () => Promise<string | null>
   readTelemetryLog: () => Promise<string>
   emitBundleMarker: (
     uuid: string,
@@ -1463,6 +1464,14 @@ export interface BrowserAPI {
   onWebviewInput: (callback: (webContentsId: number, action: 'escape' | 'reload' | 'zoom-in' | 'zoom-out' | 'zoom-reset') => void) => () => void
 }
 
+export type HtmlPreviewLinkClassification =
+  | { kind: 'external' }
+  | { kind: 'external-protocol' }
+  | { kind: 'in-frame'; filePath: string; url: string }
+  | { kind: 'project-file'; filePath: string; relativePath: string }
+  | { kind: 'outside-root' }
+  | { kind: 'invalid'; reason: string }
+
 export interface HtmlPreviewAPI {
   createSession: (rootPath: string, filePath: string, reloadKey: number) => Promise<{
     success: boolean
@@ -1472,6 +1481,7 @@ export interface HtmlPreviewAPI {
   }>
   releaseSession: (sessionId: string) => Promise<boolean>
   validateNavigation: (sessionId: string, url: string) => Promise<boolean>
+  classifyNavigation: (sessionId: string, url: string) => Promise<HtmlPreviewLinkClassification>
 }
 
 export interface FeedbackDiagnosticBundleVerificationCheck {
@@ -2449,6 +2459,9 @@ const debugAPI: DebugAPI = {
   shellGetLastRevealedPath: () => {
     return ipcRenderer.invoke(IPC.DEBUG_SHELL_GET_LAST_REVEALED_PATH)
   },
+  shellGetLastExternalUrl: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_SHELL_GET_LAST_EXTERNAL_URL)
+  },
   readTelemetryLog: () => {
     return ipcRenderer.invoke(IPC.DEBUG_READ_TELEMETRY_LOG) as Promise<string>
   },
@@ -2639,6 +2652,9 @@ const htmlPreviewAPI: HtmlPreviewAPI = {
   },
   validateNavigation: (sessionId, url) => {
     return ipcRenderer.invoke(IPC.HTML_PREVIEW_VALIDATE_NAVIGATION, sessionId, url)
+  },
+  classifyNavigation: (sessionId, url) => {
+    return ipcRenderer.invoke(IPC.HTML_PREVIEW_CLASSIFY_NAVIGATION, sessionId, url)
   }
 }
 

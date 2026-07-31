@@ -55,6 +55,18 @@ interface HtmlReaderProps {
   onReloadShortcut: () => void
   onZoomShortcut: (direction: 'in' | 'out' | 'reset') => void
   onStateChange?: (state: HtmlReaderState | null) => void
+  // A clicked link resolved to a project file that is not an HTML document —
+  // the host opens it in the matching Project Editor viewer instead of
+  // navigating the iframe (which cannot render it).
+  onOpenProjectFile?: (target: { relativePath: string; filePath: string }) => void
+  // A clicked link resolved to an external http(s) URL. The iframe must NEVER
+  // navigate there (most sites forbid framing via CSP frame-ancestors — the
+  // white-screen bug); the host hands the URL to the Open Browser panel.
+  onOpenExternalUrl?: (url: string) => void
+  // mailto:/tel: — the host routes these to the OS default handler.
+  onOpenExternalProtocol?: (url: string) => void
+  // A clicked link was refused by the session's path policy.
+  onBlockedNavigation?: (reason: 'outside-root' | 'invalid') => void
 }
 
 type PendingRequest = {
@@ -77,7 +89,11 @@ export function HtmlReader({
   onFindShortcut,
   onReloadShortcut,
   onZoomShortcut,
-  onStateChange
+  onStateChange,
+  onOpenProjectFile,
+  onOpenExternalUrl,
+  onOpenExternalProtocol,
+  onBlockedNavigation
 }: HtmlReaderProps) {
   const { t } = useI18n()
 
@@ -425,9 +441,46 @@ export function HtmlReader({
       if (message.type === 'navigate-request') {
         const nextUrl = (message.payload as { url?: unknown } | undefined)?.url
         if (typeof nextUrl !== 'string') return
-        void window.electronAPI.htmlPreview.validateNavigation(sessionId, nextUrl).then((allowed) => {
-          if (!allowed || sessionIdRef.current !== sessionId) return
-          if (frameUrlRef.current === nextUrl) {
+        void window.electronAPI.htmlPreview.classifyNavigation(sessionId, nextUrl).then((classification) => {
+          if (sessionIdRef.current !== sessionId) return
+          if (classification.kind === 'project-file') {
+            // A non-HTML project file cannot render inside the iframe (the
+            // protocol serves it as octet-stream and the sandbox blocks the
+            // download) — hand it to the Project Editor's viewer dispatch.
+            perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PREVIEW_LINK_OPEN_FILE, {
+              ph: 'i',
+              sourceKind: 'html',
+              ext: (classification.relativePath.split('.').pop() ?? '').slice(0, 16)
+            })
+            onOpenProjectFile?.({
+              relativePath: classification.relativePath,
+              filePath: classification.filePath
+            })
+            return
+          }
+          if (classification.kind === 'outside-root' || classification.kind === 'invalid') {
+            perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PREVIEW_LINK_BLOCKED, {
+              ph: 'i',
+              sourceKind: 'html',
+              reason: classification.kind === 'invalid'
+                ? `invalid:${classification.reason}`.slice(0, 64)
+                : 'outside-root'
+            })
+            onBlockedNavigation?.(classification.kind)
+            return
+          }
+          if (classification.kind === 'external') {
+            onOpenExternalUrl?.(nextUrl)
+            return
+          }
+          if (classification.kind === 'external-protocol') {
+            onOpenExternalProtocol?.(nextUrl)
+            return
+          }
+          // 'in-frame' HTML documents keep browser-style iframe navigation
+          // through the preview protocol (file:// links arrive rebuilt).
+          const nextFrameUrl = classification.url
+          if (frameUrlRef.current === nextFrameUrl) {
             // React will not rewrite an unchanged src attribute, so pushing
             // this URL would navigate nothing and no load event would ever
             // clear the spinner. Match browser semantics: reload in place.
@@ -436,7 +489,7 @@ export function HtmlReader({
             void sendCommand('reload')
             return
           }
-          navigateFrame(nextUrl, 'push')
+          navigateFrame(nextFrameUrl, 'push')
         })
         return
       }
@@ -467,7 +520,7 @@ export function HtmlReader({
     }
     window.addEventListener('message', handleMessage)
     return () => window.removeEventListener('message', handleMessage)
-  }, [navigateFrame, onEscape, onFindShortcut, onFoundInPage, onReloadShortcut, onZoomShortcut, sendCommand, updateState])
+  }, [navigateFrame, onBlockedNavigation, onEscape, onFindShortcut, onFoundInPage, onOpenExternalProtocol, onOpenExternalUrl, onOpenProjectFile, onReloadShortcut, onZoomShortcut, sendCommand, updateState])
 
   const handleFrameLoad = useCallback(() => {
     const current = stateRef.current

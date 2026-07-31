@@ -35,7 +35,7 @@ import {
 import { focusCoordinator } from '../../terminal/focus-coordinator'
 import type { TerminalDebugApi } from '../../autotest/types'
 import { perfMonitor } from '../../utils/perf-monitor'
-import { perfTrace, perfTraceTask } from '../../utils/perf-trace'
+import { perfTrace, perfTraceDiagnostic, perfTraceTask } from '../../utils/perf-trace'
 import { computeMenuPosition, computeSubmenuLayout } from '../../utils/popup-position'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { trackFeatureUse } from '../../telemetry/track-feature-use'
@@ -408,6 +408,9 @@ export const TerminalGrid = memo(function TerminalGrid({
   // Terminals that have ever opened a browser, so the removal cleanup can destroy the
   // cached WebContentsView even after an Esc exit (which keeps the view alive in the main process).
   const browserEverOpenedRef = useRef<Set<string>>(new Set())
+  // Terminals whose CURRENT browser session was opened from an HTML-preview
+  // external link; closing such a session auto-reopens the Project Editor.
+  const browserFromEditorRef = useRef<Set<string>>(new Set())
   const [isSubpageSwitching, setIsSubpageSwitching] = useState(false)
 
   // Terminal context menu state
@@ -2018,6 +2021,15 @@ export const TerminalGrid = memo(function TerminalGrid({
       next.delete(terminalId)
       return next
     })
+    // One-shot round trip: a browser session opened from an HTML-preview
+    // external link reopens the Project Editor on close (the editor's
+    // retained-view restore puts the preview back where the user left it).
+    if (browserFromEditorRef.current.has(terminalId)) {
+      browserFromEditorRef.current.delete(terminalId)
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_TERMINAL_GRID_BROWSER_RETURN_TO_EDITOR, { ph: 'i' })
+      window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
+      return
+    }
     terminalSessionManager.focus(terminalId)
   }, [])
 
@@ -2032,6 +2044,9 @@ export const TerminalGrid = memo(function TerminalGrid({
       }
       return next
     })
+    // A manual toggle starts (or ends) a user-owned session — it must not
+    // inherit the editor-initiated auto-return.
+    browserFromEditorRef.current.delete(terminalId)
   }, [])
 
   const handleBrowserAutoRefreshChange = useCallback((terminalId: string, intervalMs: number | null) => {
@@ -2826,10 +2841,15 @@ export const TerminalGrid = memo(function TerminalGrid({
   useEffect(() => {
     const handleOpenBrowserEvent = (event: Event) => {
       if (hidden) return
-      const customEvent = event as CustomEvent<{ terminalId?: string; url?: string }>
+      const customEvent = event as CustomEvent<{ terminalId?: string; url?: string; fromEditor?: boolean }>
       const terminalId = customEvent.detail?.terminalId
       if (!terminalId) return
       if (!terminals.some(term => term.id === terminalId)) return
+      if (customEvent.detail?.fromEditor) {
+        browserFromEditorRef.current.add(terminalId)
+      } else {
+        browserFromEditorRef.current.delete(terminalId)
+      }
       handleOpenBrowser(terminalId, customEvent.detail?.url ?? null)
     }
 

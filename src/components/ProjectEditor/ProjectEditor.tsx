@@ -64,6 +64,8 @@ import { EpubReader, type EpubReaderHandle, type EpubReaderProgress } from './Ep
 import { isEpubFrameContentReady } from './epubReaderState'
 import { HtmlReader, type HtmlReaderState } from './HtmlReader'
 import { getHtmlPreviewController } from '../../utils/html-preview-bridge'
+import { classifyMarkdownPreviewHref } from '../../utils/preview-link-dispatch'
+import { requestOpenExternalHttpLink } from '../../utils/externalLink'
 import { HtmlPreviewSearchBar, type HtmlPreviewSearchResult } from './HtmlPreviewSearchBar'
 import { BrowserRefreshIcon } from '../BrowserToolbarIcons'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
@@ -175,7 +177,7 @@ type ConfirmOptions = {
   cancelText?: string
 }
 
-type FileOpenChoiceMode = 'text' | 'binary'
+type FileOpenChoiceMode = 'text' | 'binary' | 'system'
 
 type FileOpenChoiceDialogState = {
   path: string
@@ -355,7 +357,7 @@ function readBinaryOpenDefaults(): Record<string, FileOpenChoiceMode> {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     const out: Record<string, FileOpenChoiceMode> = {}
     for (const [key, value] of Object.entries(parsed)) {
-      if (value === 'text' || value === 'binary') out[key] = value
+      if (value === 'text' || value === 'binary' || value === 'system') out[key] = value
     }
     return out
   } catch {
@@ -424,6 +426,14 @@ type SourceReturnContext = {
   panelRoot: string | null
   changeType: DiffJumpTarget['changeType'] | null
   createdAt: number
+}
+
+// Set when a link inside the HTML / Markdown preview opened another project
+// file; powers the one-click "back to the page I came from" bar. Cleared by
+// any user-initiated openFile (including the return jump itself).
+type PreviewLinkReturnContext = {
+  sourceFilePath: string
+  sourceKind: 'html' | 'markdown'
 }
 
 type PreviewScrollMemory = {
@@ -1527,6 +1537,16 @@ export function ProjectEditor({
   useEffect(() => {
     sourceReturnContextRef.current = sourceReturnContext
   }, [sourceReturnContext])
+
+  const [previewLinkReturn, setPreviewLinkReturn] = useState<PreviewLinkReturnContext | null>(null)
+  const previewLinkReturnRef = useRef<PreviewLinkReturnContext | null>(null)
+  useEffect(() => {
+    previewLinkReturnRef.current = previewLinkReturn
+  }, [previewLinkReturn])
+  // Autotest-facing breadcrumb: what the last Markdown-preview link click
+  // resolved to. Lets a failing click assertion discriminate "handler never
+  // fired" from "handler routed somewhere unexpected".
+  const lastMarkdownPreviewLinkClickRef = useRef<{ href: string; route: string; at: number } | null>(null)
 
   const originalContentRef = useRef('')
   const originalModelVersionRef = useRef<number | null>(null)
@@ -4448,6 +4468,29 @@ export function ProjectEditor({
     setFileOpenChoiceDialog(null)
   }, [])
 
+  // Route a file the user chose to open externally ('system' choice) to the
+  // OS default application. Ref-called from openFile so the huge callback's
+  // dependency list stays stable.
+  const openFileInSystemApp = useCallback(async (path: string, remembered: boolean) => {
+    const root = rootRef.current
+    if (!root) return
+    const absolutePath = resolveEntryAbsolutePath(root, path)
+    if (!absolutePath) return
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_OPEN_CHOICE_SYSTEM_APP, {
+      ph: 'i',
+      ext: getExtensionKey(path),
+      remembered
+    })
+    const result = await window.electronAPI.shell.openPath(absolutePath)
+    if (!result.success) {
+      showStatus('error', result.error || t('projectEditor.error.readFile'))
+    }
+  }, [showStatus, t])
+  const openFileInSystemAppRef = useRef(openFileInSystemApp)
+  useEffect(() => {
+    openFileInSystemAppRef.current = openFileInSystemApp
+  }, [openFileInSystemApp])
+
   const resolveFileOpenChoice = useCallback((mode: FileOpenChoiceMode, rememberOverride?: boolean) => {
     const remember = rememberOverride ?? Boolean(fileOpenChoiceDialog?.remember)
     fileOpenChoiceResolveRef.current?.({ mode, remember })
@@ -5154,6 +5197,12 @@ export function ProjectEditor({
     if (source === 'user') {
       // Product telemetry: count each user-initiated file open (excludes restore/debug sources).
       trackFeatureUse('editor-file-open')
+      // Any user navigation consumes the pending preview-link return context;
+      // the preview-link dispatch re-arms it after this call completes.
+      if (previewLinkReturnRef.current) {
+        previewLinkReturnRef.current = null
+        setPreviewLinkReturn(null)
+      }
       // User manual navigation has the highest priority, canceling any ongoing recovery process to avoid being "pulled back to old files".
       restoreTokenRef.current += 1
       restoreCancelledByUserRef.current = true
@@ -5330,6 +5379,12 @@ export function ProjectEditor({
       if (result.requiresOpenChoice) {
         const extensionKey = getExtensionKey(path, result.extension)
         const rememberedMode = readBinaryOpenDefaults()[extensionKey]
+        if (rememberedMode === 'system') {
+          setIsLoadingFile(false)
+          debugLog('openFile:binary-choice-remembered', { path, mode: rememberedMode })
+          await openFileInSystemAppRef.current(path, true)
+          return
+        }
         if (rememberedMode) {
           readOptions.openMode = rememberedMode
           debugLog('openFile:binary-choice-remembered', { path, mode: rememberedMode })
@@ -5347,6 +5402,11 @@ export function ProjectEditor({
           }
           if (choice.remember) {
             writeBinaryOpenDefault(extensionKey, choice.mode)
+          }
+          if (choice.mode === 'system') {
+            debugLog('openFile:binary-choice', { path, mode: choice.mode, remember: choice.remember })
+            await openFileInSystemAppRef.current(path, false)
+            return
           }
           readOptions.openMode = choice.mode
           setIsLoadingFile(true)
@@ -5745,6 +5805,111 @@ export function ProjectEditor({
   useEffect(() => {
     openFileRef.current = openFile
   }, [openFile])
+
+  // A link inside the HTML / Markdown preview resolved to another project
+  // file: open it through the normal viewer dispatch and arm the one-click
+  // return bar pointing back at the page the link lived on. openFile('user')
+  // clears the context first; re-arm only when the target actually became
+  // the active file (a cancelled dirty-confirm must not leave a stale bar).
+  const openFileFromPreviewLink = useCallback(async (
+    relativePath: string,
+    sourceKind: PreviewLinkReturnContext['sourceKind']
+  ) => {
+    const sourceFilePath = activeFilePathRef.current
+    if (!sourceFilePath || sourceFilePath === relativePath) return
+    await openFileRef.current(relativePath, 'user', { trackRecent: true })
+    if (activeFilePathRef.current === relativePath) {
+      const context: PreviewLinkReturnContext = { sourceFilePath, sourceKind }
+      previewLinkReturnRef.current = context
+      setPreviewLinkReturn(context)
+    }
+  }, [])
+
+  const handleBackToPreviewSource = useCallback(async () => {
+    const context = previewLinkReturnRef.current
+    if (!context) return false
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PREVIEW_LINK_RETURN, {
+      ph: 'i',
+      sourceKind: context.sourceKind
+    })
+    // openFile('user') consumes the context; scroll comes back through the
+    // existing FileViewMemory restore path.
+    await openFileRef.current(context.sourceFilePath, 'user', { trackRecent: true })
+    return true
+  }, [])
+
+  const handlePreviewLinkBlocked = useCallback((
+    reason: string,
+    sourceKind: PreviewLinkReturnContext['sourceKind']
+  ) => {
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PREVIEW_LINK_BLOCKED, {
+      ph: 'i',
+      sourceKind,
+      reason: reason.slice(0, 64)
+    })
+    showStatus('error', reason === 'outside-root'
+      ? t('projectEditor.previewLink.outsideRoot')
+      : t('projectEditor.previewLink.unsupported'))
+  }, [showStatus, t])
+
+  // mailto:/tel: preview links go to the OS default handler; the main-process
+  // external-link guard keeps its confirm dialog in front of the launch.
+  const openExternalProtocolLink = useCallback((url: string, sourceKind: PreviewLinkReturnContext['sourceKind']) => {
+    const protocol = url.split(':', 1)[0]?.toLowerCase() ?? ''
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PREVIEW_LINK_EXTERNAL_PROTOCOL, {
+      ph: 'i',
+      protocol: protocol.slice(0, 16),
+      sourceKind
+    })
+    void window.electronAPI.shell.openExternal(url)
+  }, [])
+
+  // Delegated click handler for links inside the rendered Markdown preview.
+  // The worker rewrote local hrefs to file:// URLs (markdownPreviewWorker);
+  // the pure classifier maps each click to a host action so the preview never
+  // performs a real document navigation.
+  const handleMarkdownPreviewLinkClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target instanceof Element ? event.target : null
+    const anchor = target?.closest('a[href]')
+    if (!anchor) return
+    const href = anchor.getAttribute('href') ?? ''
+    const root = rootRef.current
+    if (!root) return
+    const route = classifyMarkdownPreviewHref({
+      href,
+      rootPath: root,
+      platform: window.electronAPI.platform
+    })
+    lastMarkdownPreviewLinkClickRef.current = { href: href.slice(0, 256), route: route.kind, at: Date.now() }
+    event.preventDefault()
+    if (route.kind === 'anchor') {
+      const container = previewRef.current
+      if (!route.anchorId) return
+      const element = container?.querySelector(`[id="${CSS.escape(route.anchorId)}"]`)
+        ?? container?.querySelector(`[name="${CSS.escape(route.anchorId)}"]`)
+        ?? null
+      element?.scrollIntoView({ block: 'start', behavior: 'auto' })
+      return
+    }
+    if (route.kind === 'external') {
+      void requestOpenExternalHttpLink(route.url)
+      return
+    }
+    if (route.kind === 'external-protocol') {
+      openExternalProtocolLink(route.url, 'markdown')
+      return
+    }
+    if (route.kind === 'project-file') {
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PREVIEW_LINK_OPEN_FILE, {
+        ph: 'i',
+        sourceKind: 'markdown',
+        ext: (route.relativePath.split('.').pop() ?? '').slice(0, 16)
+      })
+      void openFileFromPreviewLink(route.relativePath, 'markdown')
+      return
+    }
+    handlePreviewLinkBlocked(route.kind === 'outside-root' ? 'outside-root' : route.reason, 'markdown')
+  }, [handlePreviewLinkBlocked, openExternalProtocolLink, openFileFromPreviewLink])
 
   const validateRetainedActiveFileFreshness = useCallback(async (path: string, retainedContent: string) => {
     const root = rootRef.current
@@ -8241,9 +8406,9 @@ export function ProjectEditor({
   // debug api (createProjectEditorDebugApi) needs to trigger it.
   const handleNewFileRef = useRef<((baseDirOverride?: string) => Promise<void>) | null>(null)
 
-  const handleRequestClose = useCallback(async () => {
+  const closeEditorWithRetention = useCallback(async (): Promise<boolean> => {
     const canClose = await confirmDiscardChanges()
-    if (!canClose) return
+    if (!canClose) return false
     // Capture all scroll positions before final persist
     const scope = lastEditorScopeRef.current
     const retainViewOnClose = shouldRetainProjectEditorViewOnClose({
@@ -8276,6 +8441,7 @@ export function ProjectEditor({
 	      resetActiveFileState()
 	    }
 	    onClose()
+	    return true
 	  }, [
 	    captureEditorSoftCloseSnapshot,
 	    capturePreviewScrollMemory,
@@ -8284,6 +8450,37 @@ export function ProjectEditor({
 	    persistProjectEditorState,
 	    resetActiveFileState
 	  ])
+
+  const handleRequestClose = useCallback(async () => {
+    await closeEditorWithRetention()
+  }, [closeEditorWithRetention])
+
+  // An external http(s) link inside the HTML preview: the sandboxed iframe
+  // cannot host most external sites (CSP frame-ancestors), so the editor
+  // soft-closes with full view retention and hands the URL to the Task's
+  // Open Browser panel. `fromEditor` arms the one-shot auto-return that
+  // reopens the editor when that browser session closes.
+  const openExternalUrlInBrowserPanel = useCallback(async (url: string) => {
+    const terminalId = _terminalId
+    if (!terminalId) return
+    let host = ''
+    try {
+      host = new URL(url).host
+    } catch {
+      return
+    }
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_PREVIEW_LINK_EXTERNAL_TO_BROWSER, {
+      ph: 'i',
+      host: host.slice(0, 128),
+      urlLen: url.length
+    })
+    const closed = await closeEditorWithRetention()
+    if (!closed) return
+    window.dispatchEvent(new CustomEvent('browser:open', {
+      detail: { terminalId, url, fromEditor: true }
+    }))
+  }, [_terminalId, closeEditorWithRetention])
+
 
   const handleEscape = useCallback(() => {
     // Close overflow dropdown before anything else (P2-1: must beat useSubpageEscape)
@@ -8526,6 +8723,9 @@ export function ProjectEditor({
         activeFilePath: activeFilePathRef.current
       }),
       triggerSourceReturnBack: async () => handleBackToSource(),
+      getPreviewLinkReturnState: () => previewLinkReturnRef.current,
+      triggerPreviewLinkReturnBack: async () => handleBackToPreviewSource(),
+      getLastMarkdownPreviewLinkClick: () => lastMarkdownPreviewLinkClickRef.current,
       getDiffReturnBarState: () => buildSubpageReturnBarState({
         source: sourceReturnContextRef.current?.source === 'diff' ? 'diff' : null,
         jumpTarget: diffJumpTargetRef.current,
@@ -11352,6 +11552,7 @@ export function ProjectEditor({
                           className={`project-editor-preview-body preview-phase-${previewRestorePhase}${isMarkdownCodeWrapEnabled ? ' code-wrap-enabled' : ''}`}
                           ref={previewRef}
                           onCopy={handlePreviewCopy}
+                          onClick={handleMarkdownPreviewLinkClick}
                         >
                           <div className="project-editor-preview-transition-indicator" aria-hidden={isPreviewContentVisible}>
                             <div className="preview-loading-dots"><span /><span /><span /></div>
@@ -11540,6 +11741,14 @@ export function ProjectEditor({
                               void stepHtmlPreviewZoom(direction, 'shortcut')
                             }}
                             onStateChange={updateHtmlReaderState}
+                            onOpenProjectFile={({ relativePath }) => {
+                              void openFileFromPreviewLink(relativePath, 'html')
+                            }}
+                            onOpenExternalUrl={(url) => {
+                              void openExternalUrlInBrowserPanel(url)
+                            }}
+                            onOpenExternalProtocol={(url) => openExternalProtocolLink(url, 'html')}
+                            onBlockedNavigation={(reason) => handlePreviewLinkBlocked(reason, 'html')}
                           />
                         </div>
                       </div>
@@ -11614,7 +11823,22 @@ export function ProjectEditor({
           </div>
         </div>
 
-        {sourceReturnContext && (
+        {previewLinkReturn && (
+          <div className="project-editor-diff-return-bar">
+            <button
+              type="button"
+              className="project-editor-diff-return-button"
+              data-testid="project-editor-preview-link-return-back"
+              onClick={() => void handleBackToPreviewSource()}
+            >
+              {t('projectEditor.sourceReturn.backToPreviewSource', {
+                file: previewLinkReturn.sourceFilePath.split('/').pop() ?? previewLinkReturn.sourceFilePath
+              })}
+            </button>
+          </div>
+        )}
+
+        {!previewLinkReturn && sourceReturnContext && (
           <div className="project-editor-diff-return-bar">
             <button
               type="button"
@@ -11736,6 +11960,9 @@ export function ProjectEditor({
               <div className="project-editor-dialog-actions project-editor-open-choice-actions">
                 <button className="project-editor-dialog-btn" onClick={handleFileOpenChoiceCancel}>
                   {t('common.cancel')}
+                </button>
+                <button className="project-editor-dialog-btn" onClick={() => handleFileOpenChoiceSelect('system')}>
+                  {t('projectEditor.binaryChoice.openInSystemApp')}
                 </button>
                 <button className="project-editor-dialog-btn" onClick={() => handleFileOpenChoiceSelect('text')}>
                   {t('projectEditor.binaryChoice.openAsText')}

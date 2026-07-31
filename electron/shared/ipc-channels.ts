@@ -59,6 +59,7 @@ export const IPC = {
   HTML_PREVIEW_CREATE_SESSION: 'html-preview:create-session',
   HTML_PREVIEW_RELEASE_SESSION: 'html-preview:release-session',
   HTML_PREVIEW_VALIDATE_NAVIGATION: 'html-preview:validate-navigation',
+  HTML_PREVIEW_CLASSIFY_NAVIGATION: 'html-preview:classify-navigation',
 
   // changelog / clipboard
   CHANGELOG_GET_CURRENT: 'changelog:get-current',
@@ -102,6 +103,7 @@ export const IPC = {
   // action suite can assert IPC round-trips without launching external apps.
   DEBUG_SHELL_GET_LAST_OPENED_PATH: 'debug:shell-get-last-opened-path',
   DEBUG_SHELL_GET_LAST_REVEALED_PATH: 'debug:shell-get-last-revealed-path',
+  DEBUG_SHELL_GET_LAST_EXTERNAL_URL: 'debug:shell-get-last-external-url',
   DEBUG_SHELL_RESET: 'debug:shell-reset',
   DIALOG_OPEN_DIRECTORY: 'dialog:openDirectory',
   DIALOG_OPEN_TEXT_FILE: 'dialog:openTextFile',

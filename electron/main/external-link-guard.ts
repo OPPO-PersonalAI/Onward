@@ -6,7 +6,9 @@
 import { BrowserWindow, dialog, shell, type MessageBoxOptions } from 'electron'
 import { tMain } from './localization'
 
-const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:'])
+// http(s) plus the OS-handled contact protocols the previews may surface.
+// Every launch stays behind the confirm dialog below.
+const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
 export interface OpenExternalResult {
   success: boolean
@@ -24,6 +26,12 @@ function parseUrl(rawUrl: string): URL | null {
 }
 
 export function isHttpOrHttpsUrl(rawUrl: string): boolean {
+  const parsed = parseUrl(rawUrl)
+  if (!parsed) return false
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+}
+
+function isAllowedExternalUrl(rawUrl: string): boolean {
   const parsed = parseUrl(rawUrl)
   if (!parsed) return false
   return ALLOWED_EXTERNAL_PROTOCOLS.has(parsed.protocol)
@@ -44,11 +52,11 @@ export async function openExternalUrlWithConfirm(
   parentWindow: BrowserWindow | null,
   rawUrl: string
 ): Promise<OpenExternalResult> {
-  if (!isHttpOrHttpsUrl(rawUrl)) {
+  if (!isAllowedExternalUrl(rawUrl)) {
     return {
       success: false,
       blocked: true,
-      error: 'Only http/https links are allowed'
+      error: 'Only http/https/mailto/tel links are allowed'
     }
   }
 

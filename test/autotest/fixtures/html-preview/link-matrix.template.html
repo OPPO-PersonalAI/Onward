@@ -1,0 +1,41 @@
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+
+Acceptance fixture: every link shape the HTML preview can encounter, one page.
+Placeholders (__HTML_PREVIEW_SERVER_URL__, __FIXTURE_FILE_URL_MD__,
+__FIXTURE_OUTSIDE_FILE_URL__) are materialized by serve-html-preview-fixture.mjs.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTML Preview Link Matrix</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 28px; color: #1f2937; }
+      li { margin: 8px 0; }
+      .spacer { min-height: 1200px; }
+    </style>
+  </head>
+  <body>
+    <h1>LINK_MATRIX_MARKER</h1>
+    <ol>
+      <li><a id="lm-anchor" href="#lm-bottom">in-page anchor</a></li>
+      <li><a id="lm-html" href="./nav-second-page.html">local html</a></li>
+      <li><a id="lm-html-fragment" href="./regularization_landscape.html#anchor-section-1">local html with fragment</a></li>
+      <li><a id="lm-md" href="./linked-notes.md">local markdown</a></li>
+      <li><a id="lm-source" href="./linked-script.py">local source file</a></li>
+      <li><a id="lm-missing" href="./no-such-file.md">missing local file</a></li>
+      <li><a id="lm-outside" href="../../outside-preview-root.html">outside project root</a></li>
+      <li><a id="lm-file-in-root" href="__FIXTURE_FILE_URL_MD__">absolute file:// inside root</a></li>
+      <li><a id="lm-file-outside" href="__FIXTURE_OUTSIDE_FILE_URL__">absolute file:// outside root</a></li>
+      <li><a id="lm-external" href="__HTML_PREVIEW_SERVER_URL__/external-site">external site (plain click)</a></li>
+      <li><a id="lm-external-blank" href="__HTML_PREVIEW_SERVER_URL__/external-site" target="_blank" rel="noopener">external site (target=_blank)</a></li>
+      <li><button id="lm-window-open" type="button" onclick="window.open('__HTML_PREVIEW_SERVER_URL__/external-site')">external site (window.open)</button></li>
+      <li><a id="lm-mailto" href="mailto:test@example.com">mailto link</a></li>
+      <li><a id="lm-data" href="data:text/plain,hello">data: link (must be blocked)</a></li>
+    </ol>
+    <section class="spacer" aria-label="scroll spacer"></section>
+    <h2 id="lm-bottom">LINK_MATRIX_BOTTOM</h2>
+  </body>
+</html>

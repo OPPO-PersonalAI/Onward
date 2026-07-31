@@ -95,6 +95,7 @@ let feedbackDebugLastOpenedUrl: string | null = null
 // Autotest-only (ONWARD_AUTOTEST=1): last paths recorded by the shell
 // open-path / show-item-in-folder stubs, read back via DEBUG_SHELL_* IPC.
 let shellDebugLastOpenedPath: string | null = null
+let shellDebugLastExternalUrl: string | null = null
 let shellDebugLastRevealedPath: string | null = null
 let terminalIpcDiagTimer: ReturnType<typeof setInterval> | null = null
 
@@ -1315,9 +1316,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.DEBUG_SHELL_RESET, () => {
     shellDebugLastOpenedPath = null
     shellDebugLastRevealedPath = null
+    shellDebugLastExternalUrl = null
   })
   ipcMain.handle(IPC.DEBUG_SHELL_GET_LAST_OPENED_PATH, () => {
     return shellDebugLastOpenedPath
+  })
+  ipcMain.handle(IPC.DEBUG_SHELL_GET_LAST_EXTERNAL_URL, () => {
+    return shellDebugLastExternalUrl
   })
   ipcMain.handle(IPC.DEBUG_SHELL_GET_LAST_REVEALED_PATH, () => {
     return shellDebugLastRevealedPath
@@ -2124,6 +2129,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle(IPC.SHELL_OPEN_EXTERNAL, async (_, url: string) => {
+    if (process.env.ONWARD_AUTOTEST === '1') {
+      // Autotest: never raise the confirm dialog or launch a real handler —
+      // record the request so tests can assert the routing.
+      shellDebugLastExternalUrl = typeof url === 'string' ? url : null
+      return { success: true }
+    }
     const result = await openExternalUrlWithConfirm(mainWindow, url)
     if (!result.success && result.error && !result.canceled && !result.blocked) {
       console.error('Failed to open external url:', result.error)
@@ -2152,6 +2163,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.handle(IPC.HTML_PREVIEW_VALIDATE_NAVIGATION, (_, sessionId: string, url: string) => {
     return htmlPreviewProtocolManager.validateNavigation(sessionId, url)
+  })
+
+  ipcMain.handle(IPC.HTML_PREVIEW_CLASSIFY_NAVIGATION, (_, sessionId: string, url: string) => {
+    const classification = htmlPreviewProtocolManager.classifyNavigation(sessionId, url)
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_HTML_PREVIEW_LINK_CLASSIFIED, {
+      ph: 'i',
+      kind: classification.kind,
+      ext: classification.kind === 'project-file' || classification.kind === 'in-frame'
+        ? (classification.filePath.split('.').pop() ?? '').slice(0, 16)
+        : null
+    })
+    return classification
   })
 
   ipcMain.handle(IPC.BROWSER_CREATE, (_, id: string, url?: string, options?: Parameters<typeof browserViewManager.create>[2]) => {
@@ -3182,6 +3205,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.DEBUG_SHELL_RESET)
   ipcMain.removeHandler(IPC.DEBUG_SHELL_GET_LAST_OPENED_PATH)
   ipcMain.removeHandler(IPC.DEBUG_SHELL_GET_LAST_REVEALED_PATH)
+  ipcMain.removeHandler(IPC.DEBUG_SHELL_GET_LAST_EXTERNAL_URL)
   ipcMain.removeHandler(IPC.DEBUG_GIT_DIFF_GET_DEBUG_STATS)
   ipcMain.removeHandler(IPC.CHANGELOG_GET_CURRENT)
   ipcMain.removeHandler(IPC.APP_GET_PDF_VIEWER_URL)
@@ -3224,6 +3248,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.HTML_PREVIEW_CREATE_SESSION)
   ipcMain.removeHandler(IPC.HTML_PREVIEW_RELEASE_SESSION)
   ipcMain.removeHandler(IPC.HTML_PREVIEW_VALIDATE_NAVIGATION)
+  ipcMain.removeHandler(IPC.HTML_PREVIEW_CLASSIFY_NAVIGATION)
   ipcMain.removeHandler(IPC.BROWSER_CREATE)
   ipcMain.removeHandler(IPC.BROWSER_DESTROY)
   ipcMain.removeHandler(IPC.BROWSER_EVALUATE_FOR_TEST)

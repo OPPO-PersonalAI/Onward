@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 
 import {
   buildHtmlPreviewUrl,
+  classifyHtmlPreviewLink,
   isInPageAnchorHref,
   resolveHtmlPreviewRequest
 } from '../../electron/main/html-preview-path.ts'
@@ -124,3 +125,109 @@ test('HPP-U-07 in-page anchor classification reads the RAW href attribute', () =
   assert.equal(isInPageAnchorHref(null), false)
   assert.equal(isInPageAnchorHref(undefined), false)
 })
+
+test('HPP-U-08 link classification routes http(s) to external', () => {
+  const options = { sessionId: 'session-a', rootPath: '/tmp/project', platform: 'posix' as const }
+  assert.deepEqual(classifyHtmlPreviewLink('https://example.com/doc.md', options), { kind: 'external' })
+  assert.deepEqual(classifyHtmlPreviewLink('http://localhost:8000/', options), { kind: 'external' })
+})
+
+test('HPP-U-09 link classification keeps in-root HTML documents in the iframe', () => {
+  const options = { sessionId: 'session-a', rootPath: '/tmp/project', platform: 'posix' as const }
+  for (const name of ['sub/page.html', 'sub/page.htm', 'sub/page.xhtml']) {
+    const url = buildHtmlPreviewUrl('session-a', `/tmp/project/${name}`, 0, 'posix')
+    const result = classifyHtmlPreviewLink(url, options)
+    assert.equal(result.kind, 'in-frame', name)
+  }
+})
+
+test('HPP-U-10 link classification dispatches other in-root files with a slash-relative path', () => {
+  const options = { sessionId: 'session-a', rootPath: '/tmp/project', platform: 'posix' as const }
+  const cases: Array<[string, string]> = [
+    ['/tmp/project/docs/notes.md', 'docs/notes.md'],
+    ['/tmp/project/src/main.py', 'src/main.py'],
+    ['/tmp/project/manual.pdf', 'manual.pdf'],
+    ['/tmp/project/LICENSE', 'LICENSE'],
+    ['/tmp/project/图 片/说明.md', '图 片/说明.md']
+  ]
+  for (const [absolute, expectedRelative] of cases) {
+    const url = buildHtmlPreviewUrl('session-a', absolute, 0, 'posix')
+    const result = classifyHtmlPreviewLink(url, options)
+    assert.equal(result.kind, 'project-file', absolute)
+    assert.equal(result.kind === 'project-file' ? result.relativePath : null, expectedRelative)
+    assert.equal(result.kind === 'project-file' ? result.filePath : null, absolute)
+  }
+})
+
+test('HPP-U-11 link classification refuses escapes and foreign schemes', () => {
+  const options = { sessionId: 'session-a', rootPath: '/tmp/project', platform: 'posix' as const }
+  const outside = classifyHtmlPreviewLink(
+    buildHtmlPreviewUrl('session-a', '/tmp/other/readme.md', 0, 'posix'),
+    options
+  )
+  assert.deepEqual(outside, { kind: 'outside-root' })
+  const traversal = classifyHtmlPreviewLink(
+    'onward-html-preview://session-a/tmp/project/../secret.md',
+    options
+  )
+  assert.deepEqual(traversal, { kind: 'outside-root' })
+  // file:// is no longer foreign — it resolves against the root (HPP-U-14);
+  // genuinely unknown schemes stay refused.
+  const foreignScheme = classifyHtmlPreviewLink('vscode://file/tmp/project/readme.md', options)
+  assert.equal(foreignScheme.kind, 'invalid')
+  const wrongSession = classifyHtmlPreviewLink(
+    buildHtmlPreviewUrl('session-b', '/tmp/project/readme.md', 0, 'posix'),
+    options
+  )
+  assert.equal(wrongSession.kind, 'invalid')
+})
+
+test('HPP-U-12 link classification handles Windows drive paths', () => {
+  const options = { sessionId: 'win-session', rootPath: 'C:\\work tree\\site', platform: 'win32' as const }
+  const mdUrl = buildHtmlPreviewUrl('win-session', 'C:\\work tree\\site\\docs\\说明.md', 0, 'win32')
+  const md = classifyHtmlPreviewLink(mdUrl, options)
+  assert.equal(md.kind, 'project-file')
+  assert.equal(md.kind === 'project-file' ? md.relativePath : null, 'docs/说明.md')
+  const htmlUrl = buildHtmlPreviewUrl('win-session', 'C:\\work tree\\site\\sub\\page.html', 0, 'win32')
+  assert.equal(classifyHtmlPreviewLink(htmlUrl, options).kind, 'in-frame')
+  const outsideUrl = buildHtmlPreviewUrl('win-session', 'C:\\work tree\\secret.md', 0, 'win32')
+  assert.deepEqual(classifyHtmlPreviewLink(outsideUrl, options), { kind: 'outside-root' })
+})
+
+test('HPP-U-13 link classification routes mailto/tel to the OS handler and refuses danger protocols', () => {
+  const options = { sessionId: 'session-a', rootPath: '/tmp/project', platform: 'posix' as const }
+  assert.deepEqual(classifyHtmlPreviewLink('mailto:a@b.c', options), { kind: 'external-protocol' })
+  assert.deepEqual(classifyHtmlPreviewLink('tel:+8610000000', options), { kind: 'external-protocol' })
+  assert.equal(classifyHtmlPreviewLink('data:text/plain,hi', options).kind, 'invalid')
+  assert.equal(classifyHtmlPreviewLink('javascript:alert(1)', options).kind, 'invalid')
+})
+
+test('HPP-U-14 absolute file:// links resolve against the project root', () => {
+  const options = { sessionId: 'session-a', rootPath: '/tmp/project', platform: 'posix' as const }
+  // In-root HTML → iframe route, rebuilt onto the preview protocol with the
+  // author's fragment preserved.
+  const inRootHtml = classifyHtmlPreviewLink('file:///tmp/project/docs/page.html#section-2', options)
+  assert.equal(inRootHtml.kind, 'in-frame')
+  if (inRootHtml.kind === 'in-frame') {
+    assert.equal(inRootHtml.filePath, '/tmp/project/docs/page.html')
+    assert.ok(inRootHtml.url.startsWith('onward-html-preview://session-a/'))
+    assert.ok(inRootHtml.url.endsWith('#section-2'))
+  }
+  // In-root non-HTML → viewer dispatch.
+  assert.deepEqual(classifyHtmlPreviewLink('file:///tmp/project/docs/notes.md', options), {
+    kind: 'project-file',
+    filePath: '/tmp/project/docs/notes.md',
+    relativePath: 'docs/notes.md'
+  })
+  // Outside root / UNC-host file URLs are refused.
+  assert.deepEqual(classifyHtmlPreviewLink('file:///tmp/other/readme.md', options), { kind: 'outside-root' })
+  assert.deepEqual(classifyHtmlPreviewLink('file://server/share/readme.md', options), { kind: 'outside-root' })
+  // Windows drive form.
+  const winOptions = { sessionId: 'win-session', rootPath: 'C:\\proj', platform: 'win32' as const }
+  assert.deepEqual(classifyHtmlPreviewLink('file:///C:/proj/docs/notes.md', winOptions), {
+    kind: 'project-file',
+    filePath: 'C:\\proj\\docs\\notes.md',
+    relativePath: 'docs/notes.md'
+  })
+})
+
