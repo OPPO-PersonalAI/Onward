@@ -735,6 +735,18 @@ export const PERF_TRACE_EVENT = {
   // used to skip alias creation entirely, leaving the Task badge empty
   // (2026-07-16 symlink-status fix). ph='i', subscribe-frequency (rare).
   RENDERER_GIT_STATE_MIRROR_SUBSCRIBE_ALIAS_REGISTERED: 'renderer:git-state-mirror.subscribe-alias-registered',
+  /**
+   * BUG-0005 P1: the renderer received a mirror delta. Main fanned deltas out
+   * with nothing downstream traced at any tier, so "main computed it, the badge
+   * never moved" was undiagnosable. Diagnostic tier, throttled per cwd.
+   */
+  RENDERER_GIT_STATE_MIRROR_UPDATE_RECEIVED: 'renderer:git-state-mirror.update-received',
+  /**
+   * BUG-0005 P1: the ahead/behind badge was painted with these values. Unlike
+   * `terminal-title.branch-rendered` (opt-in tier, branch-STRING changes only),
+   * this catches an ahead/behind-only move. Emitted on change.
+   */
+  RENDERER_TERMINAL_TITLE_SYNC_RENDERED: 'renderer:terminal-title.sync-rendered',
   WORKER_GIT_STATE_MIRROR_WATCHER_FIRE: 'worker:git-state-mirror.watcher-fire',
   WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
   WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED: 'worker:git-state-mirror.watcher-skipped',
@@ -766,6 +778,13 @@ export const PERF_TRACE_EVENT = {
   // Off the hot path: fires at most once per reconcile COMPLETION (a rate the
   // backoff itself reduces), only when the gap actually stretched past base.
   WORKER_GIT_STATE_MIRROR_RECONCILE_BACKOFF: 'worker:git-state-mirror.reconcile-backoff',
+  /**
+   * BUG-0005 R5: a `git status` duration exceeded the sanity ceiling, meaning
+   * the process was suspended mid-measurement (sleep / App Nap) rather than git
+   * being slow. The sample is discarded instead of driving the reconcile backoff
+   * to its 60 s cap. Threshold-crossing only.
+   */
+  WORKER_GIT_STATE_MIRROR_DURATION_SUSPECT: 'worker:git-state-mirror.duration-suspect',
   // Emitted once per watcher subscribe: how many parcel ignore globs were
   // derived from the repo's .gitignore directory patterns (kar-qemu emulator
   // storm suppression). globCount=0 means no .gitignore dirs were converted
@@ -839,6 +858,17 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_AUTOFETCH_BACKOFF: 'main:git-autofetch.backoff',
   MAIN_GIT_AUTOFETCH_SKIPPED_HIDDEN: 'main:git-autofetch.skipped-hidden',
   MAIN_GIT_AUTOFETCH_TRIGGERED_RECOMPUTE: 'main:git-autofetch.triggered-recompute',
+  /**
+   * BUG-0005 R1-A: the user focused a Task whose repo was backed off; the
+   * scheduler granted or refused one backoff-bypassing fetch. A refusal reason
+   * distinguishes "hatch reached but rate-limited" from "focus never arrived".
+   */
+  MAIN_GIT_AUTOFETCH_PRIORITY_RETRY: 'main:git-autofetch.priority-retry',
+  /**
+   * BUG-0005 R1-B: hidden → visible halved every repo's failure streak, so
+   * failures accrued while paused stop pinning the user at the 1 h ceiling.
+   */
+  MAIN_GIT_AUTOFETCH_STREAK_HALVED: 'main:git-autofetch.streak-halved',
   RENDERER_TERMINAL_TITLE_BRANCH_RENDERED: 'renderer:terminal-title.branch-rendered',
   RENDERER_TERMINAL_TITLE_COLOR_RENDERED: 'renderer:terminal-title.color-rendered',
   RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',

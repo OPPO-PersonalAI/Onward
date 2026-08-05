@@ -18,6 +18,27 @@
  *                        a background fetch (the autotest-only force hook) the
  *                        mirror re-reads # branch.ab and behind flips to 1.
  *
+ * BUG-0005 additions — a fetch that never succeeds must be both DIAGNOSABLE and
+ * VISIBLE, because the field bundle had a repo go 98.8 h with zero successful
+ * fetches while the badge kept presenting its behind count as current:
+ *
+ *   AB-07 fail payload  → a fast failure (origin points nowhere) carries
+ *                         classified / exitCode / stderrTail, not just `reason`
+ *   AB-08 timeout payload → a fetch killed by the 20 s ceiling ALSO carries
+ *                         classified + stderrTail. This is the exact branch that
+ *                         used to short-circuit past classifyFetchFailure and
+ *                         discard stderr, and it is why 6 of 9 field failures
+ *                         were undiagnosable
+ *   AB-09 fresh success → a successful fetch stamps lastFetchOkAt onto the
+ *                         renderer-visible snapshot (the badge's staleness input)
+ *   AB-10 fresh failure → a failed fetch stamps lastFetchAttemptAt but leaves
+ *                         lastFetchOkAt unset — the precise state the pure
+ *                         resolveGitSyncFreshness table renders as stale
+ *
+ * The stale RENDERING itself (muted `↓`, `↓?` placeholder, tooltip) is a pure
+ * function of those two timestamps and is locked by git-sync-display's unit
+ * test; these cases lock the plumbing that supplies them.
+ *
  * AB-01..05 prove the parse → worker → IPC → renderer-snapshot pipeline (the
  * `# branch.ab` values reach the snapshot the badge renders from). The
  * snapshot → DOM mapping (green dot + ↑N/↓M arrows) is locked by the pure
@@ -38,6 +59,8 @@ interface Manifest {
   behind: string
   diverged: string
   fetchBehind: string
+  failFetch: string
+  timeoutFetch: string
   noUpstream: string
   neutralCwd: string
 }
@@ -47,6 +70,8 @@ interface MirrorSnapshot {
   status?: string | null
   ahead?: number
   behind?: number
+  lastFetchOkAt?: number
+  lastFetchAttemptAt?: number
 }
 
 const CONVERGE_TIMEOUT_MS = 20_000
@@ -171,6 +196,95 @@ export async function testGitAutofetchAheadBehind(ctx: AutotestContext): Promise
       fetchOk: fetchRes.ok,
       fetchReason: fetchRes.reason ?? null,
       observedBehindAfter: after.last?.behind ?? null
+    })
+  }
+
+  // ── AB-09: a SUCCESSFUL fetch stamps lastFetchOkAt onto the snapshot. ──
+  // Runs right after AB-06 so it observes that same fetch. This is the R3
+  // plumbing: freshness is published by main and rides the existing mirror-delta
+  // channel, so a regression here (a worker recompute dropping the field, the
+  // delta not fanning out) silently disarms the whole stale treatment.
+  if (!cancelled()) {
+    const res = await pollSnapshot(
+      sleep,
+      manifest.fetchBehind,
+      (s) => typeof s?.lastFetchOkAt === 'number' && (s.lastFetchOkAt ?? 0) > 0
+    )
+    _assert('AB-09-success-stamps-last-fetch-ok', res.ok, {
+      description: 'A successful background fetch publishes lastFetchOkAt to the renderer snapshot',
+      observedLastFetchOkAt: res.last?.lastFetchOkAt ?? null,
+      observedLastFetchAttemptAt: res.last?.lastFetchAttemptAt ?? null
+    })
+  }
+
+  // ── AB-07 + AB-10: a FAST failure carries full evidence and marks freshness. ──
+  if (!cancelled()) {
+    track(manifest.failFetch)
+    const before = await subscribeClassified(sleep, manifest.failFetch)
+    const repoRoot = before?.repoRoot ?? manifest.failFetch
+    const fetchRes = await window.electronAPI.debug.gitAutofetchForAutotest({ repoRoot })
+
+    // AB-07: the enriched failure payload. `reason` alone was all the field
+    // bundle ever had; these are the fields that make it actionable.
+    const payloadOk =
+      fetchRes.ok === false &&
+      fetchRes.killedByTimeout === false &&
+      typeof fetchRes.classified === 'string' &&
+      fetchRes.classified.length > 0 &&
+      typeof fetchRes.exitCode === 'number' &&
+      typeof fetchRes.stderrTail === 'string' &&
+      fetchRes.stderrTail.length > 0
+    _assert('AB-07-fast-failure-carries-evidence', payloadOk, {
+      description: 'A non-timeout fetch failure reports classified + exitCode + stderrTail',
+      ok: fetchRes.ok,
+      reason: fetchRes.reason ?? null,
+      classified: fetchRes.classified ?? null,
+      exitCode: fetchRes.exitCode ?? null,
+      killedByTimeout: fetchRes.killedByTimeout ?? null,
+      stderrTailLength: (fetchRes.stderrTail ?? '').length
+    })
+
+    // AB-10: attempted-but-never-succeeded is exactly the state the badge must
+    // render as stale. Assert the SHAPE, not the rendering (that is unit-tested).
+    const freshness = await pollSnapshot(
+      sleep,
+      manifest.failFetch,
+      (s) => typeof s?.lastFetchAttemptAt === 'number' && (s.lastFetchAttemptAt ?? 0) > 0
+    )
+    const neverSynced = freshness.last?.lastFetchOkAt === undefined
+    _assert('AB-10-failure-marks-attempt-without-success', freshness.ok && neverSynced, {
+      description:
+        'A failed fetch stamps lastFetchAttemptAt and leaves lastFetchOkAt unset → the stale input state',
+      observedLastFetchAttemptAt: freshness.last?.lastFetchAttemptAt ?? null,
+      observedLastFetchOkAt: freshness.last?.lastFetchOkAt ?? null
+    })
+  }
+
+  // ── AB-08: the 20 s TIMEOUT branch also carries evidence. ──
+  // Deliberately last: it costs the full ceiling (~20 s) by construction, and a
+  // hang is what we are asserting, so it must not delay the cheaper cases.
+  if (!cancelled()) {
+    track(manifest.timeoutFetch)
+    const before = await subscribeClassified(sleep, manifest.timeoutFetch)
+    const repoRoot = before?.repoRoot ?? manifest.timeoutFetch
+    const fetchRes = await window.electronAPI.debug.gitAutofetchForAutotest({ repoRoot })
+    const timeoutOk =
+      fetchRes.ok === false &&
+      fetchRes.reason === 'timeout' &&
+      fetchRes.killedByTimeout === true &&
+      // The regression guard: BOTH of these used to be absent on this branch.
+      typeof fetchRes.classified === 'string' &&
+      typeof fetchRes.stderrTail === 'string' &&
+      fetchRes.stderrTail.length > 0
+    _assert('AB-08-timeout-failure-carries-evidence', timeoutOk, {
+      description:
+        'A fetch killed by the 20 s ceiling still classifies stderr instead of discarding it',
+      ok: fetchRes.ok,
+      reason: fetchRes.reason ?? null,
+      killedByTimeout: fetchRes.killedByTimeout ?? null,
+      classified: fetchRes.classified ?? null,
+      durationMs: fetchRes.durationMs ?? null,
+      stderrTailLength: (fetchRes.stderrTail ?? '').length
     })
   }
 

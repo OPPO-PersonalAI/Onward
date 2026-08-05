@@ -281,6 +281,19 @@
   color: rgba(56, 189, 248, 0.95);
 }
 
+/*
+ * Stale sync (BUG-0005 R3): the background `git fetch` behind this count has not
+ * succeeded recently, so `↓M` describes the remote as it was, not as it is. Drop
+ * the confident sky-blue accent to a muted neutral and thin the glyph — the
+ * count stops asserting itself without shouting. Deliberately NOT a warning
+ * colour or an icon: a long offline stretch is normal, and an alarm the user
+ * learns to ignore is worse than no signal. The tooltip carries the detail.
+ */
+.terminal-grid-branch-behind--stale {
+  color: rgba(148, 163, 184, 0.7);
+  font-weight: 400;
+}
+
 .terminal-grid-branch--modified {
   border-color: rgba(234, 179, 8, 0.45);
   background: rgba(234, 179, 8, 0.2);

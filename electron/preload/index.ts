@@ -1299,7 +1299,17 @@ export interface DebugAPI {
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
   gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
   poisonRepoProbeForAutotest: (payload: { cwd: string; durationMs?: number }) => Promise<{ ok: boolean; error?: string }>
-  gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>
+  gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{
+    ok: boolean
+    reason?: string
+    durationMs?: number
+    error?: string
+    /** Enriched failure evidence — see AutofetchResult in git-autofetch-manager. */
+    classified?: string
+    exitCode?: number | null
+    killedByTimeout?: boolean
+    stderrTail?: string
+  }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
   flushPerfTrace: () => Promise<PerformanceTraceStatus>
@@ -2407,7 +2417,17 @@ const debugAPI: DebugAPI = {
     return ipcRenderer.invoke('debug:autotest-poison-repo-probe', payload) as Promise<{ ok: boolean; error?: string }>
   },
   gitAutofetchForAutotest: (payload: { repoRoot: string }) => {
-    return ipcRenderer.invoke('debug:autotest-git-autofetch', payload) as Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>
+    return ipcRenderer.invoke('debug:autotest-git-autofetch', payload) as Promise<{
+    ok: boolean
+    reason?: string
+    durationMs?: number
+    error?: string
+    /** Enriched failure evidence — see AutofetchResult in git-autofetch-manager. */
+    classified?: string
+    exitCode?: number | null
+    killedByTimeout?: boolean
+    stderrTail?: string
+  }>
   },
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => {
     if (!perfTraceEnabled) return

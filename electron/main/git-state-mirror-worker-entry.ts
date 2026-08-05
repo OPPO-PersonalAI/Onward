@@ -54,7 +54,9 @@ import {
   RECONCILE_VISIBLE_INTERVAL_MS,
   RECONCILE_BACKOFF_FACTOR,
   RECONCILE_MAX_BACKOFF_INTERVAL_MS,
+  MIRROR_DURATION_SANITY_CEILING_MS,
   computeEffectiveIntervalMs,
+  sanitizeMeasuredDurationMs,
   type ReconcileReason
 } from './git-reconcile-scheduler'
 import { parseStatusPorcelainV2Z } from './git-porcelain-parse'
@@ -627,7 +629,7 @@ async function runRecompute(
   }
 
   entry.recomputeInFlight = true
-  const startedAt = Date.now()
+  const probe = startDurationProbe()
   recomputeGovernor.onStart(entry.cwd)
   const generation = beginMirrorRecompute(entry)
   let next: MirrorState
@@ -638,7 +640,7 @@ async function runRecompute(
       cwd: entry.cwd,
       error: error instanceof Error ? error.message : String(error)
     })
-    recomputeGovernor.onEnd(entry.cwd, Date.now(), Date.now() - startedAt)
+    recomputeGovernor.onEnd(entry.cwd, Date.now(), settleDurationProbe(probe, entry.cwd, 'recompute-failed'))
     entry.recomputeInFlight = false
     if (entry.recomputeQueued && !entry.detachRequested && !shuttingDown) {
       entry.recomputeQueued = false
@@ -647,7 +649,8 @@ async function runRecompute(
     return false
   }
   const delta = finishMirrorRecomputeIfCurrent(entry, generation, next)
-  recomputeGovernor.onEnd(entry.cwd, Date.now(), Date.now() - startedAt)
+  const durationMs = settleDurationProbe(probe, next.repoRoot ?? entry.cwd, 'recompute')
+  recomputeGovernor.onEnd(entry.cwd, Date.now(), durationMs)
   performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE, {
     cwd: entry.cwd,
     repoRoot: next.repoRoot,
@@ -655,7 +658,15 @@ async function runRecompute(
     fileCount: next.files.length,
     branch: next.branch,
     status: next.status,
-    durationMs: Date.now() - startedAt,
+    // BUG-0005 P0: the VALUES, not just the fact that they changed. The mirror
+    // fanout records `deltaKeys`, so a stale-badge trace could previously prove
+    // "behind changed" but never "behind changed from 3 to 0" — which is the
+    // only form that settles a "the number is wrong" report. Three integers,
+    // well inside the payload budget.
+    ahead: next.ahead ?? null,
+    behind: next.behind ?? null,
+    hasUpstream: next.ahead !== undefined || next.behind !== undefined,
+    durationMs,
     // RC-2 classification: distinguishes "probe answered not-a-repo" from
     // "probe was killed at the budget" in user-attached traces.
     repoProbe: next.repoProbe ?? null
@@ -940,6 +951,51 @@ function resolveFocusedRepoRootKey(cwd: string | null): string | null {
   return entryToGroupKey.get(resolvePath(cwd)) ?? null
 }
 
+interface DurationProbe {
+  wallStart: number
+  monoStart: number
+}
+
+/**
+ * Begin a duration measurement, sampling BOTH clocks.
+ *
+ * Neither clock alone is sufficient: `Date.now()` always includes suspend, and
+ * whether `performance.now()` does is platform-dependent (macOS
+ * `mach_absolute_time` stops across sleep, `mach_continuous_time` does not;
+ * Linux `CLOCK_MONOTONIC` excludes suspend, `CLOCK_BOOTTIME` includes it). Taking
+ * both and believing the smaller makes the measurement correct wherever the
+ * monotonic clock does exclude suspend, and the ceiling below catches the rest.
+ */
+function startDurationProbe(): DurationProbe {
+  return { wallStart: Date.now(), monoStart: performance.now() }
+}
+
+/**
+ * Settle a probe into a duration safe to feed the adaptive schedulers, emitting
+ * the diagnostic when the sample is rejected.
+ *
+ * The decision itself lives in the pure `sanitizeMeasuredDurationMs` so it is
+ * locked by `test/unittest/git-reconcile-scheduler.test.mts`; this wrapper only
+ * reads the clocks and traces the rejection.
+ */
+function settleDurationProbe(probe: DurationProbe, repoRoot: string, phase: string): number {
+  const wallMs = Date.now() - probe.wallStart
+  const monotonicMs = Math.round(performance.now() - probe.monoStart)
+  const durationMs = sanitizeMeasuredDurationMs(wallMs, monotonicMs)
+  // Only a REJECTION is newsworthy: durationMs === 0 while a clock claims real
+  // elapsed time means the process was suspended mid-measurement.
+  if (durationMs === 0 && Math.min(wallMs, monotonicMs) > MIRROR_DURATION_SANITY_CEILING_MS) {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_DURATION_SUSPECT, {
+      repoRoot,
+      phase,
+      wallMs,
+      monotonicMs,
+      ceilingMs: MIRROR_DURATION_SANITY_CEILING_MS
+    })
+  }
+  return durationMs
+}
+
 async function runGroupReconcile(group: MirrorWatcherGroup, reason: ReconcileReason): Promise<void> {
   // Autotest: with the reconcile heartbeat silenced (paired with WATCHER_SILENT),
   // no AUTOMATIC path can refresh this repo — only explicit revalidate /
@@ -951,7 +1007,7 @@ async function runGroupReconcile(group: MirrorWatcherGroup, reason: ReconcileRea
     return
   }
   reconcileScheduler.onReconcileStart(group.repoRootKey)
-  const startedAt = Date.now()
+  const probe = startDurationProbe()
   let changed = false
   try {
     const results = await Promise.all(
@@ -969,7 +1025,13 @@ async function runGroupReconcile(group: MirrorWatcherGroup, reason: ReconcileRea
     // where status takes seconds this stretches the heartbeat so it can't run
     // back-to-back; on a fast host duration×factor stays under the base, so the
     // cadence is unchanged.
-    const durationMs = Date.now() - startedAt
+    //
+    // BUG-0005 R5: the sample is sanity-checked first. A measurement spanning a
+    // system sleep used to be handed straight to the backoff, which read it as a
+    // ~925 s status and pinned this repo's heartbeat at the 60 s ceiling right
+    // after every wake. settleDurationProbe returns 0 for such a sample, and 0
+    // means "no measurement" to computeEffectiveIntervalMs → base cadence.
+    const durationMs = settleDurationProbe(probe, group.repoRoot, 'reconcile')
     reconcileScheduler.onReconcileDone(group.repoRootKey, Date.now(), durationMs)
     // Diagnostic: surface WHEN/by-how-much the backoff engaged, so a future
     // "Diff still slow on EDR" trace shows whether the heartbeat stopped

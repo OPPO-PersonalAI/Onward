@@ -84,3 +84,68 @@ function normalizeCount(value: number | null | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0
   return Math.floor(value)
 }
+
+/**
+ * How long after the last SUCCESSFUL background fetch the `↓M` count stops being
+ * presented as authoritative. Two fetch periods (2 × 10 min): one missed cycle is
+ * ordinary jitter — a laptop lid, a tick that landed while hidden — but two means
+ * the fetch loop is genuinely not keeping up.
+ */
+export const GIT_SYNC_STALE_AFTER_MS = 1_200_000
+
+export interface GitSyncFreshness {
+  /** True when `↓M` should be de-emphasised because its input is old. */
+  stale: boolean
+  /** ms since the last successful fetch; null when none has ever succeeded. */
+  ageMs: number | null
+  /** True when no successful fetch has EVER been observed for this repo. */
+  neverSynced: boolean
+}
+
+/**
+ * Decide whether the badge's behind count is still trustworthy.
+ *
+ * `behind` is computed against the LOCAL remote-tracking ref, so it is only as
+ * fresh as the last successful `git fetch`. When fetching has been failing, the
+ * badge keeps rendering a confident `↓0` that actually means "we have not been
+ * able to ask in hours" — the exact confusion behind BUG-0005, where a repo went
+ * 98.8 h with zero successful fetches and the UI never hinted at it.
+ *
+ * The three-way distinction matters, which is why `lastFetchAttemptAt` is an
+ * input and not just `lastFetchOkAt`:
+ *   - never attempted (fresh launch, the first tick has not fired) → NOT stale.
+ *     Flagging every cold start would be pure noise.
+ *   - attempted but never succeeded → STALE. This is a known, ongoing failure.
+ *   - succeeded once, but too long ago → STALE once past `staleAfterMs`.
+ *
+ * Pure so the decision table is locked by `test/unittest/git-sync-display.test.mts`
+ * without a React render or a running fetch loop.
+ */
+export function resolveGitSyncFreshness(input: {
+  lastFetchOkAt: number | null | undefined
+  lastFetchAttemptAt: number | null | undefined
+  now: number
+  /** No upstream → there is no behind count to be stale about. */
+  hasUpstream: boolean
+  staleAfterMs?: number
+}): GitSyncFreshness {
+  const staleAfterMs = input.staleAfterMs ?? GIT_SYNC_STALE_AFTER_MS
+  if (!input.hasUpstream) return { stale: false, ageMs: null, neverSynced: false }
+
+  const okAt = toFiniteTimestamp(input.lastFetchOkAt)
+  if (okAt === null) {
+    const attemptedAt = toFiniteTimestamp(input.lastFetchAttemptAt)
+    // Attempted and never succeeded → a real, current failure. Never attempted →
+    // the loop simply has not run yet; stay quiet.
+    return { stale: attemptedAt !== null, ageMs: null, neverSynced: true }
+  }
+
+  // Clamp a negative age (clock adjustment / skew) to 0 rather than letting it
+  // read as "synced in the future" and flip the comparison.
+  const ageMs = Math.max(0, input.now - okAt)
+  return { stale: ageMs > staleAfterMs, ageMs, neverSynced: false }
+}
+
+function toFiniteTimestamp(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+}

@@ -63,7 +63,7 @@ import {
   removeMirrorAlias,
   resolveTerminalGitDisplayState
 } from './gitStatusIdentity'
-import { resolveGitSyncDisplay } from './gitSyncDisplay'
+import { resolveGitSyncDisplay, resolveGitSyncFreshness } from './gitSyncDisplay'
 import '@xterm/xterm/css/xterm.css'
 import './TerminalGrid.css'
 import '../../styles/path-copy-toast.css'
@@ -134,6 +134,23 @@ interface TerminalGitInfo {
 }
 
 const TERMINAL_PATH_SEGMENTS = 3
+/**
+ * Per-cwd floor between two `git-state-mirror.update-received` diagnostics
+ * (BUG-0005 P1). Deltas arrive in bursts during a checkout; one sample per cwd
+ * per quarter-second is enough to prove the receive path is alive without the
+ * diagnostic itself becoming the storm.
+ */
+const MIRROR_UPDATE_TRACE_THROTTLE_MS = 250
+/**
+ * Re-render cadence for the sync-staleness treatment (BUG-0005 R3).
+ *
+ * Staleness is a function of ELAPSED TIME, not of an incoming event: when the
+ * fetch loop stops succeeding there is no delta to re-render on, so without a
+ * tick the badge would never admit its number had gone stale. 60 s against the
+ * 20-min threshold is ample resolution and costs one setState per minute — it
+ * runs only while the grid is visible and only when a repo has an upstream.
+ */
+const SYNC_FRESHNESS_TICK_MS = 60_000
 const FOCUS_REQUEST_MAX_ATTEMPTS = 12
 const FOCUS_REQUEST_RETRY_MS = 50
 const TERMINAL_CONTEXT_MENU_MARGIN = 8
@@ -367,7 +384,19 @@ export const TerminalGrid = memo(function TerminalGrid({
     cwd: string | null
     branch: string | null
     status: TerminalGitStatus | null
+    ahead: number
+    behind: number
+    syncStale: boolean
   }>>({})
+  /**
+   * Per-cwd throttle for the mirror-update diagnostic. A single `git pull` that
+   * checks out thousands of files produces a fanout burst (the field bundle
+   * dropped 7,903 watcher events in one window); the diagnostic must observe
+   * that burst, not amplify it.
+   */
+  const mirrorUpdateTraceAtRef = useRef<Map<string, number>>(new Map())
+  /** Bumped by a slow timer so time-based sync staleness re-evaluates. */
+  const [syncFreshnessTick, setSyncFreshnessTick] = useState(0)
   // macOS canonicalises `/var/...` to `/private/var/...` (the actual mount
   // point of the symlink). The mirror worker uses `path.resolve` so its
   // emitted `cwd` carries the `/private/` prefix; the renderer subscribes
@@ -736,6 +765,24 @@ export const TerminalGrid = memo(function TerminalGrid({
   useEffect(() => {
     const dispose = window.electronAPI?.git?.onMirrorUpdate?.((cwd, delta) => {
       const typedDelta = delta as GitStateMirrorDelta
+      // Prove the renderer half of the chain ran. Main records
+      // `main:git-state-mirror.fanout` on send; nothing recorded the receive at
+      // ANY tier, so a "main computed it, the badge never moved" report had no
+      // evidence either way. Diagnostic tier (default-on) — this must work in a
+      // stock user build, which is the whole point. Throttled per cwd.
+      const now = Date.now()
+      const lastTraceAt = mirrorUpdateTraceAtRef.current.get(cwd) ?? 0
+      if (now - lastTraceAt >= MIRROR_UPDATE_TRACE_THROTTLE_MS) {
+        mirrorUpdateTraceAtRef.current.set(cwd, now)
+        const deltaKeys = Object.keys(typedDelta ?? {}).filter((key) => key !== 'capturedAt')
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_STATE_MIRROR_UPDATE_RECEIVED, {
+          cwd,
+          deltaKeyCount: deltaKeys.length,
+          hasAheadBehind: deltaKeys.includes('ahead') || deltaKeys.includes('behind'),
+          hasFetchFreshness:
+            deltaKeys.includes('lastFetchOkAt') || deltaKeys.includes('lastFetchAttemptAt')
+        })
+      }
       setMirrorSnapshots((prev) => mergeMirrorDeltaSnapshot(prev, cwd, typedDelta))
     })
     return () => { dispose?.() }
@@ -1095,7 +1142,25 @@ export const TerminalGrid = memo(function TerminalGrid({
       const sigOverride = terminalInfoOverridesRef.current.get(termInfo.id)
       const branch = sigOverride?.branch !== undefined ? sigOverride.branch : rawBranchSig
       const status = sigOverride?.status !== undefined ? sigOverride.status : rawStatusSig
-      const signal = { cwd: gitState.normalizedCwd ?? cwd, branch, status }
+      const syncSignal = resolveGitSyncDisplay({
+        status,
+        ahead: gitState.ahead,
+        behind: gitState.behind
+      })
+      const freshnessSignal = resolveGitSyncFreshness({
+        lastFetchOkAt: gitState.lastFetchOkAt,
+        lastFetchAttemptAt: gitState.lastFetchAttemptAt,
+        now: Date.now(),
+        hasUpstream: gitState.ahead !== null || gitState.behind !== null
+      })
+      const signal = {
+        cwd: gitState.normalizedCwd ?? cwd,
+        branch,
+        status,
+        ahead: syncSignal.ahead,
+        behind: syncSignal.behind,
+        syncStale: freshnessSignal.stale
+      }
       const previous = lastRenderedGitSignalRef.current[termInfo.id]
       if (!previous || previous.branch !== signal.branch) {
         perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_TITLE_BRANCH_RENDERED, {
@@ -1111,10 +1176,66 @@ export const TerminalGrid = memo(function TerminalGrid({
           status: signal.status ?? 'unknown'
         }, termInfo.id)
       }
+      // `branch-rendered` above fires only when the branch STRING changes, so an
+      // ahead/behind-only move — the entire subject of BUG-0005 — was invisible
+      // even with the opt-in tier on. This one is diagnostic tier
+      // and keyed on the sync pair itself, so a stock user bundle can show what
+      // the badge actually painted and whether it was flagged stale.
+      if (
+        !previous ||
+        previous.ahead !== signal.ahead ||
+        previous.behind !== signal.behind ||
+        previous.syncStale !== signal.syncStale
+      ) {
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_TERMINAL_TITLE_SYNC_RENDERED, {
+          terminalId: termInfo.id,
+          cwd: signal.cwd,
+          ahead: signal.ahead,
+          behind: signal.behind,
+          stale: signal.syncStale
+        })
+      }
       nextSignals[termInfo.id] = signal
     }
     lastRenderedGitSignalRef.current = nextSignals
-  }, [hidden, visibleTerminals, terminalInfos, oscDetectedCwds, mirrorSnapshots, mirrorSnapshotAliases])
+  }, [
+    hidden,
+    visibleTerminals,
+    terminalInfos,
+    oscDetectedCwds,
+    mirrorSnapshots,
+    mirrorSnapshotAliases,
+    syncFreshnessTick
+  ])
+
+  // Drive the staleness re-evaluation. See SYNC_FRESHNESS_TICK_MS: without a
+  // tick, a badge whose fetch stopped succeeding would keep presenting its last
+  // number as current forever, because "nothing changed" produces no delta.
+  useEffect(() => {
+    if (hidden) return
+    const timer = setInterval(() => {
+      setSyncFreshnessTick((tick) => tick + 1)
+    }, SYNC_FRESHNESS_TICK_MS)
+    return () => { clearInterval(timer) }
+  }, [hidden])
+
+  /**
+   * A single "now" shared by every badge in one render pass. Reading
+   * `Date.now()` per badge would let otherwise-identical rows disagree about
+   * staleness at a threshold boundary; one value per pass keeps the grid
+   * internally consistent.
+   *
+   * Both deps are load-bearing even though neither appears in the body — they
+   * are the invalidation triggers, not inputs. `syncFreshnessTick` re-dates the
+   * value on the slow timer (staleness is a function of elapsed time, so nothing
+   * else would ever invalidate it); `mirrorSnapshots` re-dates it the instant a
+   * fetch lands, so a badge clears its stale mark immediately instead of waiting
+   * out the remainder of the tick. Do not "simplify" either one away.
+   */
+  const syncFreshnessNow = useMemo(
+    () => Date.now(),
+    [syncFreshnessTick, mirrorSnapshots]
+  )
 
   const formatCompactPath = useCallback((cwd: string): string => {
     const trimmed = cwd.trim()
@@ -3125,19 +3246,42 @@ export const TerminalGrid = memo(function TerminalGrid({
             // their working-tree colour and just append the arrows. Counts come
             // from the mirror snapshot only (legacy RPC path has none).
             const sync = resolveGitSyncDisplay({ status, ahead: gitState.ahead, behind: gitState.behind })
+            // BUG-0005 R3: `behind` is only as fresh as the last SUCCESSFUL
+            // background fetch. When fetching has been failing the badge would
+            // otherwise keep rendering a confident count (often `↓0`) that really
+            // means "we have not been able to ask in hours".
+            const syncFreshness = resolveGitSyncFreshness({
+              lastFetchOkAt: gitState.lastFetchOkAt,
+              lastFetchAttemptAt: gitState.lastFetchAttemptAt,
+              now: syncFreshnessNow,
+              hasUpstream: gitState.ahead !== null || gitState.behind !== null
+            })
             const branchStatusClass = sync.dotState !== 'clean'
               ? `terminal-grid-branch--${sync.dotState}`
               : ''
             const branchClassName = branchStatusClass
               ? `terminal-grid-branch ${branchStatusClass}`
               : 'terminal-grid-branch'
-            const branchSyncTitle = sync.showAhead || sync.showBehind
+            const branchBaseTitle = sync.showAhead || sync.showBehind
               ? t('terminalGrid.branchSyncTitle', {
                   branch: branch ?? '',
                   ahead: sync.ahead,
                   behind: sync.behind
                 })
               : t('terminalGrid.branchTitle', { branch: branch ?? '' })
+            // Second tooltip line, only when the count cannot be trusted. Kept
+            // to the tooltip + a de-emphasised arrow rather than a warning icon:
+            // a badge that shouts on every offline stretch becomes noise.
+            const branchStaleNote = !syncFreshness.stale
+              ? null
+              : syncFreshness.neverSynced
+                ? t('terminalGrid.syncNeverSynced')
+                : t('terminalGrid.syncStaleTitle', {
+                    minutes: Math.max(1, Math.round((syncFreshness.ageMs ?? 0) / 60000))
+                  })
+            const branchSyncTitle = branchStaleNote
+              ? `${branchBaseTitle}\n${branchStaleNote}`
+              : branchBaseTitle
 
             // Custom mode lays each Task on a stored rectangle inside the
             // 4col x 2row atomic mesh. Preset modes leave grid-area unset
@@ -3311,9 +3455,27 @@ export const TerminalGrid = memo(function TerminalGrid({
                             {`↑${sync.ahead}`}
                           </span>
                         )}
-                        {sync.showBehind && (
-                          <span className="terminal-grid-branch-behind" aria-label={t('terminalGrid.behindAria', { behind: sync.behind })}>
-                            {`↓${sync.behind}`}
+                        {(sync.showBehind || syncFreshness.stale) && (
+                          <span
+                            className={
+                              syncFreshness.stale
+                                ? 'terminal-grid-branch-behind terminal-grid-branch-behind--stale'
+                                : 'terminal-grid-branch-behind'
+                            }
+                            aria-label={
+                              syncFreshness.stale && !sync.showBehind
+                                ? t('terminalGrid.behindUnknownAria')
+                                : t('terminalGrid.behindAria', { behind: sync.behind })
+                            }
+                          >
+                            {/*
+                              A stale count with behind === 0 renders `↓?` rather
+                              than disappearing. "No arrow" reads as "you are up
+                              to date", which is precisely the false statement
+                              this fix exists to stop making — the field report
+                              was a user trusting exactly that.
+                            */}
+                            {sync.showBehind ? `↓${sync.behind}` : '↓?'}
                           </span>
                         )}
                       </span>

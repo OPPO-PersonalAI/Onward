@@ -1281,7 +1281,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle('debug:autotest-git-autofetch', async (
     _event,
     payload?: { repoRoot?: unknown }
-  ): Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }> => {
+  ): Promise<{
+    ok: boolean
+    reason?: string
+    durationMs?: number
+    error?: string
+    /** Enriched failure evidence — see AutofetchResult in git-autofetch-manager. */
+    classified?: string
+    exitCode?: number | null
+    killedByTimeout?: boolean
+    stderrTail?: string
+  }> => {
     if (process.env.ONWARD_AUTOTEST !== '1') {
       return { ok: false, error: 'debug:autotest-git-autofetch requires ONWARD_AUTOTEST=1' }
     }
@@ -1289,7 +1299,19 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     if (!repoRoot) return { ok: false, error: 'Missing repoRoot.' }
     try {
       const result = await gitAutofetchManager.forceFetchForAutotest(repoRoot)
-      return { ok: result.ok, reason: result.reason, durationMs: result.durationMs }
+      // BUG-0005 R4: surface the enriched failure evidence so the autotest can
+      // assert the diagnostic payload actually reaches a consumer, not just that
+      // the fetch failed. These are the fields whose absence made 6 of 9 field
+      // failures undiagnosable.
+      return {
+        ok: result.ok,
+        reason: result.reason,
+        durationMs: result.durationMs,
+        classified: result.classified,
+        exitCode: result.exitCode ?? null,
+        killedByTimeout: result.killedByTimeout,
+        stderrTail: result.stderrTail
+      }
     } catch (error) {
       return { ok: false, error: String(error) }
     }

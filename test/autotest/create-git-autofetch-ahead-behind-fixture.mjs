@@ -15,6 +15,11 @@
 //   no-upstream/  git init, one commit, no remote → ahead/behind undefined
 //   fetch-behind/ origin advanced by 1 AFTER clone, ref NOT fetched yet
 //                 → ahead 0, behind 0 now; after a background fetch → behind 1
+//   fail-fetch/   origin repointed at a non-existent path → fetch fails FAST
+//                 with a real exit code + stderr (BUG-0005 R4 payload proof)
+//   timeout-fetch/ origin uses git's ext:: transport running `sleep` → the fetch
+//                 hangs and is killed by the 20 s ceiling, reproducing the field
+//                 failure mode whose stderr used to be discarded
 //   neutral/      the app's terminal cwd (not a git repo, never auto-subscribed)
 //
 // Materialised OUTSIDE the Onward repo tree (runner passes ONWARD_AB_FIXTURE_DIR,
@@ -118,6 +123,28 @@ const fetchBehind = cloneFrom('fetch-behind')
 commit(helper, 'README.md', '# fixture\n\nC0\nC1\nC2\n', 'C2 third')
 git(helper, ['push', 'origin', 'main'])
 
+// fail-fetch (BUG-0005 R4): a normal clone whose origin URL is repointed at a
+// path that does not exist. `git fetch` fails FAST (no timeout involved) with a
+// real exit code and a real stderr, so the test can assert that the enriched
+// failure payload — classified / exitCode / stderrTail — actually reaches a
+// consumer. Before the fix these fields did not exist and every failure looked
+// identical in a user-attached trace.
+const failFetch = cloneFrom('fail-fetch')
+git(failFetch, ['config', 'remote.origin.url', join(runtimeRoot, 'no-such-remote.git')])
+
+// timeout-fetch (BUG-0005 R4, the FIELD scenario): origin speaks git's `ext::`
+// transport, whose command just sleeps. git connects and waits forever for the
+// protocol banner, so the fetch is killed by the manager's 20 s ceiling exactly
+// as it was for the two repos in the field bundle (durations 20,007–20,013 ms).
+// This is the branch that used to short-circuit past classifyFetchFailure and
+// discard stderr, so it is the one worth exercising end-to-end.
+// `sleep` and the shell come from git's own runtime (Git for Windows bundles
+// both), which keeps the fixture platform-neutral; `protocol.ext.allow` is set
+// explicitly because git restricts ext:: by default.
+const timeoutFetch = cloneFrom('timeout-fetch')
+git(timeoutFetch, ['config', 'protocol.ext.allow', 'always'])
+git(timeoutFetch, ['config', 'remote.origin.url', 'ext::sleep 60'])
+
 // no-upstream: a standalone repo with a commit but no remote.
 const noUpstream = join(runtimeRoot, 'no-upstream')
 mkdirSync(noUpstream, { recursive: true })
@@ -138,6 +165,8 @@ const manifest = {
   behind,
   diverged,
   fetchBehind,
+  failFetch,
+  timeoutFetch,
   noUpstream,
   neutralCwd
 }

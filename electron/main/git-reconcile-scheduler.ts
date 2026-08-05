@@ -92,6 +92,45 @@ export function computeEffectiveIntervalMs(
   return Math.max(baseIntervalMs, stretched)
 }
 
+/**
+ * Sanity ceiling for a SINGLE measured status/recompute duration (BUG-0005 R5).
+ *
+ * No real local `git status` takes 30 s — even the EDR-taxed host that motivated
+ * the adaptive backoff above peaked at 12.9 s. A process suspended mid-measure
+ * (system sleep, App Nap), however, trivially produces minutes.
+ */
+export const MIRROR_DURATION_SANITY_CEILING_MS = 30_000
+
+/**
+ * Reduce a dual-clock measurement to a duration that is safe to feed
+ * {@link computeEffectiveIntervalMs}, or 0 when the sample is not believable.
+ *
+ * Why both clocks: `Date.now()` always includes suspend, and whether
+ * `performance.now()` does is platform-dependent (macOS `mach_absolute_time`
+ * stops across sleep while `mach_continuous_time` does not; Linux
+ * `CLOCK_MONOTONIC` excludes suspend, `CLOCK_BOOTTIME` includes it). Believing
+ * the SMALLER of the two is correct wherever the monotonic clock does exclude
+ * suspend; the ceiling catches every platform where it does not.
+ *
+ * Why 0 and not the raw value: 0 already means "no measurement" to every
+ * consumer — `computeEffectiveIntervalMs` returns the base interval for a
+ * non-positive duration, and the recompute governor applies no duty-cycle floor.
+ * So a suspended sample degrades to "we learned nothing this round" instead of
+ * "this repo is catastrophically slow, back off to the 60 s ceiling", which is
+ * exactly what the field bundle showed happening after every wake: a repo whose
+ * true median is 79 ms was measured at ~925 s and pinned at the cap.
+ */
+export function sanitizeMeasuredDurationMs(
+  wallMs: number,
+  monotonicMs: number,
+  ceilingMs: number = MIRROR_DURATION_SANITY_CEILING_MS
+): number {
+  const candidates = [wallMs, monotonicMs].filter((value) => Number.isFinite(value) && value >= 0)
+  if (candidates.length === 0) return 0
+  const believable = Math.min(...candidates)
+  return believable > ceilingMs ? 0 : Math.round(believable)
+}
+
 export type TaskVisibility = 'focused' | 'visible' | 'hidden'
 
 export type ReconcileReason =

@@ -131,3 +131,213 @@ test('onFetchDone for a pruned repo is a no-op (no throw)', () => {
 test('default interval constant is 10 minutes', () => {
   assert.equal(GIT_AUTOFETCH_DEFAULT_INTERVAL_MS, 10 * MIN)
 })
+
+// ---------------------------------------------------------------------------
+// BUG-0005 R1-A — focused-repo priority retry
+//
+// The 1 h ceiling is right for an unattended dead repo, but it used to be the
+// ONLY rule: a repo whose fetch always timed out was pinned there forever and
+// nothing the user did could shorten it. These lock the escape hatch AND its
+// rate limits, because an unbounded hatch would make the backoff vacuous.
+// ---------------------------------------------------------------------------
+
+test('priority retry: refused for a healthy repo (streak 0)', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, true)
+  // Focusing a healthy repo must NOT turn into a fetch-per-click loop.
+  assert.deepEqual(s.requestPriorityRetry('/repo/a', 5 * MIN), {
+    granted: false,
+    reason: 'not-backed-off'
+  })
+  assert.deepEqual(s.tick(5 * MIN), [])
+})
+
+test('priority retry: grants a backed-off repo one bypass, and tick honours it', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, false) // streak 1 → next gap 20 min
+
+  // Two minutes later the normal gap has NOT elapsed…
+  assert.deepEqual(s.tick(2 * MIN), [])
+  // …but the user focused this Task, so one attempt is granted.
+  assert.deepEqual(s.requestPriorityRetry('/repo/a', 2 * MIN), { granted: true })
+  assert.deepEqual(s.tick(2 * MIN), ['/repo/a'])
+})
+
+test('priority retry: refused while the last attempt is still recent', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, false)
+  // 30 s after the attempt — under the 60 s floor, nothing new could be learned.
+  assert.deepEqual(s.requestPriorityRetry('/repo/a', 30_000), {
+    granted: false,
+    reason: 'attempted-recently'
+  })
+})
+
+test('priority retry: per-repo cooldown blocks a second grant for 5 min', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, false)
+
+  assert.equal(s.requestPriorityRetry('/repo/a', 2 * MIN).granted, true)
+  s.onFetchStart('/repo/a')                 // consumes the pending grant
+  s.onFetchDone('/repo/a', 3 * MIN, false)  // and fails again
+
+  // 4 min after the grant → still inside the 5 min cooldown.
+  assert.deepEqual(s.requestPriorityRetry('/repo/a', 6 * MIN), {
+    granted: false,
+    reason: 'cooldown'
+  })
+  // Past the cooldown → granted again.
+  assert.equal(s.requestPriorityRetry('/repo/a', 8 * MIN).granted, true)
+})
+
+test('priority retry: refused while a fetch is in flight, and for unknown repos', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, false)
+  s.onFetchStart('/repo/a')
+  assert.deepEqual(s.requestPriorityRetry('/repo/a', 5 * MIN), {
+    granted: false,
+    reason: 'in-flight'
+  })
+  assert.deepEqual(s.requestPriorityRetry('/repo/ghost', 5 * MIN), {
+    granted: false,
+    reason: 'unknown-repo'
+  })
+})
+
+test('priority retry: a second request before the spawn is not double-counted', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, false)
+  assert.equal(s.requestPriorityRetry('/repo/a', 2 * MIN).granted, true)
+  assert.deepEqual(s.requestPriorityRetry('/repo/a', 2 * MIN + 1000), {
+    granted: false,
+    reason: 'already-pending'
+  })
+  // Still exactly one due entry, not two.
+  assert.deepEqual(s.tick(2 * MIN + 1000), ['/repo/a'])
+})
+
+test('priority retry: a grant does not survive the app going hidden', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, false)
+  assert.equal(s.requestPriorityRetry('/repo/a', 2 * MIN).granted, true)
+  s.setAppVisible(false)
+  // The hidden pause still wins — a granted retry must not defeat it.
+  assert.deepEqual(s.tick(2 * MIN), [])
+})
+
+// ---------------------------------------------------------------------------
+// BUG-0005 R1-B — hidden → visible halves the failure streak
+// ---------------------------------------------------------------------------
+
+test('visible edge: halves every failure streak and reports how many changed', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a', '/repo/b'])
+  for (const repo of ['/repo/a', '/repo/b']) {
+    for (let i = 0; i < 4; i++) {
+      s.onFetchStart(repo)
+      s.onFetchDone(repo, i * MIN, false)
+    }
+  }
+  assert.equal(s.inspect().repos[0].failureStreak, 4)
+
+  s.setAppVisible(false)
+  assert.equal(s.setAppVisible(true), 2, 'both repos were backed off')
+  assert.equal(s.inspect().repos[0].failureStreak, 2)
+  assert.equal(s.inspect().repos[1].failureStreak, 2)
+})
+
+test('visible edge: idempotent — repeated same-value calls do not re-halve', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  for (let i = 0; i < 4; i++) {
+    s.onFetchStart('/repo/a')
+    s.onFetchDone('/repo/a', i * MIN, false)
+  }
+  s.setAppVisible(false)
+  assert.equal(s.setAppVisible(true), 1)
+  // The host fires setAppVisible on show/hide/minimize/restore, so the same
+  // value arrives repeatedly; only a real transition may mutate state.
+  assert.equal(s.setAppVisible(true), 0)
+  assert.equal(s.setAppVisible(true), 0)
+  assert.equal(s.inspect().repos[0].failureStreak, 2)
+})
+
+test('visible edge: a healthy repo is untouched (no negative / no churn)', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.setAppVisible(false)
+  assert.equal(s.setAppVisible(true), 0)
+  assert.equal(s.inspect().repos[0].failureStreak, 0)
+})
+
+test('visible edge: halving actually shortens the effective gap', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  for (let i = 0; i < 4; i++) {
+    s.onFetchStart('/repo/a')
+    s.onFetchDone('/repo/a', 0, false)
+  }
+  // streak 4 → 10min * 2^4 = 160min, capped to the 1 h ceiling.
+  assert.deepEqual(s.tick(30 * MIN), [])
+  s.setAppVisible(false)
+  s.setAppVisible(true)
+  // streak 2 → 40 min. Still not due at 30 min…
+  assert.deepEqual(s.tick(30 * MIN), [])
+  // …but due at 40, where the un-halved streak would have needed 60.
+  assert.deepEqual(s.tick(40 * MIN), ['/repo/a'])
+})
+
+// ---------------------------------------------------------------------------
+// BUG-0005 P0 — overdueSnapshot feeds the paused-while-hidden diagnostic
+// ---------------------------------------------------------------------------
+
+test('overdueSnapshot: counts never-fetched repos separately and stays finite', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a', '/repo/b'])
+  const snap = s.overdueSnapshot(5 * MIN)
+  assert.equal(snap.repoCount, 2)
+  assert.equal(snap.neverFetchedCount, 2)
+  assert.equal(snap.overdueCount, 2)
+  // A never-fetched repo must not contribute an infinite age to the payload.
+  assert.equal(snap.maxOverdueMs, 0)
+  assert.ok(Number.isFinite(snap.maxOverdueMs))
+})
+
+test('overdueSnapshot: reports how far past due, ignoring the visible gate', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, true)
+  s.setAppVisible(false) // hidden: tick() yields nothing…
+
+  assert.deepEqual(s.tick(25 * MIN), [])
+  // …but the diagnostic must still be able to say how much is owed.
+  const snap = s.overdueSnapshot(25 * MIN)
+  assert.equal(snap.overdueCount, 1)
+  assert.equal(snap.neverFetchedCount, 0)
+  assert.equal(snap.maxOverdueMs, 15 * MIN) // 25 min elapsed − 10 min gap
+})
+
+test('overdueSnapshot: a repo inside its gap is not overdue', () => {
+  const s = new GitAutofetchScheduler({ intervalMs: 10 * MIN })
+  s.syncRepos(['/repo/a'])
+  s.onFetchStart('/repo/a')
+  s.onFetchDone('/repo/a', 0, true)
+  const snap = s.overdueSnapshot(5 * MIN)
+  assert.equal(snap.overdueCount, 0)
+  assert.equal(snap.maxOverdueMs, 0)
+})

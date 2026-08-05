@@ -463,6 +463,16 @@ export interface GitStateMirrorSnapshot {
    * it current. Undefined when the branch has no upstream.
    */
   behind?: number
+  /**
+   * `Date.now()` of the last SUCCESSFUL background fetch for this repo (stamped
+   * by the main-process mirror router). Drives the badge's stale-sync treatment:
+   * `behind` is only as fresh as this timestamp, so when it ages past the
+   * staleness threshold the `↓` count is de-emphasised and the tooltip says when
+   * the last successful sync was. Undefined when no fetch has succeeded yet.
+   */
+  lastFetchOkAt?: number
+  /** `Date.now()` of the last background fetch ATTEMPT, successful or not. */
+  lastFetchAttemptAt?: number
   status: TerminalGitStatus | null
   files: GitFileStatus[]
   repos?: GitRepoContext[]
@@ -1179,7 +1189,17 @@ export interface DebugAPI {
   writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
   gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
   poisonRepoProbeForAutotest: (payload: { cwd: string; durationMs?: number }) => Promise<{ ok: boolean; error?: string }>
-  gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>
+  gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{
+    ok: boolean
+    reason?: string
+    durationMs?: number
+    error?: string
+    /** Enriched failure evidence — see AutofetchResult in git-autofetch-manager. */
+    classified?: string
+    exitCode?: number | null
+    killedByTimeout?: boolean
+    stderrTail?: string
+  }>
   recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
   getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
   flushPerfTrace: () => Promise<PerformanceTraceStatus>

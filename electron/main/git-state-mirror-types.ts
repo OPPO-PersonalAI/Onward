@@ -79,6 +79,18 @@ export interface MirrorState {
    * under the same conditions as {@link ahead}.
    */
   behind?: number
+  /**
+   * `Date.now()` of the last SUCCESSFUL background fetch for this repo, or
+   * undefined when none has succeeded in this process' lifetime.
+   *
+   * Stamped by the router (not the worker — the worker knows nothing about
+   * fetching) so the badge can tell "↓0 because you are up to date" apart from
+   * "↓0 because we have not been able to ask in hours" (BUG-0005 R3). Rides the
+   * existing mirror delta channel rather than a new IPC surface.
+   */
+  lastFetchOkAt?: number
+  /** `Date.now()` of the last background fetch ATTEMPT, successful or not. */
+  lastFetchAttemptAt?: number
   /** Status colour bucket — drives the terminal-grid-branch--{status} className. */
   status: TerminalGitStatus | null
   /** File list (unstaged + staged + untracked). Empty array when clean. */
@@ -143,6 +155,16 @@ export interface MirrorFileBody {
  * Delta the worker emits when a recompute changes anything. Renderer
  * merges into its local copy of `MirrorState`.
  */
+/**
+ * Background-fetch timing for one repo root, owned by the router and stamped
+ * onto outgoing snapshots. Both fields are `Date.now()` values; undefined means
+ * "has not happened in this process' lifetime". See {@link MirrorState.lastFetchOkAt}.
+ */
+export interface GitFetchFreshness {
+  lastFetchOkAt?: number
+  lastFetchAttemptAt?: number
+}
+
 export type MirrorDelta = Partial<Omit<MirrorState, 'cwd' | 'capturedAt'>> & {
   capturedAt: number
 }

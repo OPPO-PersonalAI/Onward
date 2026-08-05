@@ -31,7 +31,10 @@ if (-not $LogFile) {
 New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 if (Test-Path $LogFile) { Remove-Item $LogFile -Force }
 
-$WatchdogSec = if ($env:WATCHDOG_SEC) { $env:WATCHDOG_SEC } else { "180" }
+# 240 (not 180): AB-08 spends the manager's full 20 s fetch ceiling BY DESIGN —
+# it asserts the timeout branch — and AB-07/09/10 add convergence polling on top.
+# Kept in lockstep with the .sh runner (runner-parity hard rule).
+$WatchdogSec = if ($env:WATCHDOG_SEC) { $env:WATCHDOG_SEC } else { "240" }
 $RunTmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("onward-$Suite-" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
 $UserDataDir = Join-Path $RunTmpDir "user-data"
 $FixtureDir = Join-Path $RunTmpDir "fixture"

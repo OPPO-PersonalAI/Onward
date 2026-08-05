@@ -22,6 +22,8 @@ import {
   RECONCILE_BACKOFF_FACTOR,
   RECONCILE_MAX_BACKOFF_INTERVAL_MS,
   computeEffectiveIntervalMs,
+  MIRROR_DURATION_SANITY_CEILING_MS,
+  sanitizeMeasuredDurationMs,
   type DueRepo
 } from '../../electron/main/git-reconcile-scheduler.ts'
 
@@ -300,4 +302,105 @@ test('backoff: explicit dirty (watcher) still fires immediately even while backe
 test('exported backoff constants match the agreed design (factor 4, 60 s ceiling)', () => {
   assert.equal(RECONCILE_BACKOFF_FACTOR, 4)
   assert.equal(RECONCILE_MAX_BACKOFF_INTERVAL_MS, 60_000)
+})
+
+// ---------------------------------------------------------------------------
+// BUG-0005 R5 — a duration measurement spanning a system sleep must not drive
+// the adaptive backoff.
+//
+// Field evidence: `lastStatusMs` medians of ~925 s for repos whose true median
+// is 44–79 ms, matching the `main:event-loop-stall` drift of ~920 s. The backoff
+// read those as "status is catastrophically slow" and pinned the heartbeat at
+// its 60 s ceiling right after every wake — precisely when the user came back
+// and started looking at the badge.
+// ---------------------------------------------------------------------------
+
+test('duration sanity: a normal sample passes through, rounded', () => {
+  assert.equal(sanitizeMeasuredDurationMs(79, 79), 79)
+  assert.equal(sanitizeMeasuredDurationMs(308.6, 308.4), 308)
+})
+
+test('duration sanity: believes the SMALLER clock', () => {
+  // macOS: mach_absolute_time stops across sleep, so the monotonic reading is
+  // the honest one even though the wall clock jumped 15 minutes.
+  assert.equal(sanitizeMeasuredDurationMs(925_000, 44), 44)
+  // The reverse ordering must behave the same way — no clock is privileged.
+  assert.equal(sanitizeMeasuredDurationMs(44, 925_000), 44)
+})
+
+test('duration sanity: rejects the field sample outright when BOTH clocks jumped', () => {
+  // Linux CLOCK_BOOTTIME / macOS mach_continuous_time include suspend, so both
+  // readings are inflated and there is no honest sample to keep.
+  assert.equal(sanitizeMeasuredDurationMs(925_089, 925_089), 0)
+  assert.equal(sanitizeMeasuredDurationMs(904_795, 904_795), 0)
+})
+
+test('duration sanity: boundary — at the ceiling kept, one ms past rejected', () => {
+  const c = MIRROR_DURATION_SANITY_CEILING_MS
+  assert.equal(sanitizeMeasuredDurationMs(c, c), c)
+  assert.equal(sanitizeMeasuredDurationMs(c + 1, c + 1), 0)
+})
+
+test('duration sanity: the EDR-slow host that motivated the backoff still engages', () => {
+  // 12.9 s peak from the original EDR trace is BELOW the ceiling, so the
+  // adaptive backoff this rule guards must keep working — the fix must not
+  // regress the behaviour it sits next to.
+  const edrPeak = 12_900
+  assert.equal(sanitizeMeasuredDurationMs(edrPeak, edrPeak), edrPeak)
+  assert.equal(
+    computeEffectiveIntervalMs(
+      RECONCILE_FOCUSED_INTERVAL_MS,
+      sanitizeMeasuredDurationMs(edrPeak, edrPeak),
+      RECONCILE_BACKOFF_FACTOR,
+      RECONCILE_MAX_BACKOFF_INTERVAL_MS
+    ),
+    edrPeak * RECONCILE_BACKOFF_FACTOR,
+    'a genuinely slow host still stretches by the factor (51.6 s, just under the 60 s cap)'
+  )
+  // And a host slow enough to exceed the cap still clamps there rather than
+  // being rejected outright — the ceiling and the cap are separate mechanisms.
+  const belowCeilingButOverCap = 20_000
+  assert.equal(sanitizeMeasuredDurationMs(belowCeilingButOverCap, belowCeilingButOverCap), 20_000)
+  assert.equal(
+    computeEffectiveIntervalMs(
+      RECONCILE_FOCUSED_INTERVAL_MS,
+      belowCeilingButOverCap,
+      RECONCILE_BACKOFF_FACTOR,
+      RECONCILE_MAX_BACKOFF_INTERVAL_MS
+    ),
+    RECONCILE_MAX_BACKOFF_INTERVAL_MS
+  )
+})
+
+test('duration sanity: a rejected sample yields the BASE cadence, not the cap', () => {
+  // This is the whole point: 0 already means "no measurement" downstream.
+  const rejected = sanitizeMeasuredDurationMs(925_089, 925_089)
+  assert.equal(
+    computeEffectiveIntervalMs(
+      RECONCILE_FOCUSED_INTERVAL_MS,
+      rejected,
+      RECONCILE_BACKOFF_FACTOR,
+      RECONCILE_MAX_BACKOFF_INTERVAL_MS
+    ),
+    RECONCILE_FOCUSED_INTERVAL_MS,
+    'post-wake the focused repo returns to its 1 s heartbeat'
+  )
+  assert.equal(
+    computeEffectiveIntervalMs(
+      RECONCILE_VISIBLE_INTERVAL_MS,
+      rejected,
+      RECONCILE_BACKOFF_FACTOR,
+      RECONCILE_MAX_BACKOFF_INTERVAL_MS
+    ),
+    RECONCILE_VISIBLE_INTERVAL_MS
+  )
+})
+
+test('duration sanity: garbage inputs degrade to 0 rather than NaN', () => {
+  assert.equal(sanitizeMeasuredDurationMs(Number.NaN, Number.NaN), 0)
+  assert.equal(sanitizeMeasuredDurationMs(Number.POSITIVE_INFINITY, Number.NaN), 0)
+  // A negative reading (clock stepped backwards) is not a usable sample.
+  assert.equal(sanitizeMeasuredDurationMs(-5, -5), 0)
+  // …but a valid partner reading is still honoured.
+  assert.equal(sanitizeMeasuredDurationMs(-5, 60), 60)
 })

@@ -31,6 +31,15 @@ export interface TerminalGitDisplayState {
    */
   ahead: number | null
   behind: number | null
+  /**
+   * Background-fetch timing for this repo, stamped onto the snapshot by the
+   * main-process router. Drives the stale-sync treatment: `behind` is only as
+   * fresh as `lastFetchOkAt`, so an old (or absent-despite-attempts) timestamp
+   * means the count must not be presented as authoritative. Null until a mirror
+   * snapshot resolves, or when the fetch loop has not reported yet.
+   */
+  lastFetchOkAt: number | null
+  lastFetchAttemptAt: number | null
 }
 
 function collapsePathSegments(value: string): string {
@@ -173,6 +182,8 @@ export function resolveTerminalGitDisplayState(input: {
     repoName: mirror?.repoName ?? (legacyMatchesCwd ? input.terminalInfo?.repoName : null) ?? null,
     status: mirror?.status ?? (legacyMatchesCwd ? input.terminalInfo?.status : null) ?? null,
     ahead: mirror?.ahead ?? null,
-    behind: mirror?.behind ?? null
+    behind: mirror?.behind ?? null,
+    lastFetchOkAt: mirror?.lastFetchOkAt ?? null,
+    lastFetchAttemptAt: mirror?.lastFetchAttemptAt ?? null
   }
 }

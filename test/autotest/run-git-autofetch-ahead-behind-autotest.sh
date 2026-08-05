@@ -23,7 +23,11 @@ if [[ -z "$APP_BIN" || ! -e "$APP_BIN" ]]; then
   exit 1
 fi
 
-WATCHDOG_SEC="${WATCHDOG_SEC:-180}"
+# 240 (not 180): AB-08 spends the manager's full 20 s fetch ceiling BY DESIGN —
+# it asserts the timeout branch — and AB-07/09/10 add convergence polling on top.
+# Still well inside the 300 s per-runner regression ceiling; if this suite ever
+# needs more, split it rather than widening further (test/README.md § 3).
+WATCHDOG_SEC="${WATCHDOG_SEC:-240}"
 RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-${SUITE}-XXXXXX")"
 USER_DATA_DIR="$RUN_TMP_DIR/user-data"
 mkdir -p "$USER_DATA_DIR"

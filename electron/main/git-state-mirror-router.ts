@@ -45,7 +45,8 @@ import type {
   MirrorState,
   MirrorDelta,
   MirrorFileBody,
-  MirrorWatcherStatus
+  MirrorWatcherStatus,
+  GitFetchFreshness
 } from './git-state-mirror-types'
 
 /**
@@ -179,6 +180,16 @@ class GitStateMirrorRouter {
 
   /** Main-process subscribers (e.g. terminal-git-info-bridge). */
   private mirrorUpdateListeners = new Set<MirrorUpdateListener>()
+  /**
+   * repoRoot → background-fetch freshness (BUG-0005 R3). Kept HERE rather than
+   * inside the snapshots because the worker owns `MirrorState` and rewrites it
+   * wholesale on every recompute; a field the worker does not know about would
+   * be dropped on the next update. Stamping from this map on the way out (both
+   * on cache-write and on fanout) makes every egress path consistent.
+   */
+  private fetchFreshness = new Map<string, GitFetchFreshness>()
+  /** Notified when the focused terminal's repo changes; see setRepoFocusListener. */
+  private repoFocusListener: ((repoRoot: string) => void) | null = null
   private cwdChangeListeners = new Set<CwdChangeListener>()
 
   /** request-file-body reply correlation. */
@@ -446,6 +457,10 @@ class GitStateMirrorRouter {
         return
       }
       case 'mirror-update':
+        // Re-stamp fetch freshness: the worker rebuilt MirrorState from scratch
+        // and has no knowledge of the fetch loop, so without this the field
+        // would be silently dropped on every recompute.
+        this.applyFetchFreshness(msg.state)
         this.latest.set(msg.cwd, msg.state)
         performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_FANOUT, {
           cwd: msg.cwd,
@@ -977,6 +992,76 @@ class GitStateMirrorRouter {
   setReconcileFocus(rawCwd: string | null): void {
     const cwd = rawCwd ? canonicalise(rawCwd) : null
     this.postToWorker({ kind: 'reconcile-focus', cwd })
+    // BUG-0005 R1-A: the same signal tells the auto-fetch loop which repo the
+    // user is actually looking at, so a backed-off repo can earn one retry.
+    const repoRoot = cwd ? this.latest.get(cwd)?.repoRoot : undefined
+    if (repoRoot && this.repoFocusListener) {
+      try {
+        this.repoFocusListener(repoRoot)
+      } catch (error) {
+        console.warn('[GitStateMirrorRouter] repo-focus listener threw:', error)
+      }
+    }
+  }
+
+  /**
+   * Register the (single) listener notified when the focused terminal's repo is
+   * known. Pass null to clear. Inverted dependency: the auto-fetch manager
+   * imports this router, so the router must not import the manager.
+   */
+  setRepoFocusListener(listener: ((repoRoot: string) => void) | null): void {
+    this.repoFocusListener = listener
+  }
+
+  /**
+   * Record the outcome timing of a background fetch for `repoRoot` and push it
+   * to every subscriber of that repo's cwds.
+   *
+   * Rides the existing mirror-delta channel deliberately: the renderer's
+   * `mergeMirrorDeltaSnapshot` is a plain field merge, so no new IPC channel,
+   * preload bridge, or renderer subscription is needed. No-ops when nothing
+   * actually changed, so a repeated identical outcome causes no IPC traffic.
+   *
+   * @returns how many cwds were fanned out to. Returned rather than traced here
+   *          so the caller can fold it into the fetch-outcome event it already
+   *          emits — without it, "published nothing because no cwd matched" and
+   *          "published, but the renderer never got it" are indistinguishable in
+   *          a bundle.
+   */
+  setFetchFreshness(repoRoot: string, freshness: GitFetchFreshness): number {
+    if (!repoRoot) return 0
+    const prev = this.fetchFreshness.get(repoRoot)
+    const next: GitFetchFreshness = {
+      lastFetchOkAt: freshness.lastFetchOkAt ?? prev?.lastFetchOkAt,
+      lastFetchAttemptAt: freshness.lastFetchAttemptAt ?? prev?.lastFetchAttemptAt
+    }
+    if (
+      prev &&
+      prev.lastFetchOkAt === next.lastFetchOkAt &&
+      prev.lastFetchAttemptAt === next.lastFetchAttemptAt
+    ) {
+      return 0
+    }
+    this.fetchFreshness.set(repoRoot, next)
+    const delta: MirrorDelta = { ...next, capturedAt: Date.now() }
+    let fanoutCount = 0
+    for (const [cwd, count] of this.refCounts) {
+      if (count <= 0) continue
+      const state = this.latest.get(cwd)
+      if (!state || state.repoRoot !== repoRoot) continue
+      this.applyFetchFreshness(state)
+      this.fanout(cwd, delta)
+      fanoutCount += 1
+    }
+    return fanoutCount
+  }
+
+  /** Stamp the stored freshness for `state.repoRoot` onto `state`, in place. */
+  private applyFetchFreshness(state: MirrorState): void {
+    const fresh = state.repoRoot ? this.fetchFreshness.get(state.repoRoot) : undefined
+    if (!fresh) return
+    state.lastFetchOkAt = fresh.lastFetchOkAt
+    state.lastFetchAttemptAt = fresh.lastFetchAttemptAt
   }
 
   /**
