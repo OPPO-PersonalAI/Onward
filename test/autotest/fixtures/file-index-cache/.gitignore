@@ -1,0 +1,13 @@
+# Fixture-owned ignore rules for the file-index autotest (FIC-42..44).
+#
+# The patterns below are deliberately distinctive so the assertions test THIS
+# file rather than accidentally passing because the enclosing repository's root
+# .gitignore happens to cover the same path. Do not replace them with common
+# patterns like `dist/` or `*.log` — the repo root already ignores several of
+# those, which would make the test pass even if .gitignore support regressed.
+onward-gitignored-dir/
+*.onward-gitignored
+
+# Negation must survive too: git lets a later `!` rule re-include a path, and a
+# hand-rolled matcher is most likely to get exactly this wrong.
+!keep-me.onward-gitignored

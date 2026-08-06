@@ -194,8 +194,51 @@
 
 .global-search-results {
   flex: 1;
+  /* `min-height: 0` lets this flex child shrink below its content and scroll
+     instead of pushing the panel past its container's bottom edge — the same
+     constraint the Cmd+P modal's height contract depends on. */
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/*
+ * Modal variant — the Cmd+P surface renders this exact panel inside the
+ * centred overlay. Only the chrome differs (the sidebar sits flush against a
+ * border, the modal is a floating card); every control and behaviour is
+ * shared, which is what keeps the two entry points from drifting apart again.
+ */
+.global-search-panel-modal .global-search-type-bar {
+  padding: 8px 10px;
+}
+
+.global-search-panel-modal .global-search-input-area {
+  padding-bottom: 2px;
+}
+
+.global-search-load-more {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 6px 8px 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.global-search-load-more:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--text-1);
+}
+
+.global-search-load-more:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .global-search-empty {

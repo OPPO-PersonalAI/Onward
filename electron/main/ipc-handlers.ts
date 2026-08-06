@@ -48,7 +48,8 @@ import {
   deleteProjectPath,
   projectFilesExist,
 } from './project-editor-utils'
-import { projectFsWorkerClient } from './project-fs-worker-client'
+import { projectFsWorkerClient, type FileIndexPatch } from './project-fs-worker-client'
+import { clampSearchOffset, clampSearchPageSize } from '../../src/utils/file-index-constants'
 import { sqliteWorkerClient } from './sqlite-worker-client'
 import { getSettingsStorage, SettingsState, ShortcutConfig } from './settings-storage'
 import { getShortcutManager } from './shortcut-manager'
@@ -2699,10 +2700,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     const startMs = Date.now()
     const result = await projectFsWorkerClient.buildFileIndex(root)
     performanceTrace.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_BUILD, {
-      fileCount: Array.isArray(result) ? result.length : 0,
+      fileCount: result.files.length,
+      // `walk-fallback` means ripgrep was unavailable and `.gitignore` was NOT
+      // applied — the single most useful fact when a bug report says "Cmd+P is
+      // full of build artefacts again".
+      strategy: result.strategy,
       durationMs: Date.now() - startMs
     })
-    return result
+    return result.files
   })
 
   ipcMain.handle(IPC.PROJECT_INVALIDATE_FILE_INDEX, async (_, root: string) => {
@@ -2710,9 +2715,31 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return await projectFsWorkerClient.invalidateFileIndex(root)
   })
 
-  ipcMain.handle(IPC.PROJECT_SEARCH_FILENAMES, async (_, root: string, query: string, limit?: number) => {
-    return await projectFsWorkerClient.searchFilenames(root, query, limit ?? 80)
+  ipcMain.handle(IPC.PROJECT_PATCH_FILE_INDEX, async (_, root: string, patch: FileIndexPatch) => {
+    const result = await projectFsWorkerClient.patchFileIndex(root, patch ?? {})
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_UPDATE, {
+      reason: 'patch',
+      added: patch?.added?.length ?? 0,
+      removed: patch?.removed?.length ?? 0,
+      renamed: patch?.renamed?.length ?? 0,
+      applied: result.applied,
+      changed: result.changed,
+      fileCount: result.fileCount
+    })
+    return result
   })
+
+  ipcMain.handle(
+    IPC.PROJECT_SEARCH_FILENAMES,
+    async (_, root: string, query: string, limit?: number, offset?: number) => {
+      return await projectFsWorkerClient.searchFilenames(
+        root,
+        query,
+        clampSearchPageSize(limit),
+        clampSearchOffset(offset)
+      )
+    }
+  )
 
   ipcMain.handle(IPC.PROJECT_READ_FILE, async (_, root: string, path: string, options: Parameters<typeof readProjectFile>[2]) => {
     const startedAt = performance.now()
@@ -3270,6 +3297,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.PROJECT_BUILD_FILE_INDEX)
   ipcMain.removeHandler(IPC.PROJECT_SEARCH_FILENAMES)
   ipcMain.removeHandler(IPC.PROJECT_INVALIDATE_FILE_INDEX)
+  ipcMain.removeHandler(IPC.PROJECT_PATCH_FILE_INDEX)
   ipcMain.removeHandler(IPC.PROJECT_READ_FILE)
   ipcMain.removeHandler(IPC.PROJECT_READ_FILE_CHUNK)
   ipcMain.removeHandler(IPC.PROJECT_SAVE_FILE)

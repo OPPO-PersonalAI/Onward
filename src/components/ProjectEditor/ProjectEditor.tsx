@@ -44,14 +44,14 @@ import { shouldCaptureOutlineScrollTop } from './Outline/outlineScrollRestore'
 import { OutlineSymbolKind, type OutlineItem } from './Outline/types'
 import { useOutlineSymbols } from './Outline/useOutlineSymbols'
 import { SearchPanel } from './GlobalSearch/SearchPanel'
+import { useFilenameSearch } from './GlobalSearch/useFilenameSearch'
 import {
-  addFile as fileIndexAddFile,
   ensureIndex as fileIndexEnsure,
   getCacheStats as fileIndexGetCacheStats,
   getIndexSnapshot as fileIndexSnapshot,
   invalidate as fileIndexInvalidate,
-  removeFile as fileIndexRemoveFile,
-  renameFile as fileIndexRenameFile,
+  isIndexReady as fileIndexReady,
+  recordAuthoritativeCount as fileIndexRecordCount,
   subscribe as fileIndexSubscribe
 } from './GlobalSearch/fileIndexCache'
 import { initializeFileIndexCacheBridge } from './GlobalSearch/fileIndexCacheBootstrap'
@@ -1021,49 +1021,6 @@ function joinPath(parent: string, name: string): string {
   return `${parent}/${name}`
 }
 
-function fuzzyScore(query: string, target: string): number | null {
-  if (!query) return 0
-  let score = 0
-  let lastIndex = -1
-  for (let i = 0; i < query.length; i += 1) {
-    const ch = query[i]
-    let found = false
-    for (let j = lastIndex + 1; j < target.length; j += 1) {
-      if (target[j] === ch) {
-        score += j === lastIndex + 1 ? 3 : 1
-        lastIndex = j
-        found = true
-        break
-      }
-    }
-    if (!found) return null
-  }
-  score += Math.max(0, 20 - (target.length - query.length))
-  return score
-}
-
-function buildFuzzyResults(query: string, items: string[], limit = 50): string[] {
-  const normalized = query.trim().toLowerCase()
-  if (!normalized) return items.slice(0, limit)
-
-  const scored = items.map((item) => {
-    const lower = item.toLowerCase()
-    const base = getBaseName(lower)
-    const baseScore = fuzzyScore(normalized, base)
-    const pathScore = fuzzyScore(normalized, lower)
-    if (baseScore === null && pathScore === null) return null
-    const score = (baseScore ?? 0) * 2 + (pathScore ?? 0)
-    return { item, score }
-  }).filter(Boolean) as Array<{ item: string; score: number }>
-
-  scored.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score
-    return a.item.length - b.item.length
-  })
-
-  return scored.slice(0, limit).map(entry => entry.item)
-}
-
 function resolveMonacoLanguage(filePath: string | null): string {
   if (!filePath) return 'plaintext'
   const normalized = normalizePath(filePath).toLowerCase()
@@ -1451,11 +1408,23 @@ export function ProjectEditor({
   const [sidebarMode, setSidebarMode] = useState<'files' | 'search'>('files')
   const sidebarModeRef = useRef(sidebarMode)
   const [initialSearchType, setInitialSearchType] = useState<'content' | 'filename'>('content')
-  const [searchQuery, setSearchQuery] = useState('')
+  // The Cmd+P modal's filename-search state lives here (rather than inside
+  // SearchPanel) for one reason: the autotest debug API must be able to drive
+  // and read it. The modal passes this controller down; the sidebar's panel
+  // creates its own instance of the same hook.
+  const modalFilenameSearch = useFilenameSearch({
+    rootPath,
+    isActive: searchOpen && isOpen
+  })
+  const searchQuery = modalFilenameSearch.query
+  const setSearchQuery = modalFilenameSearch.setQuery
+  const searchResults = modalFilenameSearch.results
   const searchQueryRef = useRef('')
-  const [searchResults, setSearchResults] = useState<string[]>([])
   const searchResultsRef = useRef<string[]>([])
-  const [searchActiveIndex, setSearchActiveIndex] = useState(0)
+  // Stable handle so callbacks can reset the controller without taking the
+  // whole (identity-unstable) controller object as a dependency.
+  const modalFilenameSearchRef = useRef(modalFilenameSearch)
+  modalFilenameSearchRef.current = modalFilenameSearch
   const [isIndexing, setIsIndexing] = useState(false)
   const isIndexingRef = useRef(false)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
@@ -5773,19 +5742,17 @@ export function ProjectEditor({
     void window.electronAPI.project.invalidateFileIndex(root)
   }, [])
 
-  const getFileIndex = useCallback(() => {
+  // "Is an index already warm for this root?" — the only question callers ever
+  // asked of the old getFileIndex(), which returned a path list purely so they
+  // could check `.length`. The mirror no longer owns paths; the authority does.
+  const isFileIndexReady = useCallback(() => {
     const root = rootRef.current
-    if (!root) return []
-    return fileIndexSnapshot(root).files
+    return root ? fileIndexReady(root) : false
   }, [])
 
   const buildFileIndex = useCallback(async () => {
     const root = rootRef.current
     if (!root) return []
-    const snapshot = fileIndexSnapshot(root)
-    if (snapshot.status === 'ready') {
-      return snapshot.files
-    }
     const start = performance.now()
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('index:build:start', { root })
@@ -5795,37 +5762,41 @@ export function ProjectEditor({
       const result = await fileIndexEnsure(root, async (cwd) => {
         return await window.electronAPI.project.buildFileIndex(cwd)
       })
+      // `files` is null when the mirror short-circuited a ready index. The only
+      // callers that need actual paths are debug / profiling ones, so fetch
+      // them transiently there rather than making the mirror retain a second
+      // full copy of the path list for everyone else's benefit.
+      const files = result.files ?? await window.electronAPI.project.buildFileIndex(root)
       if (DEBUG_PROJECT_EDITOR) {
         debugLog('index:build:done', {
           root,
-          total: result.length,
+          total: files.length,
+          servedFromCache: result.files === null,
           duration: Math.round(performance.now() - start)
         })
       }
-      return result
+      return files
     } finally {
       setIsIndexing(false)
     }
   }, [])
 
   const handleOpenSearch = useCallback(async () => {
+    // Result fetching now belongs to the shared useFilenameSearch hook, which
+    // starts as soon as `isActive` flips. This handler only opens the surface
+    // and warms the renderer mirror so the "indexing…" affordance is truthful.
+    modalFilenameSearchRef.current.reset()
     setSearchOpen(true)
-    setSearchQuery('')
-    setSearchActiveIndex(0)
     const root = rootRef.current
-    let index = root ? fileIndexSnapshot(root).files : []
-    if (index.length === 0) {
-      index = await buildFileIndex()
+    if (root && !fileIndexReady(root)) {
+      await buildFileIndex()
     }
-    setSearchResults(root ? await window.electronAPI.project.searchFilenames(root, '', 50) : buildFuzzyResults('', index))
     setTimeout(() => searchInputRef.current?.focus(), 0)
   }, [buildFileIndex])
 
   const handleCloseSearch = useCallback(() => {
     setSearchOpen(false)
-    setSearchQuery('')
-    setSearchResults([])
-    setSearchActiveIndex(0)
+    modalFilenameSearchRef.current.reset()
   }, [])
 
   const handleOpenSearchRef = useRef(handleOpenSearch)
@@ -5885,9 +5856,7 @@ export function ProjectEditor({
       setSearchOpen(false)
       setSidebarMode('files')
       setInitialSearchType('content')
-      setSearchQuery('')
-      setSearchResults([])
-      setSearchActiveIndex(0)
+      modalFilenameSearchRef.current.reset()
       closePreviewSearch()
       setDialog(null)
       setDialogInput('')
@@ -5980,16 +5949,14 @@ export function ProjectEditor({
       setContextMenu(null)
       setSearchOpen(false)
       setSidebarMode('files')
-      setSearchQuery('')
-      setSearchResults([])
-      setSearchActiveIndex(0)
+      modalFilenameSearchRef.current.reset()
     }
 
     setRootError(null)
     gitDiffOpenRef.current = false
     setRootPath(effectiveCwd)
     rootRef.current = effectiveCwd
-    setSearchResults([])
+    modalFilenameSearchRef.current.reset()
     void loadRoot(effectiveCwd)
   }, [_terminalId, closeHtmlPreviewSearch, closePreviewSearch, cwd, isOpen, loadRoot, resetActiveFileState, setActiveFilePathValue, t, updateHtmlPreviewScrollState, updateHtmlReaderState])
 
@@ -6606,33 +6573,10 @@ export function ProjectEditor({
     scheduleProjectStateSave()
   }, [activeFilePath, isOpen, pinnedFiles, recentFiles, rootPath, scheduleProjectStateSave, tree])
 
-  useEffect(() => {
-    if (!searchOpen || isIndexing) return
-    const root = rootRef.current
-    if (!root) {
-      setSearchResults([])
-      setSearchActiveIndex(0)
-      return
-    }
-    let cancelled = false
-    window.electronAPI.project.searchFilenames(root, searchQuery, 50)
-      .then((results) => {
-        if (cancelled) return
-        setSearchResults(results)
-        setSearchActiveIndex(0)
-      })
-      .catch((error) => {
-        if (cancelled) return
-        if (DEBUG_PROJECT_EDITOR) {
-          debugLog('index:search:error', { root, query: searchQuery, error: String(error) })
-        }
-        setSearchResults([])
-        setSearchActiveIndex(0)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [searchOpen, searchQuery, isIndexing, fileIndexVersion])
+  // Filename-search fetching (including paging) is owned by the shared
+  // useFilenameSearch hook that both this modal and the sidebar panel run, so
+  // the modal no longer keeps a private query effect that could drift from the
+  // sidebar's.
 
   // Viewport-aware placement (flip-then-clamp inside the modal box) is
   // handled by useViewportMenuPosition next to the ref declarations.
@@ -7167,30 +7111,9 @@ export function ProjectEditor({
     })
   }, [openFile, waitForEditorModelReady])
 
-  const handleSearchKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      setSearchActiveIndex((prev) => Math.min(prev + 1, Math.max(searchResults.length - 1, 0)))
-      return
-    }
-    if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      setSearchActiveIndex((prev) => Math.max(prev - 1, 0))
-      return
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      const target = searchResults[searchActiveIndex]
-      if (target) {
-        void handleSearchSelect(target)
-      }
-      return
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      handleCloseSearch()
-    }
-  }, [handleCloseSearch, handleSearchSelect, searchActiveIndex, searchResults])
+  // Arrow / Enter / Escape handling for the modal now lives in SearchPanel,
+  // shared with the sidebar. Keeping a second copy here is what let the two
+  // surfaces diverge (the modal had no page-boundary handling on ArrowDown).
 
   const syncEditorToPreviewScroll = useCallback(() => {
     if (!previewVisibleRef.current) return false
@@ -9824,8 +9747,14 @@ export function ProjectEditor({
     }
 
     await refreshDirectory(baseDir)
-    fileIndexAddFile(root, targetPath)
-    void window.electronAPI.project.invalidateFileIndex(root)
+    // Patch, do not invalidate: the exact diff is known here, and invalidation
+    // would force the next Cmd+P to re-walk the whole project. The mirror takes
+    // its count from the authority's reply rather than guessing locally.
+    void window.electronAPI.project.patchFileIndex(root, { added: [targetPath] })
+      .then((result) => {
+        if (result?.applied) fileIndexRecordCount(root, result.fileCount)
+      })
+      .catch(() => { /* Mirror keeps its last known count; next build reconciles. */ })
     await openFile(targetPath, 'user', { trackRecent: true })
     showStatus('success', t('projectEditor.fileCreated'))
   }, [openFile, refreshDirectory, requestPrompt, selectedPath, showStatus, t, tree])
@@ -9864,7 +9793,10 @@ export function ProjectEditor({
     }
 
     await refreshDirectory(baseDir)
-    void window.electronAPI.project.invalidateFileIndex(root)
+    // A new folder is empty, so the FILE index is unchanged — nothing to patch
+    // and nothing to invalidate. Files created inside it later arrive as their
+    // own watcher events. (Directories are deliberately not indexed; see
+    // classifyAndQueuePath, which keeps folder names out of Cmd+P.)
     showStatus('success', t('projectEditor.folderCreated'))
   }, [refreshDirectory, requestPrompt, selectedPath, showStatus, t, tree])
 
@@ -9912,8 +9844,15 @@ export function ProjectEditor({
     replaceQuickFileEntries(sourcePath, nextPath)
 
     await refreshDirectory(parentPath)
-    fileIndexRenameFile(root, sourcePath, nextPath)
-    void window.electronAPI.project.invalidateFileIndex(root)
+    // Rename is expressed as a rename (not remove+add) so the worker can
+    // cascade the prefix rewrite for directory renames in one pass.
+    void window.electronAPI.project.patchFileIndex(root, {
+      renamed: [{ from: sourcePath, to: nextPath }]
+    })
+      .then((result) => {
+        if (result?.applied) fileIndexRecordCount(root, result.fileCount)
+      })
+      .catch(() => { /* Mirror keeps its last known count; next build reconciles. */ })
     showStatus('success', t('projectEditor.renameSuccess'))
   }, [activeFilePath, refreshDirectory, replaceQuickFileEntries, requestPrompt, selectedPath, setActiveFilePathValue, showStatus, t, tree])
 
@@ -9981,8 +9920,13 @@ export function ProjectEditor({
     const parentPath = getParentPath(targetPath)
     setSelectedPath(null)
     await refreshDirectory(parentPath)
-    fileIndexRemoveFile(root, targetPath)
-    void window.electronAPI.project.invalidateFileIndex(root)
+    // Removal cascades to everything under the path on the worker side too, so
+    // deleting a directory needs only the directory path here.
+    void window.electronAPI.project.patchFileIndex(root, { removed: [targetPath] })
+      .then((result) => {
+        if (result?.applied) fileIndexRecordCount(root, result.fileCount)
+      })
+      .catch(() => { /* Mirror keeps its last known count; next build reconciles. */ })
     showStatus('success', t('projectEditor.deleteSuccess'))
   }, [activeFilePath, closeHtmlPreviewSearch, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, setActiveFilePathValue, showStatus, t, tree, updateHtmlPreviewScrollState, updateHtmlReaderState])
 
@@ -10638,7 +10582,7 @@ export function ProjectEditor({
                 onOpenFile={(filePath) => void openFile(filePath, 'user', { trackRecent: true })}
                 onClose={() => setSidebarMode('files')}
                 buildFileIndex={buildFileIndex}
-                getFileIndex={getFileIndex}
+                isFileIndexReady={isFileIndexReady}
                 searchInputRef={globalSearchInputRef}
                 onFileContextMenu={(event, filePath) =>
                   openContextMenu(event, { path: filePath, type: 'file', source: 'search' })
@@ -11646,32 +11590,29 @@ export function ProjectEditor({
         {searchOpen && (
           <div className="project-editor-search-overlay" onClick={handleCloseSearch}>
             <div className="project-editor-search" onClick={(event) => event.stopPropagation()}>
-              <input
-                ref={searchInputRef}
-                className="project-editor-search-input"
-                value={searchQuery}
-                placeholder={t('projectEditor.searchPlaceholder')}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                onKeyDown={handleSearchKeyDown}
+              {/*
+                The modal hosts the SAME SearchPanel the sidebar uses, so the
+                content/filename tabs, the Aa / whole-word / regex toggles and
+                the include/exclude globs behave identically in both places.
+                It previously carried a private filename-only list that drifted
+                from the sidebar (different page size, no filters, no totals).
+              */}
+              <SearchPanel
+                variant="modal"
+                rootPath={rootPath}
+                isActive={searchOpen && isOpen}
+                initialSearchType="filename"
+                onNavigate={handleSearchNavigate}
+                onOpenFile={(filePath) => void handleSearchSelect(filePath)}
+                onClose={handleCloseSearch}
+                buildFileIndex={buildFileIndex}
+                isFileIndexReady={isFileIndexReady}
+                searchInputRef={searchInputRef}
+                filenameController={modalFilenameSearch}
+                onFileContextMenu={(event, filePath) =>
+                  openContextMenu(event, { path: filePath, type: 'file', source: 'search' })
+                }
               />
-              <div className="project-editor-search-results">
-                {isIndexing && (
-                  <div className="project-editor-search-empty">{t('projectEditor.searchIndexing')}</div>
-                )}
-                {!isIndexing && searchResults.length === 0 && (
-                  <div className="project-editor-search-empty">{t('projectEditor.searchNoMatches')}</div>
-                )}
-                {!isIndexing && searchResults.map((item, index) => (
-                  <div
-                    key={item}
-                    className={`project-editor-search-item ${index === searchActiveIndex ? 'active' : ''}`}
-                    onClick={() => void handleSearchSelect(item)}
-                  >
-                    <span className="project-editor-search-item-name">{getBaseName(item)}</span>
-                    <span className="project-editor-search-item-path">{item}</span>
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         )}

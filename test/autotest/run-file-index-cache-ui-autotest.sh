@@ -27,12 +27,28 @@ if [[ ! -d "$FIXTURE_DIR" ]]; then
   echo "Expected committed test asset — do not delete." >&2
   exit 1
 fi
+if [[ ! -f "$FIXTURE_DIR/.gitignore" ]]; then
+  echo "ERROR: fixture .gitignore missing: $FIXTURE_DIR/.gitignore" >&2
+  echo "FIC-42..46 assert gitignore support against it — do not delete." >&2
+  exit 1
+fi
 
 # Isolated user-data dir prevents the prior session's persisted state (e.g. an
 # open ProjectEditor subpage pinned to a different cwd) from being restored
 # and clobbering our fixture cwd during startup.
 USER_DATA_DIR="$(mktemp -d "/tmp/onward-fic-userdata.XXXXXX")"
-trap 'rm -rf "$USER_DATA_DIR"; find "$FIXTURE_DIR" -name "onward-fic-*" -delete 2>/dev/null || true; rm -rf "$FIXTURE_DIR/.git" "$FIXTURE_DIR/node_modules" 2>/dev/null || true' EXIT
+# NOTE: the sweep must NOT touch $FIXTURE_DIR/.gitignore — that is a committed
+# asset the gitignore assertions (FIC-42..46) read. Only the scratch entries the
+# test creates are removed.
+cleanup_fixture() {
+  rm -rf "$USER_DATA_DIR"
+  find "$FIXTURE_DIR" -name "onward-fic-*" -delete 2>/dev/null || true
+  rm -rf "$FIXTURE_DIR/.git" "$FIXTURE_DIR/node_modules" 2>/dev/null || true
+  rm -rf "$FIXTURE_DIR/onward-gitignored-dir" 2>/dev/null || true
+  rm -f "$FIXTURE_DIR/build-artifact.onward-gitignored" \
+        "$FIXTURE_DIR/keep-me.onward-gitignored" 2>/dev/null || true
+}
+trap cleanup_fixture EXIT
 
 rm -f "$LOG_FILE"
 
@@ -67,6 +83,20 @@ required_markers=(
   "FIC-26-ignored-noise-did-not-rebuild"
   "FIC-20-force-refresh-triggered-rebuild"
   "FIC-22-folder-not-in-results"
+  "FIC-28-full-list-fills-editor-height"
+  "FIC-29-panel-keeps-symmetric-gutter"
+  "FIC-30-results-list-beats-legacy-cap"
+  "FIC-32-no-match-panel-stays-content-sized"
+  "FIC-33-modal-has-search-type-tabs"
+  "FIC-35-modal-content-mode-has-option-toggles"
+  "FIC-36-modal-content-mode-has-include-exclude-globs"
+  "FIC-38-load-more-appends-next-page"
+  "FIC-40-node-modules-absent-from-search"
+  "FIC-41-git-internals-absent-from-search"
+  "FIC-43-gitignored-directory-absent"
+  "FIC-44-gitignored-extension-absent"
+  "FIC-45-gitignore-negation-respected"
+  "FIC-46-non-ignored-control-file-present"
 )
 for marker in "${required_markers[@]}"; do
   if ! grep -q "$marker" "$LOG_FILE"; then

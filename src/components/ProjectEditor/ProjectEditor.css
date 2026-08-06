@@ -2182,17 +2182,36 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 80px;
+  /* Symmetric gutter: the panel's usable height is now derived from the editor's
+     own height (overlay height - 2 * 24px) instead of a hard-coded result-list
+     cap, so a taller window yields a taller Quick Open panel. */
+  padding: 24px 0;
   z-index: 40;
 }
 
 .project-editor-search {
   width: min(640px, 90%);
+  /* Content-sized while matches are few; grows until it fills the overlay's
+     content box when they are many. `align-items: flex-start` above keeps the
+     panel from being stretched when the list is short. Global
+     `box-sizing: border-box` makes the 1px border part of this 100%. */
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
   background-color: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-1);
   overflow: hidden;
+}
+
+/* The hosted SearchPanel must size to the card, not to a fixed 100% height —
+   `height: 100%` (its sidebar default) would force the modal to full height
+   even with a single match, defeating the content-sized behaviour above. */
+.project-editor-search > .global-search-panel-modal {
+  height: auto;
+  max-height: 100%;
+  min-height: 0;
 }
 
 /* Monaco editor match highlight from global search */
@@ -2204,6 +2223,8 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
 
 .project-editor-search-input {
   width: 100%;
+  /* Pinned: the query row must never shrink when the result list is tall. */
+  flex: 0 0 auto;
   border: none;
   outline: none;
   padding: 12px 14px;
@@ -2213,7 +2234,11 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
 }
 
 .project-editor-search-results {
-  max-height: 360px;
+  /* Absorbs the remaining height inside the panel's max-height. `min-height: 0`
+     is required so this flex item may shrink below its content size and scroll
+     instead of pushing the panel past the editor's bottom edge. */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 

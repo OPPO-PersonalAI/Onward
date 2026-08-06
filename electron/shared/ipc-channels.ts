@@ -187,6 +187,10 @@ export const IPC = {
   PROJECT_FILE_CHANGED: 'project:file-changed',
   PROJECT_IMAGE_FILE_CHANGED: 'project:image-file-changed',
   PROJECT_INVALIDATE_FILE_INDEX: 'project:invalidate-file-index',
+  // Incremental file-index update. Preferred over INVALIDATE for every known
+  // diff: invalidation forces a full recursive re-walk on the next search,
+  // which an ordinary file save must not pay for.
+  PROJECT_PATCH_FILE_INDEX: 'project:patch-file-index',
   PROJECT_LIST_DIRECTORY: 'project:list-directory',
   PROJECT_READ_FILE: 'project:read-file',
   // Batch existence check. Used by quick-file list restore — avoids the

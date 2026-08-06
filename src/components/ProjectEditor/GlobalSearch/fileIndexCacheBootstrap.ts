@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { applyFsEvent, invalidate, setFileIndexWatcherAdapter } from './fileIndexCache'
+import { invalidate, recordAuthoritativeCount, setFileIndexWatcherAdapter } from './fileIndexCache'
+import { perfTrace } from '../../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../../utils/perf-trace-names'
 
 let initialized = false
 
@@ -41,15 +43,49 @@ export function initializeFileIndexCacheBridge(): void {
     if (resync) {
       // The main-process watcher could not determine what changed (typically
       // a null-filename fs.watch event). Drop the entry so the next search
-      // rebuilds from disk, rather than leaving removed paths stale.
+      // rebuilds from disk, rather than leaving removed paths stale. This is
+      // the ONLY branch where a full invalidation is the correct response —
+      // everywhere else the exact diff is known and must be patched instead.
       invalidate(event.cwd)
       void api.invalidateFileIndex?.(event.cwd)
+      perfTrace(PERF_TRACE_EVENT.RENDERER_FILE_INDEX_MIRROR_SYNC, {
+        reason: 'resync-invalidate',
+        added: 0,
+        removed: 0
+      })
       return
     }
-    applyFsEvent(event.cwd, { added, removed })
-    if (added.length > 0 || removed.length > 0) {
-      void api.invalidateFileIndex?.(event.cwd)
-    }
+
+    if (added.length === 0 && removed.length === 0) return
+
+    // Send the exact diff to the authoritative worker index. This replaces the
+    // previous `invalidateFileIndex` call, which threw away the whole index on
+    // ANY event — including the `update` event that a plain Cmd+S produces —
+    // and so made every save cost a full recursive re-walk on the next search.
+    //
+    // The renderer does NOT decide what changed: the worker applies the diff
+    // and reports back. Mirroring its `fileCount` rather than recomputing one
+    // locally is what removed the second (drift-prone) patch implementation.
+    void api.patchFileIndex?.(event.cwd, { added, removed })
+      .then((result) => {
+        if (!result?.applied) return
+        recordAuthoritativeCount(event.cwd, result.fileCount)
+        perfTrace(PERF_TRACE_EVENT.RENDERER_FILE_INDEX_MIRROR_SYNC, {
+          reason: result.changed ? 'patch-applied' : 'patch-noop',
+          added: added.length,
+          removed: removed.length,
+          fileCount: result.fileCount
+        })
+      })
+      .catch(() => {
+        // The authority is unreachable; leave the mirror's last known count in
+        // place. The next build reconciles it.
+        perfTrace(PERF_TRACE_EVENT.RENDERER_FILE_INDEX_MIRROR_SYNC, {
+          reason: 'patch-failed',
+          added: added.length,
+          removed: removed.length
+        })
+      })
   })
 
   debugLog('initialized')

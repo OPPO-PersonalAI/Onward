@@ -2,33 +2,36 @@
  * SPDX-FileCopyrightText: 2026 OPPO
  * SPDX-License-Identifier: Apache-2.0
  *
- * Automated test for the shared file-index cache used by the
+ * Lifecycle tests for the renderer-side file-index MIRROR used by the
  * ProjectEditor filename search (Cmd+P).
  *
  * Usage: node --experimental-strip-types --test test/unittest/file-index-cache.test.mts
  *
- * Covers the user-observed scenario:
- *   - Open the same project from multiple Tabs/Tasks → index must be
- *     built only ONCE per normalized cwd.
- *   - Repeatedly invoke global search → walker must not re-run while
- *     the cache entry is ready.
- *   - File-tree mutations (create/rename/delete) apply as incremental
- *     patches rather than nuking the entry.
+ * Scope note: the mirror holds METADATA ONLY (status + fileCount). The path
+ * list and the incremental add/remove/rename rules live in the authoritative
+ * main-process worker and in the shared `src/utils/file-index-patch.ts`
+ * respectively — the mutation cases that used to live in this file moved to
+ * `file-index-authority.test.mts` (FIC-U-2) when that duplication was removed.
+ * What remains here is the part the mirror still owns:
+ *   - Open the same project from multiple Tabs/Tasks → walker runs ONCE per
+ *     normalized cwd.
+ *   - Repeatedly invoke global search → walker must not re-run while the entry
+ *     is ready.
+ *   - Subscription, LRU eviction, watcher-adapter lifecycle, and the guarantee
+ *     that a stale in-flight build cannot overwrite newer state.
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  addFile,
-  applyFsEvent,
   disposeAll,
   dispose,
   ensureIndex,
   getIndexSnapshot,
   invalidate,
-  removeFile,
-  renameFile,
+  isIndexReady,
+  recordAuthoritativeCount,
   setFileIndexWatcherAdapter,
   subscribe,
   __getInternalStateForTest
@@ -63,16 +66,18 @@ test('ensureIndex builds once and serves the cached result on subsequent calls',
   resetCache()
   const w = makeWalker(['a.ts', 'b.ts'])
   const first = await ensureIndex('/project/alpha', w.walker)
-  assert.deepEqual(first, ['a.ts', 'b.ts'])
+  assert.deepEqual(first.files, ['a.ts', 'b.ts'], 'a fresh build passes the walked paths through')
+  assert.equal(first.fileCount, 2)
   assert.equal(w.calls, 1)
 
   const second = await ensureIndex('/project/alpha', w.walker)
-  assert.deepEqual(second, ['a.ts', 'b.ts'])
   assert.equal(w.calls, 1, 'walker must not run for a second search on the same cwd')
+  assert.equal(second.files, null, 'a cache hit reports that nothing was walked')
+  assert.equal(second.fileCount, 2, 'the count still comes back on a cache hit')
 
   const third = await ensureIndex('/project/alpha', w.walker)
   assert.equal(w.calls, 1, 'walker must not run for a third search either')
-  assert.deepEqual(third, ['a.ts', 'b.ts'])
+  assert.equal(third.files, null)
 })
 
 test('multiple concurrent ensureIndex calls dedupe to ONE walker invocation', async () => {
@@ -84,9 +89,9 @@ test('multiple concurrent ensureIndex calls dedupe to ONE walker invocation', as
     ensureIndex('/project/beta', w.walker),
     ensureIndex('/project/beta', w.walker)
   ])
-  assert.deepEqual(a, ['only.ts'])
-  assert.deepEqual(b, ['only.ts'])
-  assert.deepEqual(c, ['only.ts'])
+  assert.deepEqual(a.files, ['only.ts'])
+  assert.deepEqual(b.files, ['only.ts'])
+  assert.deepEqual(c.files, ['only.ts'])
   assert.equal(w.calls, 1, 'concurrent callers must share a single in-flight build')
 })
 
@@ -100,10 +105,12 @@ test('distinct cwds keep independent cache entries', async () => {
   const b2 = await ensureIndex('/project/b', wB.walker)
   assert.equal(wA.calls, 1)
   assert.equal(wB.calls, 1)
-  assert.deepEqual(a1, ['a1.ts', 'a2.ts'])
-  assert.deepEqual(a2, ['a1.ts', 'a2.ts'])
-  assert.deepEqual(b1, ['b1.ts', 'b2.ts'])
-  assert.deepEqual(b2, ['b1.ts', 'b2.ts'])
+  assert.deepEqual(a1.files, ['a1.ts', 'a2.ts'])
+  assert.equal(a2.files, null, 'second visit is a cache hit')
+  assert.equal(a2.fileCount, 2)
+  assert.deepEqual(b1.files, ['b1.ts', 'b2.ts'])
+  assert.equal(b2.files, null)
+  assert.equal(b2.fileCount, 2)
 })
 
 test('Windows-style backslashes normalize to the same entry as POSIX-style', async () => {
@@ -122,7 +129,7 @@ test('invalidate clears the entry and the next ensureIndex rebuilds', async () =
   invalidate('/p')
   const after = await ensureIndex('/p', w.walker)
   assert.equal(w.calls, 2)
-  assert.deepEqual(after, ['one.ts'])
+  assert.deepEqual(after.files, ['one.ts'], 'a rebuild walks again and returns the paths')
 })
 
 test('invalidating one cwd does not affect a sibling cwd', async () => {
@@ -138,91 +145,43 @@ test('invalidating one cwd does not affect a sibling cwd', async () => {
   assert.equal(wA.calls, 2, 'invalidated cwd rebuilds on next ensure')
 })
 
-test('addFile appends a new path without rebuilding', async () => {
+test('the mirror exposes a count, never a path list', async () => {
   resetCache()
-  const w = makeWalker(['x.ts'])
+  const w = makeWalker(['x.ts', 'y.ts', 'z.ts'])
   await ensureIndex('/p', w.walker)
-  addFile('/p', 'y.ts')
   const snap = getIndexSnapshot('/p')
   assert.equal(snap.status, 'ready')
-  assert.deepEqual(snap.files.sort(), ['x.ts', 'y.ts'])
-  assert.equal(w.calls, 1)
+  assert.equal(snap.fileCount, 3)
+  assert.ok(
+    !('files' in (snap as Record<string, unknown>)),
+    'the mirror must not carry a path list; the worker index is the authority'
+  )
+  assert.equal(isIndexReady('/p'), true)
 })
 
-test('addFile is idempotent — duplicates are ignored', async () => {
+test('recordAuthoritativeCount adopts the worker-reported count verbatim', async () => {
   resetCache()
   const w = makeWalker(['x.ts'])
   await ensureIndex('/p', w.walker)
-  addFile('/p', 'y.ts')
-  addFile('/p', 'y.ts')
-  addFile('/p', 'y.ts')
-  assert.deepEqual(getIndexSnapshot('/p').files.sort(), ['x.ts', 'y.ts'])
+  assert.equal(getIndexSnapshot('/p').fileCount, 1)
+
+  // The worker applied a patch and reported the post-patch total. The mirror
+  // records it rather than deriving its own, which is what makes the two
+  // structurally unable to disagree.
+  recordAuthoritativeCount('/p', 42)
+  assert.equal(getIndexSnapshot('/p').fileCount, 42)
+  assert.equal(w.calls, 1, 'adopting a count must never trigger a rebuild')
 })
 
-test('removeFile deletes a file and cascades to nested paths on directory removal', async () => {
+test('recordAuthoritativeCount no-ops when the entry is not ready', async () => {
   resetCache()
-  const w = makeWalker([
-    'src/index.ts',
-    'src/util/a.ts',
-    'src/util/b.ts',
-    'README.md'
-  ])
-  await ensureIndex('/p', w.walker)
-  removeFile('/p', 'src/util')
-  assert.deepEqual(getIndexSnapshot('/p').files.sort(), ['README.md', 'src/index.ts'])
-  removeFile('/p', 'README.md')
-  assert.deepEqual(getIndexSnapshot('/p').files, ['src/index.ts'])
+  recordAuthoritativeCount('/never-built', 99)
+  const snap = getIndexSnapshot('/never-built')
+  assert.equal(snap.status, 'idle')
+  assert.equal(snap.fileCount, 0)
 })
 
-test('renameFile rewrites file paths and cascades into directories', async () => {
-  resetCache()
-  const w = makeWalker([
-    'src/index.ts',
-    'src/util/a.ts',
-    'src/util/b.ts',
-    'other.md'
-  ])
-  await ensureIndex('/p', w.walker)
-  renameFile('/p', 'src/util', 'src/helpers')
-  const files = getIndexSnapshot('/p').files.sort()
-  assert.deepEqual(files, [
-    'other.md',
-    'src/helpers/a.ts',
-    'src/helpers/b.ts',
-    'src/index.ts'
-  ])
-})
-
-test('renameFile on a single file updates just that entry', async () => {
-  resetCache()
-  const w = makeWalker(['foo.ts', 'bar.ts'])
-  await ensureIndex('/p', w.walker)
-  renameFile('/p', 'foo.ts', 'renamed.ts')
-  assert.deepEqual(getIndexSnapshot('/p').files.sort(), ['bar.ts', 'renamed.ts'])
-})
-
-test('applyFsEvent processes combined added+removed batches', async () => {
-  resetCache()
-  const w = makeWalker(['alpha.ts', 'beta.ts', 'old/nested.ts'])
-  await ensureIndex('/p', w.walker)
-  applyFsEvent('/p', { added: ['gamma.ts', 'delta.ts'], removed: ['old'] })
-  assert.deepEqual(
-    getIndexSnapshot('/p').files.sort(),
-    ['alpha.ts', 'beta.ts', 'delta.ts', 'gamma.ts']
-  )
-})
-
-test('mutation APIs no-op when the entry is not ready', async () => {
-  resetCache()
-  // Never built — status is idle.
-  addFile('/never-built', 'ghost.ts')
-  removeFile('/never-built', 'ghost.ts')
-  renameFile('/never-built', 'a', 'b')
-  applyFsEvent('/never-built', { added: ['x'], removed: ['y'] })
-  assert.deepEqual(getIndexSnapshot('/never-built').files, [])
-})
-
-test('subscribe notifies on build, mutation, and invalidation', async () => {
+test('subscribe notifies on build, count change, and invalidation', async () => {
   resetCache()
   let count = 0
   const unsubscribe = subscribe('/p', () => {
@@ -231,16 +190,12 @@ test('subscribe notifies on build, mutation, and invalidation', async () => {
   const w = makeWalker(['a.ts'])
   await ensureIndex('/p', w.walker)
   assert.equal(count, 1, 'initial build notifies')
-  addFile('/p', 'b.ts')
-  assert.equal(count, 2, 'addFile notifies')
-  removeFile('/p', 'a.ts')
-  assert.equal(count, 3, 'removeFile notifies')
-  renameFile('/p', 'b.ts', 'c.ts')
-  assert.equal(count, 4, 'renameFile notifies')
-  applyFsEvent('/p', { added: ['d.ts'] })
-  assert.equal(count, 5, 'applyFsEvent notifies')
+  recordAuthoritativeCount('/p', 5)
+  assert.equal(count, 2, 'a changed authoritative count notifies')
+  recordAuthoritativeCount('/p', 5)
+  assert.equal(count, 2, 'an unchanged count must NOT wake every subscriber')
   invalidate('/p')
-  assert.equal(count, 6, 'invalidate notifies')
+  assert.equal(count, 3, 'invalidate notifies')
   unsubscribe()
 })
 
@@ -253,7 +208,7 @@ test('subscribe listener does not fire after unsubscribe', async () => {
   unsubscribe()
   const w = makeWalker(['a.ts'])
   await ensureIndex('/p', w.walker)
-  addFile('/p', 'b.ts')
+  recordAuthoritativeCount('/p', 7)
   assert.equal(count, 0)
 })
 
@@ -326,16 +281,16 @@ test(
     // Tab B mounts for the same project and opens Cmd+P at the same moment.
     const tabB_firstOpen = ensureIndex('/repo', w.walker)
     const [aList, bList] = await Promise.all([tabA_firstOpen, tabB_firstOpen])
-    assert.equal(aList.length, 1000)
-    assert.equal(bList.length, 1000)
+    assert.equal(aList.fileCount, 1000)
+    assert.equal(bList.fileCount, 1000)
     assert.equal(track.length, 1, 'both Tabs must share the same initial walker call')
 
     // Simulate each Tab typing a query 10 times: each keystroke reads the snapshot.
     for (let i = 0; i < 10; i += 1) {
       const snapA = getIndexSnapshot('/repo')
       const snapB = getIndexSnapshot('/repo')
-      assert.equal(snapA.files.length, 1000)
-      assert.equal(snapB.files.length, 1000)
+      assert.equal(snapA.fileCount, 1000)
+      assert.equal(snapB.fileCount, 1000)
     }
     // And re-trigger ensureIndex as each Tab re-opens the search.
     for (let i = 0; i < 5; i += 1) {
@@ -380,11 +335,12 @@ test('invalidation during in-flight build does not let a stale walker overwrite 
   const slowBuild = ensureIndex('/p', walkerSlow)
   invalidate('/p')
   const fastBuild = await ensureIndex('/p', walkerFast)
-  assert.deepEqual(fastBuild, ['fast.ts'])
-  assert.deepEqual(getIndexSnapshot('/p').files, ['fast.ts'])
+  assert.deepEqual(fastBuild.files, ['fast.ts'])
+  assert.equal(getIndexSnapshot('/p').fileCount, 1)
 
-  // Now resolve the stale walker — it must NOT overwrite the newer ready state.
-  firstWalkResolve(['stale.ts'])
+  // Now resolve the stale walker (2 files) — it must NOT overwrite the newer
+  // ready state, which would show up here as a count of 2.
+  firstWalkResolve(['stale-one.ts', 'stale-two.ts'])
   await slowBuild.catch(() => {})
-  assert.deepEqual(getIndexSnapshot('/p').files, ['fast.ts'])
+  assert.equal(getIndexSnapshot('/p').fileCount, 1, 'stale walker must not clobber newer state')
 })

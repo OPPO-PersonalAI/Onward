@@ -203,7 +203,21 @@ export const PERF_TRACE_EVENT = {
 
   // ───────── Background — project file index + tree watch ─────────
   MAIN_FILE_INDEX_BUILD: 'main:file-index.build',
+  // Payload: reason ('invalidate' | 'patch'), and for 'patch' also
+  // added / removed / renamed counts plus applied / changed / fileCount.
+  // 'patch' is the incremental path that replaced blanket invalidation; a trace
+  // showing repeated 'invalidate' where a diff was known means a call site
+  // regressed back to the full-rebuild behaviour.
   MAIN_FILE_INDEX_UPDATE: 'main:file-index.update',
+  // Renderer mirror <-> authoritative worker index reconciliation.
+  // Payload: reason ('patch-applied' | 'patch-noop' | 'resync-invalidate'),
+  // added, removed. 'patch-noop' is the healthy signature of a plain file save:
+  // the watcher reported the path but the file SET did not move.
+  RENDERER_FILE_INDEX_MIRROR_SYNC: 'renderer:file-index.mirror-sync',
+  // Emitted when a filename-search page is requested. Payload: queryLen,
+  // offset, limit, returned, total, hasMore. Makes "why did the list stop at
+  // 50" answerable from a user-supplied trace.
+  RENDERER_FILE_INDEX_SEARCH_PAGE: 'renderer:file-index.search-page',
   MAIN_PROJECT_TREE_WATCH_EVENT: 'main:project-tree-watch.event',
   MAIN_PROJECT_TREE_WATCH_BATCH: 'main:project-tree-watch.batch',
   MAIN_PROJECT_TREE_WATCH_IGNORED_SUMMARY: 'main:project-tree-watch.ignored-summary',

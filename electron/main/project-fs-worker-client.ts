@@ -5,6 +5,7 @@
 
 import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
+import { resolveRipgrepPath } from './ripgrep-binary-path'
 import { mainWorkScheduler, type MainWorkLane } from './main-work-scheduler'
 import {
   performanceTrace,
@@ -14,7 +15,42 @@ import {
 } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
-type ProjectFsWorkerMethod = 'listDirectory' | 'buildFileIndex' | 'searchFilenames' | 'invalidateFileIndex'
+type ProjectFsWorkerMethod =
+  | 'listDirectory'
+  | 'buildFileIndex'
+  | 'searchFilenames'
+  | 'invalidateFileIndex'
+  | 'patchFileIndex'
+
+/** Which lister produced an index — `walk-fallback` means `.gitignore` was NOT honoured. */
+export type FileIndexBuildStrategy = 'ripgrep' | 'walk-fallback'
+
+export type FileIndexBuildResult = {
+  files: string[]
+  strategy: FileIndexBuildStrategy
+}
+
+export type FilenameSearchPage = {
+  items: string[]
+  /** Total matches BEFORE paging, so the UI can render "50 of 312". */
+  total: number
+  offset: number
+  limit: number
+}
+
+export type FileIndexPatch = {
+  added?: string[]
+  removed?: string[]
+  renamed?: Array<{ from: string; to: string }>
+}
+
+export type FileIndexPatchResult = {
+  success: boolean
+  /** False when the root was not cached — nothing to patch, and no rebuild is needed. */
+  applied: boolean
+  fileCount: number
+  changed: boolean
+}
 
 type WorkerRequest = {
   id: number
@@ -57,9 +93,9 @@ class ProjectFsWorkerClient {
     })
   }
 
-  buildFileIndex(root: string): Promise<string[]> {
+  buildFileIndex(root: string): Promise<FileIndexBuildResult> {
     const normalizedRoot = resolve(root)
-    return this.enqueue<string[]>('buildFileIndex', { root: normalizedRoot }, {
+    return this.enqueue<FileIndexBuildResult>('buildFileIndex', { root: normalizedRoot }, {
       lane: 'background-index',
       key: `project-fs:index:${normalizedRoot}`,
       label: 'project build file index',
@@ -68,20 +104,24 @@ class ProjectFsWorkerClient {
     })
   }
 
-  searchFilenames(root: string, query: string, limit: number): Promise<string[]> {
+  searchFilenames(root: string, query: string, limit: number, offset: number): Promise<FilenameSearchPage> {
     const normalizedRoot = resolve(root)
-    const ownerId = `project-fs:filename-search:${normalizedRoot}`
+    // Paging must NOT cancel the page that is already on screen: the owner id
+    // keys on offset so "load more" runs alongside the in-flight first page
+    // instead of superseding it, while a re-typed query still supersedes the
+    // stale page at the same offset.
+    const ownerId = `project-fs:filename-search:${normalizedRoot}:${offset}`
     mainWorkScheduler.cancelOwner(ownerId, 'superseded filename search')
-    return this.enqueue<string[]>('searchFilenames', { root: normalizedRoot, query, limit }, {
+    return this.enqueue<FilenameSearchPage>('searchFilenames', { root: normalizedRoot, query, limit, offset }, {
       lane: 'focused-interactive',
-      key: `project-fs:filename-search:${normalizedRoot}:${query}:${limit}`,
+      key: `project-fs:filename-search:${normalizedRoot}:${query}:${limit}:${offset}`,
       ownerId,
       label: 'project filename search',
       concurrencyKey: `${normalizedRoot}:filename-search`,
       concurrencyLimit: 1
     }).catch((error) => {
       if (String(error).includes('superseded filename search')) {
-        return []
+        return { items: [], total: 0, offset, limit }
       }
       throw error
     })
@@ -93,6 +133,27 @@ class ProjectFsWorkerClient {
       lane: 'maintenance',
       key: `project-fs:index-invalidate:${normalizedRoot}:${Date.now()}`,
       label: 'project invalidate file index',
+      concurrencyKey: normalizedRoot,
+      concurrencyLimit: 1
+    })
+  }
+
+  /**
+   * Incremental index update. Replaces the previous "any change -> drop the
+   * whole index" behaviour, which made an ordinary file save cost a full
+   * recursive re-walk on the next search.
+   */
+  patchFileIndex(root: string, patch: FileIndexPatch): Promise<FileIndexPatchResult> {
+    const normalizedRoot = resolve(root)
+    return this.enqueue<FileIndexPatchResult>('patchFileIndex', {
+      root: normalizedRoot,
+      added: patch.added ?? [],
+      removed: patch.removed ?? [],
+      renamed: patch.renamed ?? []
+    }, {
+      lane: 'maintenance',
+      key: `project-fs:index-patch:${normalizedRoot}:${Date.now()}`,
+      label: 'project patch file index',
       concurrencyKey: normalizedRoot,
       concurrencyLimit: 1
     })
@@ -141,7 +202,12 @@ class ProjectFsWorkerClient {
     if (this.disposed) throw new Error('Project FS worker client disposed (quit in progress)')
     if (this.worker) return this.worker
     const workerPath = join(__dirname, 'project-fs-worker-entry.js')
-    this.worker = new Worker(workerPath)
+    // The ripgrep path must be resolved on the MAIN thread: resolution needs
+    // `app.isPackaged` (for asar unpacking) and Electron APIs are not available
+    // inside a worker_thread. Same handoff the ripgrep-search worker uses.
+    this.worker = new Worker(workerPath, {
+      workerData: { rgPath: resolveRipgrepPath() }
+    })
     this.worker.on('message', (message: WorkerResponse | unknown) => {
       if (isPerfTraceWorkerEvent(message)) {
         replayPerfTraceWorkerEvent(message, {

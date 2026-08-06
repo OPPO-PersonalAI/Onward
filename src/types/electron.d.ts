@@ -821,12 +821,42 @@ export interface GitAPI {
   forceRefresh: (cwd: string) => Promise<boolean>
 }
 
+/** One page of filename-search results, plus the pre-paging total. */
+export interface FilenameSearchPage {
+  items: string[]
+  /** Total matches BEFORE paging — lets the UI render "50 of 312" honestly. */
+  total: number
+  offset: number
+  limit: number
+}
+
+/** Incremental file-index diff. All paths are repo-relative, forward-slashed. */
+export interface FileIndexPatch {
+  added?: string[]
+  removed?: string[]
+  renamed?: Array<{ from: string; to: string }>
+}
+
+export interface FileIndexPatchResult {
+  success: boolean
+  /** False when the root is not cached — nothing to patch, no rebuild needed. */
+  applied: boolean
+  fileCount: number
+  changed: boolean
+}
+
 // Project Editor API
 export interface ProjectAPI {
   listDirectory: (root: string, path: string) => Promise<ProjectListResult>
   buildFileIndex: (root: string) => Promise<string[]>
-  searchFilenames: (root: string, query: string, limit?: number) => Promise<string[]>
+  searchFilenames: (root: string, query: string, limit?: number, offset?: number) => Promise<FilenameSearchPage>
   invalidateFileIndex: (root: string) => Promise<{ success: boolean }>
+  /**
+   * Incremental index update. Use this instead of `invalidateFileIndex`
+   * whenever the exact diff is known — invalidation costs a full recursive
+   * re-walk on the next search.
+   */
+  patchFileIndex: (root: string, patch: FileIndexPatch) => Promise<FileIndexPatchResult>
   readFile: (root: string, path: string, options?: ProjectReadOptions) => Promise<ProjectReadResult>
   /**
    * Batch existence check. Returns a parallel boolean[] aligned with the

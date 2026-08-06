@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useI18n } from '../../../i18n/useI18n'
 import { useGlobalSearch, type SearchMatch } from './useGlobalSearch'
+import { useFilenameSearch, type FilenameSearchController } from './useFilenameSearch'
 import './SearchPanel.css'
 
 type SearchType = 'content' | 'filename'
@@ -18,50 +19,26 @@ interface SearchPanelProps {
   onOpenFile: (filePath: string) => void
   onClose: () => void
   buildFileIndex: () => Promise<string[]>
-  getFileIndex: () => string[]
+  /** True once an index is warm for the active root — drives the indexing affordance only. */
+  isFileIndexReady: () => boolean
   searchInputRef?: RefObject<HTMLInputElement>
   /** Right-click on a result row (file header or filename item), repo-relative path. */
   onFileContextMenu?: (event: React.MouseEvent, filePath: string) => void
+  /**
+   * Externally-owned filename-search state. The Cmd+P modal passes its own
+   * controller so the Project Editor can expose it to the autotest debug API;
+   * the sidebar omits it and gets a private one. Either way both surfaces run
+   * the SAME hook, which is what makes their behaviour identical by
+   * construction rather than by convention.
+   */
+  filenameController?: FilenameSearchController
+  /** Rendered above the type bar — used by the modal for its own chrome. */
+  variant?: 'sidebar' | 'modal'
 }
 
 function getBaseName(path: string): string {
   const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   return separatorIndex === -1 ? path : path.slice(separatorIndex + 1)
-}
-
-function fuzzyScore(query: string, target: string): number | null {
-  let score = 0
-  let cursor = 0
-  for (let index = 0; index < query.length; index += 1) {
-    const next = target.indexOf(query[index], cursor)
-    if (next === -1) return null
-    score += next === cursor ? 10 : (next - cursor < 3 ? 5 : 1)
-    cursor = next + 1
-  }
-  return score
-}
-
-function buildFuzzyResults(query: string, items: string[], limit = 80): string[] {
-  const normalized = query.trim().toLowerCase()
-  if (!normalized) return items.slice(0, limit)
-
-  const scored = items.map((item) => {
-    const lower = item.toLowerCase()
-    const baseScore = fuzzyScore(normalized, getBaseName(lower))
-    const pathScore = fuzzyScore(normalized, lower)
-    if (baseScore === null && pathScore === null) return null
-    return {
-      item,
-      score: (baseScore ?? 0) * 2 + (pathScore ?? 0)
-    }
-  }).filter(Boolean) as Array<{ item: string; score: number }>
-
-  scored.sort((left, right) => {
-    if (right.score !== left.score) return right.score - left.score
-    return left.item.length - right.item.length
-  })
-
-  return scored.slice(0, limit).map((entry) => entry.item)
 }
 
 export function SearchPanel({
@@ -72,9 +49,11 @@ export function SearchPanel({
   onOpenFile,
   onClose,
   buildFileIndex,
-  getFileIndex,
+  isFileIndexReady,
   searchInputRef: externalInputRef,
-  onFileContextMenu
+  onFileContextMenu,
+  filenameController,
+  variant = 'sidebar'
 }: SearchPanelProps) {
   const { t } = useI18n()
   const [searchType, setSearchType] = useState<SearchType>(initialSearchType)
@@ -93,12 +72,30 @@ export function SearchPanel({
     toggleCollapse
   } = useGlobalSearch({ rootPath, isActive: isActive && searchType === 'content' })
 
-  const [filenameQuery, setFilenameQuery] = useState('')
-  const [filenameResults, setFilenameResults] = useState<string[]>([])
-  const [filenameActiveIndex, setFilenameActiveIndex] = useState(0)
+  // Private controller for the sidebar; the modal injects its own so the debug
+  // API can reach it. The hook must be called unconditionally (rules of hooks),
+  // so we always create one and simply prefer the injected instance.
+  const ownFilenameController = useFilenameSearch({
+    rootPath,
+    isActive: isActive && searchType === 'filename' && !filenameController
+  })
+  const filenameSearch = filenameController ?? ownFilenameController
+  const {
+    query: filenameQuery,
+    setQuery: setFilenameQuery,
+    results: filenameResults,
+    total: filenameTotal,
+    hasMore: filenameHasMore,
+    isLoadingMore: filenameLoadingMore,
+    loadMore: loadMoreFilenames,
+    activeIndex: filenameActiveIndex,
+    setActiveIndex: setFilenameActiveIndex
+  } = filenameSearch
+
   const [isIndexing, setIsIndexing] = useState(false)
   const [showGlobs, setShowGlobs] = useState(false)
   const [activeMatch, setActiveMatch] = useState<{ file: string; line: number } | null>(null)
+  const resultsScrollRef = useRef<HTMLDivElement>(null)
 
   const internalInputRef = useRef<HTMLInputElement>(null)
   const inputRef = externalInputRef ?? internalInputRef
@@ -113,51 +110,35 @@ export function SearchPanel({
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }, [inputRef, isActive, searchType])
 
+  // Warm the renderer mirror so the "indexing…" status is truthful. The actual
+  // results come from the authoritative worker index, which builds itself on
+  // demand — this effect only drives the progress affordance.
   useEffect(() => {
     if (!isActive || searchType !== 'filename' || !rootPath) return
-    const existingIndex = getFileIndex()
-    if (existingIndex.length > 0) return
+    if (isFileIndexReady()) return
 
     let cancelled = false
     setIsIndexing(true)
-    void buildFileIndex().then(async () => {
-      const results = await window.electronAPI.project.searchFilenames(rootPath, filenameQuery, 80)
-      if (cancelled) return
-      setIsIndexing(false)
-      setFilenameResults(results)
-    }).catch(() => {
-      if (cancelled) return
-      setIsIndexing(false)
-      setFilenameResults([])
-    })
+    void buildFileIndex()
+      .catch(() => { /* Surfaced as an empty result list below. */ })
+      .finally(() => {
+        if (!cancelled) setIsIndexing(false)
+      })
     return () => {
       cancelled = true
     }
-  }, [buildFileIndex, getFileIndex, isActive, rootPath, searchType])
+  }, [buildFileIndex, isFileIndexReady, isActive, rootPath, searchType])
 
-  useEffect(() => {
-    if (!isActive || searchType !== 'filename' || !rootPath) return
-    const existingIndex = getFileIndex()
-    if (existingIndex.length === 0) {
-      setFilenameResults(buildFuzzyResults(filenameQuery, existingIndex))
-      return
-    }
-    let cancelled = false
-    void window.electronAPI.project.searchFilenames(rootPath, filenameQuery, 80)
-      .then((results) => {
-        if (cancelled) return
-        setFilenameResults(results)
-        setFilenameActiveIndex(0)
-      })
-      .catch(() => {
-        if (cancelled) return
-        setFilenameResults([])
-        setFilenameActiveIndex(0)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [filenameQuery, getFileIndex, isActive, rootPath, searchType])
+  // Infinite append: pull the next page when the list nears its bottom. The
+  // 120px cushion starts the fetch before the user hits the end, so the rows
+  // are usually already there by the time the scroll arrives.
+  const handleResultsScroll = useCallback(() => {
+    if (searchType !== 'filename' || !filenameHasMore || filenameLoadingMore) return
+    const element = resultsScrollRef.current
+    if (!element) return
+    const remaining = element.scrollHeight - element.scrollTop - element.clientHeight
+    if (remaining <= 120) loadMoreFilenames()
+  }, [filenameHasMore, filenameLoadingMore, loadMoreFilenames, searchType])
 
   const currentQuery = searchType === 'content' ? contentQuery : filenameQuery
   const setCurrentQuery = searchType === 'content' ? updateContentQuery : setFilenameQuery
@@ -197,6 +178,12 @@ export function SearchPanel({
 
     if (event.key === 'ArrowDown') {
       event.preventDefault()
+      // Arrowing onto the last loaded row pulls the next page, so keyboard
+      // users reach page 2 the same way scrollers do — without this, the
+      // keyboard path would silently dead-end at the page boundary.
+      if (filenameActiveIndex >= filenameResults.length - 1 && filenameHasMore) {
+        loadMoreFilenames()
+      }
       setFilenameActiveIndex((previous) => Math.min(previous + 1, filenameResults.length - 1))
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
@@ -208,7 +195,7 @@ export function SearchPanel({
         handleFilenameSelect(target)
       }
     }
-  }, [currentQuery, fileGroups, filenameActiveIndex, filenameResults, handleFilenameSelect, handleMatchClick, onClose, searchType, setCurrentQuery])
+  }, [currentQuery, fileGroups, filenameActiveIndex, filenameHasMore, filenameResults, handleFilenameSelect, handleMatchClick, loadMoreFilenames, onClose, searchType, setCurrentQuery])
 
   const renderHighlightedLine = useCallback((lineContent: string, match: SearchMatch) => {
     const start = match.column - 1
@@ -262,13 +249,25 @@ export function SearchPanel({
 
   const filenameStatusText = useMemo(() => {
     if (isIndexing) return t('projectEditor.globalSearchIndexing')
-    if (!filenameQuery.trim()) return t('projectEditor.globalSearchFilenameStart')
-    if (filenameResults.length === 0) return t('projectEditor.globalSearchFilenameNoMatches')
+    if (filenameResults.length === 0) {
+      return filenameQuery.trim()
+        ? t('projectEditor.globalSearchFilenameNoMatches')
+        : t('projectEditor.globalSearchFilenameStart')
+    }
+    // When the list is truncated, say so with real numbers. Reporting only the
+    // loaded count made a truncated list indistinguishable from a complete one,
+    // so users concluded a file did not exist when it was merely on page 2.
+    if (filenameResults.length < filenameTotal) {
+      return t('projectEditor.globalSearchFilenameShowingOf', {
+        shown: filenameResults.length,
+        total: filenameTotal
+      })
+    }
     return t('projectEditor.globalSearchFilenameCount', { count: filenameResults.length })
-  }, [filenameQuery, filenameResults.length, isIndexing, t])
+  }, [filenameQuery, filenameResults.length, filenameTotal, isIndexing, t])
 
   return (
-    <div className="global-search-panel">
+    <div className={`global-search-panel global-search-panel-${variant}`}>
       <div className="global-search-type-bar">
         <button
           className={`global-search-type-btn ${searchType === 'content' ? 'active' : ''}`}
@@ -378,7 +377,7 @@ export function SearchPanel({
         <span>{searchType === 'content' ? contentStatusText : filenameStatusText}</span>
       </div>
 
-      <div className="global-search-results">
+      <div className="global-search-results" ref={resultsScrollRef} onScroll={handleResultsScroll}>
         {searchType === 'content' && (
           <>
             {!contentQuery.trim() && (
@@ -459,6 +458,21 @@ export function SearchPanel({
                 </div>
               )
             })}
+
+            {filenameHasMore && (
+              <button
+                type="button"
+                className="global-search-load-more"
+                onClick={loadMoreFilenames}
+                disabled={filenameLoadingMore}
+              >
+                {filenameLoadingMore
+                  ? t('projectEditor.globalSearchLoadingMore')
+                  : t('projectEditor.globalSearchLoadMore', {
+                    remaining: filenameTotal - filenameResults.length
+                  })}
+              </button>
+            )}
           </>
         )}
       </div>
