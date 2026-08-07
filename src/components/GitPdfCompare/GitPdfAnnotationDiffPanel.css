@@ -1,0 +1,143 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.git-pdf-annotation-diff {
+  width: 264px;
+  flex: 0 0 264px;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 10px 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.git-pdf-annotation-diff-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 4px;
+}
+
+.git-pdf-annotation-diff-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px 6px;
+}
+
+.git-pdf-annotation-diff-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.git-pdf-annotation-diff-badge.is-added {
+  background: color-mix(in srgb, #4caf50 18%, transparent);
+  color: #7cc48a;
+}
+
+.git-pdf-annotation-diff-badge.is-removed {
+  background: color-mix(in srgb, #ef4444 16%, transparent);
+  color: #e58f8f;
+}
+
+.git-pdf-annotation-diff-badge.is-changed {
+  background: color-mix(in srgb, #e0b45c 18%, transparent);
+  color: #d9b36a;
+}
+
+.git-pdf-annotation-diff-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.git-pdf-annotation-diff-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.git-pdf-annotation-diff-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+}
+
+.git-pdf-annotation-diff-row:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.git-pdf-annotation-diff-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  margin-top: 4px;
+}
+
+.git-pdf-annotation-diff-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.git-pdf-annotation-diff-label-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.git-pdf-annotation-diff-label {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.git-pdf-annotation-diff-page {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.git-pdf-annotation-diff-snippet {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.git-pdf-annotation-diff-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.git-pdf-annotation-diff-field-pill {
+  font-size: 10.5px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}

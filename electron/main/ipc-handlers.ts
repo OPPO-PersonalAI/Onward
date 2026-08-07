@@ -42,6 +42,7 @@ import {
   readProjectFileChunk,
   resolveInRoot,
   saveProjectFile,
+  writeProjectPdfBytes,
   createProjectFile,
   createProjectFolder,
   renameProjectPath,
@@ -62,7 +63,8 @@ import { openExternalUrlWithConfirm } from './external-link-guard'
 import { RipgrepSearchManager } from './ripgrep-search'
 import { browserViewManager } from './browser-view-manager'
 import { htmlPreviewProtocolManager } from './html-preview-protocol'
-import { FileWatchManager } from './file-watch-manager'
+import { FileWatchManager, sha256OfUtf8 } from './file-watch-manager'
+import { createHash } from 'crypto'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
@@ -1184,7 +1186,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
   ipcMain.handle('debug:autotest-write-external-file', async (
     _event,
-    payload?: { root?: unknown; relPath?: unknown; content?: unknown }
+    payload?: { root?: unknown; relPath?: unknown; content?: unknown; contentBase64?: unknown; atomic?: unknown }
   ): Promise<{ ok: boolean; error?: string }> => {
     // Autotest-only: write a file directly via the main process so a test can
     // simulate an EXTERNAL edit (one the app's save path never initiates)
@@ -1201,11 +1203,31 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     const root = typeof payload?.root === 'string' ? payload.root : ''
     const relPath = typeof payload?.relPath === 'string' ? payload.relPath : ''
     const content = typeof payload?.content === 'string' ? payload.content : ''
+    const contentBase64 = typeof payload?.contentBase64 === 'string' ? payload.contentBase64 : ''
     if (!root || !relPath) {
       return { ok: false, error: 'Missing root or relPath.' }
     }
     try {
-      writeFileSync(resolve(root, relPath), content, 'utf-8')
+      const target = resolve(root, relPath)
+      // Binary payloads (the PDF external-refresh suite ships whole PDFs) ride
+      // as base64; `atomic` exercises the temp-file + rename write shape real
+      // agent tools use, which surfaces as a `rename` watcher event instead of
+      // `change` — the two paths the watcher must both classify correctly.
+      const bytes = contentBase64 ? Buffer.from(contentBase64, 'base64') : null
+      if (payload?.atomic === true) {
+        const tempPath = `${target}.autotest-external-tmp`
+        if (bytes) {
+          writeFileSync(tempPath, bytes)
+        } else {
+          writeFileSync(tempPath, content, 'utf-8')
+        }
+        const { renameSync } = await import('fs')
+        renameSync(tempPath, target)
+      } else if (bytes) {
+        writeFileSync(target, bytes)
+      } else {
+        writeFileSync(target, content, 'utf-8')
+      }
       return { ok: true }
     } catch (error) {
       return { ok: false, error: String(error) }
@@ -2756,7 +2778,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     if (result.success && fileWatchManager) {
       fullPath = resolveInRoot(resolve(root), path)
       if (fullPath) {
-        fileWatchManager.suppressNext(fullPath)
+        fileWatchManager.suppressNext(fullPath, {
+          size: Buffer.byteLength(content, 'utf8'),
+          hash: sha256OfUtf8(content)
+        })
       }
     }
     if (result.success) {
@@ -2766,14 +2791,58 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return result
   })
 
-  ipcMain.handle(IPC.PROJECT_WATCH_FILE, async (_, root: string, path: string) => {
-    const fullPath = resolveInRoot(resolve(root), path)
-    if (!fullPath) {
-      return { success: false, error: 'Invalid path.' }
+  ipcMain.handle(
+    IPC.PROJECT_SAVE_PDF_BYTES,
+    async (
+      _,
+      root: string,
+      path: string,
+      bytes: ArrayBuffer,
+      expectedDisk?: { size: number; mtimeMs: number }
+    ) => {
+      const payload = new Uint8Array(bytes)
+      const result = await writeProjectPdfBytes(root, path, payload, expectedDisk)
+      if (!result.success) {
+        if (result.reason === 'external-modified') {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_PROJECT_PDF_SAVE_BLOCKED_EXTERNAL, {
+            expectedSize: expectedDisk?.size ?? -1,
+            diskSize: result.currentDisk?.size ?? -1,
+            mtimeDeltaMs: Math.trunc(
+              (result.currentDisk?.mtimeMs ?? 0) - (expectedDisk?.mtimeMs ?? 0)
+            )
+          })
+        }
+        return result
+      }
+
+      // R6: this write is ours. Registering the exact bytes we wrote lets the
+      // watcher recognise the resulting rename event as a self-write instead
+      // of an external edit — which would reload the viewer mid-read and,
+      // because the reload is itself a change, could keep re-triggering.
+      const fullPath = resolveInRoot(resolve(root), path)
+      if (fullPath) {
+        fileWatchManager?.suppressNext(fullPath, {
+          size: payload.byteLength,
+          hash: createHash('sha256').update(payload).digest('hex')
+        })
+        // The bytes changed, so any cached git diff for this path is stale.
+        await invalidateGitDiffAfterProjectFileSave(root, fullPath)
+      }
+      return result
     }
-    fileWatchManager?.watch(fullPath)
-    return { success: true }
-  })
+  )
+
+  ipcMain.handle(
+    IPC.PROJECT_WATCH_FILE,
+    async (_, root: string, path: string, mode?: 'text' | 'binary') => {
+      const fullPath = resolveInRoot(resolve(root), path)
+      if (!fullPath) {
+        return { success: false, error: 'Invalid path.' }
+      }
+      fileWatchManager?.watch(fullPath, mode === 'binary' ? 'binary' : 'text')
+      return { success: true }
+    }
+  )
 
   ipcMain.handle(IPC.PROJECT_UNWATCH_FILE, async (_, root: string, path: string) => {
     const fullPath = resolveInRoot(resolve(root), path)
@@ -3273,6 +3342,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.PROJECT_READ_FILE)
   ipcMain.removeHandler(IPC.PROJECT_READ_FILE_CHUNK)
   ipcMain.removeHandler(IPC.PROJECT_SAVE_FILE)
+  ipcMain.removeHandler(IPC.PROJECT_SAVE_PDF_BYTES)
   ipcMain.removeHandler(IPC.PROJECT_CREATE_FILE)
   ipcMain.removeHandler(IPC.PROJECT_CREATE_FOLDER)
   ipcMain.removeHandler(IPC.PROJECT_RENAME_PATH)

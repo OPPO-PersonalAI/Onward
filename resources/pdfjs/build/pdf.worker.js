@@ -10341,7 +10341,8 @@ class PartialEvaluator {
       notASpace: -Infinity,
       transform: null,
       fontName: null,
-      hasEOL: false
+      hasEOL: false,
+      isInvisibleText: false
     };
     const twoLastChars = [" ", " "];
     let twoLastCharsPos = 0;
@@ -10418,6 +10419,7 @@ class PartialEvaluator {
         };
       }
       textContentItem.fontName = loadedName;
+      textContentItem.isInvisibleText = !isCurrentTextRenderingVisible();
       const trm = textContentItem.transform = getCurrentTextTransform();
       if (!font.vertical) {
         textContentItem.width = textContentItem.totalWidth = 0;
@@ -10468,15 +10470,29 @@ class PartialEvaluator {
         text = (0, _util.normalizeUnicode)(text);
       }
       const bidiResult = (0, _bidi.bidi)(text, -1, textChunk.vertical);
+      const str = shouldKeepOriginalArabicBidiText(text, bidiResult.str) ? text : bidiResult.str;
       return {
-        str: bidiResult.str,
+        str,
         dir: bidiResult.dir,
         width: Math.abs(textChunk.totalWidth),
         height: Math.abs(textChunk.totalHeight),
         transform: textChunk.transform,
         fontName: textChunk.fontName,
-        hasEOL: textChunk.hasEOL
+        hasEOL: textChunk.hasEOL,
+        isInvisibleText: textChunk.isInvisibleText || undefined
       };
+    }
+    function shouldKeepOriginalArabicBidiText(text, bidiText) {
+      if (text === bidiText || !hasArabicScript(text) || hasHebrewScript(text)) {
+        return false;
+      }
+      return true;
+    }
+    function hasArabicScript(text) {
+      return /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/.test(text);
+    }
+    function hasHebrewScript(text) {
+      return /[\u0590-\u05ff]/.test(text);
     }
     function handleSetFont(fontName, fontRef) {
       return self.loadFont(fontName, fontRef, resources).then(function (translated) {
@@ -10491,6 +10507,20 @@ class PartialEvaluator {
         textState.font = translated.font;
         textState.fontMatrix = translated.font.fontMatrix || _util.FONT_IDENTITY_MATRIX;
       });
+    }
+    function isCurrentTextRenderingVisible() {
+      const fillStrokeMode = textState.textRenderingMode & _util.TextRenderingMode.FILL_STROKE_MASK;
+      switch (fillStrokeMode) {
+        case _util.TextRenderingMode.FILL:
+          return textState.fillAlpha > 0;
+        case _util.TextRenderingMode.STROKE:
+          return textState.strokeAlpha > 0;
+        case _util.TextRenderingMode.FILL_STROKE:
+          return textState.fillAlpha > 0 || textState.strokeAlpha > 0;
+        case _util.TextRenderingMode.INVISIBLE:
+          return false;
+      }
+      return true;
     }
     function applyInverseRotation(x, y, matrix) {
       const scale = Math.hypot(matrix[0], matrix[1]);
@@ -10643,6 +10673,11 @@ class PartialEvaluator {
           }
         }
         return;
+      }
+      const isTextRenderingVisible = isCurrentTextRenderingVisible();
+      if (!isTextRenderingVisible) {
+        resetLastChars();
+        flushTextContentItem();
       }
       const glyphs = font.charsToGlyphs(chars);
       const scale = textState.fontMatrix[0] * textState.fontSize;
@@ -10850,6 +10885,13 @@ class PartialEvaluator {
             textState.textMatrix = _util.IDENTITY_MATRIX.slice();
             textState.textLineMatrix = _util.IDENTITY_MATRIX.slice();
             break;
+          case _util.OPS.setTextRenderingMode:
+            if (textState.textRenderingMode !== args[0]) {
+              flushTextContentItem();
+              resetLastChars();
+              textState.textRenderingMode = args[0];
+            }
+            break;
           case _util.OPS.showSpacedText:
             if (!stateManager.state.font) {
               self.ensureStateFont(stateManager.state);
@@ -11018,9 +11060,35 @@ class PartialEvaluator {
               if (!(gState instanceof _primitives.Dict)) {
                 throw new _util.FormatError("GState should be a dictionary.");
               }
+              let fillAlpha = null;
+              let strokeAlpha = null;
+              for (const key of gState.getKeys()) {
+                const value = gState.get(key);
+                if (key === "ca" && typeof value === "number" && value >= 0 && value <= 1) {
+                  fillAlpha = value;
+                } else if (key === "CA" && typeof value === "number" && value >= 0 && value <= 1) {
+                  strokeAlpha = value;
+                }
+              }
+              if (
+                (fillAlpha !== null && textState.fillAlpha !== fillAlpha) ||
+                (strokeAlpha !== null && textState.strokeAlpha !== strokeAlpha)
+              ) {
+                flushTextContentItem();
+                resetLastChars();
+                if (fillAlpha !== null) {
+                  textState.fillAlpha = fillAlpha;
+                }
+                if (strokeAlpha !== null) {
+                  textState.strokeAlpha = strokeAlpha;
+                }
+              }
+              const hasTextVisibilityState = fillAlpha !== null || strokeAlpha !== null;
               const gStateFont = gState.get("Font");
               if (!gStateFont) {
-                emptyGStateCache.set(name, gState.objId, true);
+                if (!hasTextVisibilityState) {
+                  emptyGStateCache.set(name, gState.objId, true);
+                }
                 resolveGState();
                 return;
               }
@@ -12051,6 +12119,9 @@ class TextState {
     this.leading = 0;
     this.textHScale = 1;
     this.textRise = 0;
+    this.textRenderingMode = _util.TextRenderingMode.FILL;
+    this.fillAlpha = 1;
+    this.strokeAlpha = 1;
   }
   setTextMatrix(a, b, c, d, e, f) {
     const m = this.textMatrix;

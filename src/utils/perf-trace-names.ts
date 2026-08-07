@@ -1176,7 +1176,172 @@ export const PERF_TRACE_EVENT = {
   // terminal). Payload: { terminalId, droppedBytes, capBytes, outputActive }.
   // Today the drop is fully silent in production bundles; this closes the
   // last unobservable hop of the renderer data path.
-  RENDERER_TERMINAL_PENDING_DATA_TRIMMED: 'renderer:terminal.pending-data-trimmed'
+  RENDERER_TERMINAL_PENDING_DATA_TRIMMED: 'renderer:terminal.pending-data-trimmed',
+
+  // ───────── 2026-07-28 PDF text-selection engine ─────────
+  // The embedded PDF viewer runs in a sandboxed iframe and cannot reach this
+  // module, so it relays these over postMessage (`onward:pdf:trace`) and
+  // PdfReader.tsx re-emits them here. All are diagnostic tier: they fire at
+  // user-action frequency (once per drag, per page render), never inside a
+  // pointer or rAF loop. No selected text ever enters a payload — only
+  // lengths — so a bug report stays readable without leaking the document.
+  //
+  // Refused to begin a drag-selection: an annotation with no DOM section of
+  // its own (a form widget, stamp or redaction) covers the anchor point.
+  // Payload: { page }. First thing to check for "I can't select this text".
+  RENDERER_PDF_TEXT_SELECTION_BLOCKED_AT_ANCHOR: 'renderer:pdf-text-selection.blocked-at-anchor',
+  // A drag-selection was committed. Payload: { path: 'engine' |
+  // 'native-fallback', chars, lines }. `native-fallback` means our caret
+  // engine declined and the browser's own selection was accepted instead —
+  // a run of those is the signature of a caret-mapping regression.
+  RENDERER_PDF_TEXT_SELECTION_DRAG_COMMITTED: 'renderer:pdf-text-selection.drag-committed',
+  // We took the clipboard away from pdf.js, whose default copy path rewrites
+  // ligatures and can yield text that differs from the visible highlight.
+  // Payload: { chars }. Answers "did our override actually run?".
+  RENDERER_PDF_TEXT_SELECTION_COPY_OVERRIDDEN: 'renderer:pdf-text-selection.copy-overridden',
+  // Edge auto-scroll engaged during a drag (emitted once per drag, not per
+  // frame). Payload: { horizontal, vertical }.
+  RENDERER_PDF_TEXT_SELECTION_AUTOSCROLL_ENGAGED: 'renderer:pdf-text-selection.autoscroll-engaged',
+  // A page's annotations were classified blocking / passthrough for the caret
+  // engine. Payload: { page, total, virtualBlockers }.
+  RENDERER_PDF_TEXT_SELECTION_ANNOTATIONS_INDEXED: 'renderer:pdf-text-selection.annotations-indexed',
+  // Classification failed. The page still renders, but its blocking
+  // annotations are invisible to the caret engine, so text hidden under a
+  // form widget becomes selectable. Payload: { page, error }.
+  RENDERER_PDF_TEXT_SELECTION_ANNOTATION_INDEX_FAILED: 'renderer:pdf-text-selection.annotation-index-failed',
+  // Hidden text spans (OCR layer under visible text, or Tr=3 / alpha-0 text)
+  // were removed from the text layer so they cannot enter a selection or the
+  // clipboard. Payload: { page, dropped }. Requires the vendored pdf.js
+  // patches — a constant zero here on a scanned PDF means they were dropped
+  // by a pdf.js bump (see scripts/apply-pdfjs-patches.mjs --check).
+  RENDERER_PDF_TEXT_SELECTION_INVISIBLE_SPANS_DROPPED: 'renderer:pdf-text-selection.invisible-spans-dropped',
+  // The engine dropped its per-document state because a different PDF is being
+  // loaded. Payload: { indexedPages, dragActive }. Emitted before the state is
+  // cleared, so it describes what was discarded. Without it, "selection stopped
+  // working after I opened another PDF" has no breadcrumb saying whether the
+  // reset ran at all, or ran while a drag was still live.
+  RENDERER_PDF_TEXT_SELECTION_ENGINE_RESET: 'renderer:pdf-text-selection.engine-reset',
+
+  // ───────── 2026-07-29 PDF highlight annotations ─────────
+  // Same relay as the text-selection events above (viewer iframe → postMessage
+  // → pdfViewerTrace.ts). All diagnostic tier, all at user-action frequency.
+  //
+  // These matter more than usual because this feature WRITES TO THE USER'S
+  // FILE. The user chose to store highlights inside the PDF itself with
+  // automatic saving, so when someone reports "my annotations are gone" or
+  // "my PDF got modified", the trace has to be able to answer: did a save run,
+  // what did it decide, and did the bytes reach the disk. Payloads carry
+  // counts, sizes and reason codes only — never note text or the highlighted
+  // passage.
+  //
+  // A highlight record changed (created / relabelled / note edited / deleted).
+  // Payload: { reason, count }. The single entry point for "the user edited
+  // annotations", which is what makes a save eligible at all.
+  RENDERER_PDF_ANNOTATION_CHANGED: 'renderer:pdf-annotation.changed',
+  // Annotations read out of a newly opened document were adopted as the
+  // baseline. Payload: { count, documentBytes, hasSignature, large }.
+  // `large` says whether the slower autosave cadence is in force.
+  RENDERER_PDF_ANNOTATION_ADOPTED: 'renderer:pdf-annotation.adopted',
+  // A write into the PDF began. Payload: { mode: 'auto' | 'manual', count,
+  // revision }.
+  RENDERER_PDF_ANNOTATION_SAVE_START: 'renderer:pdf-annotation.save-start',
+  // …and completed. Payload: { mode, count, bytes, durationMs }. `durationMs`
+  // is the whole serialise + IPC + fsync + rename round trip, which is the
+  // number to look at when a large document feels sluggish while annotating.
+  RENDERER_PDF_ANNOTATION_SAVE_DONE: 'renderer:pdf-annotation.save-done',
+  // The write failed. Payload: { mode, reason } where reason is an enum
+  // ('read-only' | 'locked' | 'write-failed' | …). An automatic failure is
+  // silent to the user by design, so this event is the only evidence it
+  // happened.
+  RENDERER_PDF_ANNOTATION_SAVE_FAILED: 'renderer:pdf-annotation.save-failed',
+  // The write was abandoned because the user opened a different PDF while it
+  // was in flight. Payload: { mode, reason }. Proves the guard fired rather
+  // than annotations landing in the wrong file.
+  RENDERER_PDF_ANNOTATION_SAVE_CANCELLED: 'renderer:pdf-annotation.save-cancelled',
+  // Refused to rewrite a digitally signed document without confirmation.
+  // Payload: { mode }.
+  RENDERER_PDF_ANNOTATION_SAVE_BLOCKED_SIGNATURE: 'renderer:pdf-annotation.save-blocked-signature',
+  // Annotations could not be read back out of the opened PDF; the session
+  // starts from an empty set. Payload: { error }. Distinguishes "this document
+  // has no highlights" from "we failed to see the highlights it has" — which
+  // matters, because the next save would then overwrite them.
+  RENDERER_PDF_ANNOTATION_READ_FAILED: 'renderer:pdf-annotation.read-failed',
+  // Our own saved highlights, which come back as native PDF annotations, were
+  // hidden so pdf.js does not paint them a second time on top of our layer.
+  // Payload: { nativeCount, renderedCount }.
+  RENDERER_PDF_ANNOTATION_NATIVE_CLEANUP: 'renderer:pdf-annotation.native-cleanup',
+  // A highlight was deleted. Payload: { page, removed, remaining }. Separate
+  // from `changed` because deletion is the one edit that destroys user data.
+  RENDERER_PDF_HIGHLIGHT_DELETED: 'renderer:pdf-highlight.deleted',
+  // A note was edited. Payload: { page, chars } — length only, never content.
+  RENDERER_PDF_HIGHLIGHT_NOTE_EDITED: 'renderer:pdf-highlight.note-edited',
+
+  // ───────── 2026-08-01 single-file watcher + PDF external refresh ─────────
+  // The single-file watcher used to be the one refresh surface with zero
+  // breadcrumbs; a "my file didn't refresh" report produced an empty trace.
+  // These events make every settle decision visible without paying anything
+  // on the hot path (they fire at most once per debounced change).
+  //
+  // A path entered the watch set. Payload: { mode: 'text' | 'binary',
+  // pathLen }.
+  MAIN_FILE_WATCH_REGISTERED: 'main:file-watch.registered',
+  // A quieted-down change was classified. Payload: { mode, action:
+  // 'emit-changed' | 'skip-own-write' | 'skip-unchanged' }. `skip-own-write`
+  // is the fingerprint-based self-save suppression doing its job; a bug
+  // report "the PDF reloads every time I highlight" is answered by whether
+  // these show emit-changed instead.
+  MAIN_FILE_WATCH_SETTLED: 'main:file-watch.settled',
+  // The watcher lost its inode (rename/atomic replace/error) and scheduled a
+  // re-attach. Payload: { mode, retry }. The atomic-replace save path lands
+  // here, so its absence after a PDF save means the OS never surfaced the
+  // rename.
+  MAIN_FILE_WATCH_REBUILD_SCHEDULED: 'main:file-watch.rebuild-scheduled',
+  // The referenced-image watcher emitted a change to the renderer.
+  // Payload: { relativePathLen }. Mirrors the file-watch breadcrumbs for the
+  // markdown-image refresh path, which previously had none.
+  MAIN_IMAGE_WATCH_CHANGE_EMITTED: 'main:image-watch.change-emitted',
+  // A PDF byte write was refused because the on-disk file no longer matches
+  // the fingerprint the renderer believed it had — an external writer got
+  // there first. Payload: { expectedSize, diskSize, mtimeDeltaMs }. This is
+  // the write-gate half of the anti-clobber design; the renderer reacts by
+  // reloading + rebase-merging, then retrying the save.
+  MAIN_PROJECT_PDF_SAVE_BLOCKED_EXTERNAL: 'main:project-editor.pdf-save-blocked-external',
+  // Host-side span for one external-change reload round trip: request posted
+  // to the viewer iframe → reloadResult received. ph='X'. Payload:
+  // { durationMs, ok, reason, generation }.
+  RENDERER_PDF_READER_EXTERNAL_RELOAD: 'renderer:pdf-reader.external-reload',
+  // Viewer-side lifecycle of the in-place document swap (relayed through
+  // pdfViewerTrace like all viewer events). Start payload: { generation }.
+  RENDERER_PDF_VIEWER_EXTERNAL_RELOAD_START: 'renderer:pdf-viewer.external-reload-start',
+  // Swap completed and view state was restored. Payload: { generation,
+  // numPages, restoredPage, durationMs }.
+  RENDERER_PDF_VIEWER_EXTERNAL_RELOAD_DONE: 'renderer:pdf-viewer.external-reload-done',
+  // The replacement document failed to load (typically a writer caught
+  // mid-write); the old document stays up, silently — SumatraPDF semantics.
+  // Payload: { generation, attempt, willRetry, reason }.
+  RENDERER_PDF_VIEWER_EXTERNAL_RELOAD_DEFERRED: 'renderer:pdf-viewer.external-reload-deferred',
+  // Local unsaved annotation records were replayed on top of an externally
+  // modified document (three-way rebase, local wins on same-id conflicts).
+  // Payload: { adds, mods, dels, conflicts, externalCount }. The counts are
+  // the only evidence of what the merge decided when someone reports a
+  // highlight surviving or vanishing across an agent edit.
+  RENDERER_PDF_ANNOTATION_REBASE_MERGED: 'renderer:pdf-annotation.rebase-merged',
+  // The renderer received a single-file watcher event and decided whether it
+  // belongs to the active file. Payload: { matched, changeType, isPdf,
+  // hasMeta }. This was the one silent hop in the refresh chain — two real
+  // bugs (doubled separators; absolute activeFilePath) hid in exactly this
+  // comparison, invisible because a dropped event left no evidence.
+  RENDERER_PROJECT_FILE_CHANGE_RECEIVED: 'renderer:project-editor.file-change-received',
+  // The custom highlight-label palette persisted to UIPreferences changed
+  // (added via the add dialog, or renamed/recolored/deleted via the manage
+  // dialog). Payload: { source: 'add' | 'manage', customCount }. Label ids
+  // are written into users' PDFs, so palette mutations deserve a breadcrumb.
+  RENDERER_PDF_HIGHLIGHT_LABELS_CHANGED: 'renderer:pdf-highlight.labels-changed',
+  // Git Diff's twin of file-change-received: the diff viewer's single-file
+  // watch received an event and decided whether it belongs to the selected
+  // file. Payload: { matched, changeType, mode }. Same silent-drop defect
+  // class as the Project Editor's comparison, same breadcrumb.
+  RENDERER_GIT_DIFF_FILE_CHANGE_RECEIVED: 'renderer:git-diff.file-change-received'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

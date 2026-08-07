@@ -1,0 +1,49 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 400] /Contents 4 0 R /Annots [6 0 R] /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 316 >>
+stream
+BT /F1 18 Tf 40 340 Td (The office of efficient design) Tj ET
+BT /F1 18 Tf 40 300 Td (SELECTME uniqueword ENDMARK) Tj ET
+BT /F1 18 Tf 40 260 Td (Second line continues here) Tj ET
+BT 3 Tr /F1 18 Tf 40 200 Td (HIDDENTEXT) Tj ET
+BT 0 Tr /F1 18 Tf 40 200 Td (VISIBLETEXT) Tj ET
+BT /F1 18 Tf 40 140 Td (BLOCKEDTEXT) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /FreeText /Rect [36 132 200 162] /F 4 /Contents (blocker) /DA (/F1 12 Tf 0 g) /AP << /N 7 0 R >> >>
+endobj
+7 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 164 30] /Length 30 >>
+stream
+0.9 0.9 0.2 rg 0 0 164 30 re f
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000263 00000 n 
+0000000630 00000 n 
+0000000700 00000 n 
+0000000840 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+969
+%%EOF

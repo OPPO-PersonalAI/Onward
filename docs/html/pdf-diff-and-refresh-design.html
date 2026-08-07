@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF Git Diff 标注差异 + 外部变更自动刷新 — 设计方案</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1d2129; --border: #2a2f3a;
+    --text: #d7dce3; --muted: #8b93a1; --accent: #5aa0f2; --accent-2: #7cc4a0;
+    --warn: #e0b45c; --danger: #e07070; --code-bg: #12151b;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 13px; font-family: "SF Mono", Menlo, Consolas, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+  pre code { background: none; border: none; padding: 0; }
+
+  nav#toc { position: fixed; top: 0; left: 0; width: 268px; height: 100vh; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--border); padding: 18px 12px 40px; }
+  nav#toc h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin: 4px 8px 10px; }
+  nav#toc a { display: block; padding: 5px 10px; border-radius: 6px; color: var(--text); font-size: 13.5px; margin-bottom: 1px; }
+  nav#toc a.l2 { padding-left: 24px; font-size: 12.5px; color: var(--muted); }
+  nav#toc a:hover { background: #222736; }
+  nav#toc a.active { background: #24304a; color: var(--accent); }
+
+  main { margin-left: 268px; padding: 36px 48px 80px; max-width: 1080px; }
+  h1 { font-size: 26px; border-bottom: 2px solid var(--border); padding-bottom: 12px; }
+  h2 { font-size: 21px; margin-top: 44px; border-left: 4px solid var(--accent); padding-left: 12px; }
+  h3 { font-size: 17px; margin-top: 28px; color: var(--accent-2); }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); }
+  tr:nth-child(even) td { background: #14171e; }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
+  .callout { border-left: 4px solid var(--accent); background: var(--panel-2); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.danger { border-left-color: var(--danger); }
+  .callout.good { border-left-color: var(--accent-2); }
+  .badge { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .badge.rec { background: #1d3a2a; color: #7cc4a0; border: 1px solid #2e5c42; }
+  .badge.opt { background: #1d2b47; color: #8db8f0; border: 1px solid #2e4870; }
+  .badge.risk { background: #47251d; color: #f0a08d; border: 1px solid #703a2e; }
+  .badge.debt { background: #3a331d; color: #e0c47c; border: 1px solid #5c522e; }
+  .badge.add { background: #1d3a2a; color: #7cc4a0; }
+  .badge.del { background: #47251d; color: #f0a08d; }
+  .badge.chg { background: #3a331d; color: #e0c47c; }
+
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0; }
+  .fbox { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 13px; text-align: center; }
+  .fbox.hl { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .fbox.new { border-color: var(--accent-2); box-shadow: 0 0 0 1px var(--accent-2); }
+  .fbox.bad { border-color: var(--danger); }
+  .fbox small { display: block; color: var(--muted); font-size: 11px; }
+  .farrow { color: var(--muted); font-size: 16px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1100px) { nav#toc { display: none; } main { margin-left: 0; } .cols { grid-template-columns: 1fr; } }
+  .meta { color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<nav id="toc">
+  <h2>目录</h2>
+  <a href="#s1">1. 两个需求与结论摘要</a>
+  <a href="#s2">2. 现状：代码考古结论</a>
+  <a href="#s2-1" class="l2">2.1 Git Diff 的 PDF 链路</a>
+  <a href="#s2-2" class="l2">2.2 文件监听与刷新链路</a>
+  <a href="#s2-3" class="l2">2.3 三个必须先修的缺陷</a>
+  <a href="#s3">3. 同类产品调研</a>
+  <a href="#s4">4. 需求 2 方案：标注差异</a>
+  <a href="#s4-1" class="l2">4.1 现状 vs 提议架构</a>
+  <a href="#s4-2" class="l2">4.2 三态变更模型</a>
+  <a href="#s4-3" class="l2">4.3 决策点与权衡</a>
+  <a href="#s5">5. 需求 3 方案：自动刷新</a>
+  <a href="#s5-1" class="l2">5.1 现状 vs 提议架构</a>
+  <a href="#s5-2" class="l2">5.2 冲突策略（需拍板）</a>
+  <a href="#s5-3" class="l2">5.3 关键参数</a>
+  <a href="#s6">6. 技术债清单</a>
+  <a href="#s7">7. 测试设计（单测 + 自动化）</a>
+  <a href="#s8">8. 待你决策的问题汇总</a>
+  <a href="#s9">9. 文档元信息</a>
+</nav>
+<main>
+
+<h1>PDF Git Diff 标注差异 + 外部变更自动刷新 — 设计方案</h1>
+<p class="meta">本文档是策略确认材料：先呈现现状与方案对比，列出取舍，待决策项见 <a href="#s8">§ 8</a>。确认后才动手写实现。</p>
+
+<h2 id="s1">1. 两个需求与结论摘要</h2>
+<div class="card">
+<p><strong>需求 2 — Git Diff 里看 PDF 差异（重点是标注差异）。</strong>结论：两侧 iframe 其实<em>已经</em>把各自 PDF 里的标注解析出来并广播给宿主了，只是比较组件把消息丢弃。方案是接住两侧标注集合，按标注 id 做三态 diff（新增 / 删除 / 修改），在比较页加一个「标注差异」侧栏，点击条目跳转到对应窗格的标注位置。<strong>不需要新增任何 PDF 解析代码，不需要新增 IPC 传输。</strong></p>
+<p><strong>需求 3 — PDF 阅读器自动刷新。</strong>结论：现状比「缓存不刷新」严重——PDF 完全在监听体系之外，而且标注自动保存用的是 iframe <em>加载时</em>的内存字节整体重写文件，agent 在后台改过的内容会被<strong>静默覆盖</strong>。方案是给监听器加二进制模式，外部变更后让 viewer 原地重载文档并恢复页码/缩放/滚动（SumatraPDF/Okular 模式）；「本地有未保存标注时文件被外部改了」的处理策略需要你拍板（<a href="#s5-2">§ 5.2</a>）。</p>
+</div>
+
+<h2 id="s2">2. 现状：代码考古结论</h2>
+
+<h3 id="s2-1">2.1 Git Diff 的 PDF 链路（现状）</h3>
+<div class="flow">
+  <div class="fbox">git cat-file blob<small>electron/main/git-utils.ts:3001</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox">base64 over IPC<small>整份 PDF，两侧各一份</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox">Blob URL<small>GitPdfCompare.tsx:52</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox">两个 viewer.html iframe<small>original / modified 窗格</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox bad">onward:pdf:annotations<small>viewer 已广播，宿主丢弃</small></div>
+</div>
+<ul>
+  <li>比较组件 <code>GitPdfCompare.tsx</code> 仅 214 行，与 Project Editor 的 <code>PdfReader</code> 是两套独立嵌入；窗格可见性决策表（added→仅右、deleted→仅左、modified→双栏）已有纯函数 + 单测锁定。</li>
+  <li>viewer.html 无条件加载全部标注脚本；文档打开后 <code>readAnnotationStateFromPdf()</code> 把 PDF 内的高亮全部读出，并以 <code>onward:pdf:annotations</code> post 给宿主（payload：id/labelId/labelName/color/page/note/textSnapshot/createdAt/updatedAt）。<strong>diff 双侧的标注集合在运行时已经存在。</strong></li>
+  <li>约束：diff 窗格没有文件路径（只有 Blob），任何「回写」类设计在此不可行——但标注 diff 是只读呈现，不受影响。</li>
+</ul>
+
+<h3 id="s2-2">2.2 文件监听与刷新链路（现状）</h3>
+<div class="flow">
+  <div class="fbox">fs.watch<small>FileWatchManager，仅当前打开文件</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox">400ms 去抖 + UTF-8 全文比对<small>纯文本设计</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox">project:file-changed<small>全文内容随 IPC 下发</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox">ProjectEditor 订阅<small>Monaco 恢复光标/滚动；HTML 预览带 cache-buster 重载</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox bad">isBinary 门<small>PDF 永远被挡在门外</small></div>
+</div>
+<table>
+  <tr><th>文件类型</th><th>外部变更后</th><th>状态保持</th></tr>
+  <tr><td>源代码（Monaco）</td><td>自动更新缓冲区</td><td>光标 + 滚动恢复，undo 栈保留</td></tr>
+  <tr><td>Markdown 预览</td><td>自动重渲染</td><td>DOM 不换,滚动天然保留</td></tr>
+  <tr><td>HTML 预览</td><td>自动重载（<code>?onwardHtmlReload=ts</code> cache-buster）</td><td>滚动位置显式捕获恢复,有 trace 事件</td></tr>
+  <tr><td><strong>PDF</strong></td><td><strong>无任何刷新路径,完全陈旧</strong></td><td>—</td></tr>
+</table>
+
+<h3 id="s2-3">2.3 三个必须先修的缺陷（不修则需求 3 不成立）</h3>
+<div class="callout danger"><strong>缺陷 1 — 静默覆盖窗口。</strong>标注保存的源字节来自 <code>pdfDocument.getData()</code>（iframe 加载时的内存副本），不是磁盘当前内容。agent 改完文件后,你只要加一条高亮，自动保存就把 agent 的修改覆盖掉。<code>annotation-file.js:149</code></div>
+<div class="callout danger"><strong>缺陷 2 — suppressNext 对 PDF 保存无效。</strong>它只压制普通 change 事件；而我们的 PDF 保存是「临时文件 + rename 覆盖」，走 rename→重建分支，该分支不查压制窗口（<code>file-watch-manager.ts:152</code>）。即使把 PDF 纳入监听，每次自动保存都会自触发一次刷新。另外 PDF 从未被监听，所以当前保存链路里的 <code>suppressNext</code> 调用每次都命中「无监听项」空转。</div>
+<div class="callout warn"><strong>缺陷 3 — 监听器是纯文本设计。</strong>每次事件把整个文件按 UTF-8 读入做内容比对——对 20 MB 的 PDF 既昂贵又语义错误。且整个监听器<strong>零 trace 埋点</strong>,用户报「没刷新」时拿不到任何证据。宿主侧 <code>pdfAnnotationsDirty</code> 是无人读取的死状态。</div>
+
+<h2 id="s3">3. 同类产品调研（详情与全部引用见 § 9 来源）</h2>
+<div class="cols">
+<div class="card">
+<h3 style="margin-top:0">需求 2 对照</h3>
+<table>
+  <tr><th>产品</th><th>diff 粒度</th><th>标注感知</th></tr>
+  <tr><td>GitKraken / Sublime Merge / Fork / Tower</td><td>二进制,无可视 diff</td><td>无</td></tr>
+  <tr><td>diff-pdf / diff-pdf-visually</td><td>像素级</td><td>无（标注只是变化的像素）</td></tr>
+  <tr><td>Adobe Acrobat Compare</td><td>页面+文本级</td><td>有,但默认关闭的过滤类别</td></tr>
+  <tr><td>pyHanko diff_analysis</td><td>PDF 对象级</td><td>名义有、实际禁用（视为可疑）</td></tr>
+  <tr><td><strong>PSPDFKit Instant JSON</strong></td><td><strong>标注记录级</strong></td><td><strong>三态模型:create / update / delete 按对象 id 判定</strong></td></tr>
+</table>
+<p class="meta">结论：标注级 PDF diff 没有可抄的完整作业；所有认真做标注协作的产品（Zotero/Hypothesis/PSPDFKit）都把标注当<strong>记录集</strong>处理。我们的标注有稳定 <code>CYY_MARK_Id</code>，照 Instant JSON 的三态模型做记录集 diff 是最干净的路线。</p>
+</div>
+<div class="card">
+<h3 style="margin-top:0">需求 3 对照</h3>
+<table>
+  <tr><th>产品</th><th>检测</th><th>重载保持</th><th>失败处理</th></tr>
+  <tr><td>SumatraPDF</td><td>FS 通知</td><td>页码/滚动/缩放/侧栏/窗口</td><td><strong>静默延后,不弹错</strong></td></tr>
+  <tr><td>Okular</td><td>监听 dirty <strong>和 created</strong>（覆盖原子替换）</td><td>视口/侧栏/旋转</td><td>750ms 去抖,每个事件重置计时</td></tr>
+  <tr><td>Skim</td><td>默认弹窗询问</td><td>视图保持,<strong>标注丢失</strong></td><td>写入过快直接报错,官方 wont-fix</td></tr>
+  <tr><td>LaTeX Workshop</td><td>watcher+WebSocket</td><td>restoreState 恢复滚动</td><td>250ms 写入稳定延迟,可调</td></tr>
+  <tr><td>VS Code 文本编辑器</td><td>内置 watcher</td><td>脏缓冲区不动</td><td><strong>绝不静默重载脏缓冲:Compare / Overwrite / Discard 三选</strong></td></tr>
+</table>
+<p class="meta">三条一致技术：写入去抖、快照-恢复视图状态、自动路径失败静默延后。Okular 的教训直接命中我们：原子替换写入会让 modify-only 监听失明——我们的保存正是原子替换。</p>
+</div>
+</div>
+
+<h2 id="s4">4. 需求 2 方案：Git Diff 标注差异</h2>
+
+<h3 id="s4-1">4.1 现状 vs 提议架构</h3>
+<div class="flow">
+  <div class="fbox">两个 iframe<small>已解析并广播标注</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">GitPdfCompare 接住两侧集合<small>新增两个 message case</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">annotationDiffModel.ts<small>纯函数三态 diff,单测锁定</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">标注差异侧栏<small>新增/删除/修改分组列表</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">点击跳转<small>postMessage goToAnnotation 到对应窗格</small></div>
+</div>
+<ul>
+  <li><strong>计算位置：渲染进程。</strong>PDF 为了显示本来就要全量传到渲染进程，viewer 本来就要解析标注——在渲染进程做 diff 是零额外成本；主进程解析需要在 Node 侧重写或抽出 CYY_MARK 解析器,是纯增量代码。唯一放弃的能力是「不打开文件就在列表里显示标注变化角标」,那是将来的增强,不影响本需求。</li>
+  <li><strong>跳转目标选择：</strong>新增/修改 → modified 窗格;删除 → original 窗格。viewer 已支持 <code>goToAnnotation</code> 消息,GitPdfCompare 补上转发即可。</li>
+  <li><strong>单栏情形（文件级 added/deleted）：</strong>全部标注按「新增/删除」显示,退化为普通标注列表,决策表照旧。</li>
+  <li><strong>修改判定的字段集：</strong>id 相同则比较 labelId / labelName / color / note / page / textSnapshot,任一变化即列为「修改」并标明变化字段。textSnapshot 变化意味着高亮下方的正文被改了（agent 改文件的典型场景）,单独用一个「文字已变」徽标呈现。</li>
+  <li><strong>GitHistoryViewer 免费获益：</strong>两个页面共用 GitPdfCompare,历史提交间的标注 diff 同时生效。</li>
+  <li>顺带修债：GitPdfCompare 补上 <code>onward:pdf:trace</code> 中继;清掉死 i18n 键 <code>viewerMissing</code>。</li>
+</ul>
+
+<h3 id="s4-2">4.2 三态变更模型（借鉴 PSPDFKit Instant JSON）</h3>
+<pre><code>diffAnnotationSets(original: Record[], modified: Record[]) → {
+  added:   Record[]              // id 只在 modified 侧
+  removed: Record[]              // id 只在 original 侧
+  changed: { before, after, changedFields[] }[]   // id 两侧都有且字段有差
+}
+// 排序:按 page,再按 createdAt;损坏输入(同侧重复 id)取后者并计数上报 trace</code></pre>
+
+<h3 id="s4-3">4.3 决策点与权衡</h3>
+<table>
+  <tr><th>呈现方式</th><th>优点</th><th>缺点</th></tr>
+  <tr><td><span class="badge rec">推荐</span>差异列表侧栏 + 点击跳转 + 窗格内对变更标注加强调框</td><td>一眼看全所有变化;跳转直达;窗格内强调让视觉定位闭环</td><td>三块都要做,工作量最大（约多 1 个组件 + viewer 一条消息）</td></tr>
+  <tr><td><span class="badge opt">备选</span>仅差异列表 + 跳转</td><td>工作量小一档;信息完整</td><td>跳过去之后哪个是变更的标注要靠肉眼找</td></tr>
+  <tr><td><span class="badge opt">备选</span>仅窗格内标记</td><td>最轻</td><td>没有汇总视图,多页文档要翻着找,体验差</td></tr>
+</table>
+
+<h2 id="s5">5. 需求 3 方案：外部变更自动刷新</h2>
+
+<h3 id="s5-1">5.1 现状 vs 提议架构</h3>
+<div class="flow">
+  <div class="fbox new">FileWatchManager 二进制模式<small>不读 UTF-8;指纹 = size+mtime,哈希确认</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">suppressNext 修复<small>压制窗口同样约束 rename→重建路径</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox">project:file-changed<small>二进制变更不携带内容</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">ProjectEditor:PDF 通过 isBinary 门<small>脏/净分流</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">onward:pdf:reloadDocument<small>带 ?v=mtime cache-buster</small></div>
+  <div class="farrow">→</div>
+  <div class="fbox new">viewer 原地重载<small>快照页码/缩放/滚动 → getDocument → 恢复;失败静默延后重试</small></div>
+</div>
+<ul>
+  <li><strong>iframe 不重挂载</strong>——viewer 在内部换文档（LaTeX Workshop 模式）,调色板、标签、i18n、面板状态全部天然保留;只有文档本身换新。</li>
+  <li><strong>视图状态恢复复用现成机制</strong>:per-file 位置记忆已经有 <code>getCurrentState / restoreState</code>,重载路径直接用,页码超界钳制。</li>
+  <li><strong>部分写入防护</strong>:getDocument 失败（写了一半的文件）→ 保留旧文档 + 静默重试一次（1s 后）→ 仍失败则维持旧文档并打 trace（SumatraPDF 模式,不弹错误框）。</li>
+  <li><strong>打开时也去陈旧化</strong>:<code>buildPdfViewerUrl</code> 补 <code>v=mtimeMs</code> 参数（EPUB 已有 <code>?mtime=</code> 先例）,关掉「重新打开还是旧内容」这一半问题。</li>
+  <li><strong>标注保存同步修正缺陷 1</strong>:保存前若检测到磁盘指纹与加载时不一致,先走冲突策略（§ 5.2）,不再无条件用内存旧字节覆盖。</li>
+</ul>
+
+<h3 id="s5-2">5.2 冲突策略：本地有未保存标注 + 文件被外部修改（需拍板）</h3>
+<p>我们的标注模型是<strong>id 键控的记录集</strong>,保存 = 基底字节 + 记录集 → 重写文件。这给了我们比 Skim（直接丢标注）好得多的选项:</p>
+<table>
+  <tr><th>策略</th><th>行为</th><th>优点</th><th>风险</th></tr>
+  <tr><td><span class="badge rec">推荐</span><strong>A. 自动变基合并</strong></td><td>以外部新字节为新基底,重载文档;把本地未保存的标注记录重放上去;同一 id 两侧都改 → 本地（用户）胜,并打 trace + 轻提示</td><td>agent 工作流零打断;两侧修改都不丢;符合「标注=记录集」的本质（Zotero/PSPDFKit 同思路）</td><td>外部改动若大幅重排了正文,重放的高亮坐标可能落在旧位置（与所有阅读器同级的固有风险）;合并逻辑需要完整单测</td></tr>
+  <tr><td><span class="badge opt">B. VS Code 式拦截</span></td><td>保持本地状态,暂停自动保存,顶部横幅:「文件已被外部修改」→ [重载(丢弃我的)] / [保留我的并覆盖]</td><td>绝不静默动用户数据,语义最保守</td><td>agent 频繁改文件时横幅反复打断;用户二选一必丢一侧</td></tr>
+  <tr><td><span class="badge risk">C. 重载并丢弃本地</span></td><td>Skim 模式:外部优先,本地未保存标注丢弃</td><td>实现最简单</td><td>用户刚写的笔记说没就没,不可接受,仅列出供完整性</td></tr>
+</table>
+<div class="callout good">注:「净状态」（无未保存标注）下的外部变更三个方案行为一致——直接自动重载并恢复视图,这半边你已在需求里定了,不需要再选。冲突窗口本身很窄（自动保存静默窗口 800ms 内）,但 agent 高频写文件的场景会周期性踩到,必须有明确定义。</div>
+
+<h3 id="s5-3">5.3 关键参数</h3>
+<table>
+  <tr><th>参数</th><th>建议值</th><th>依据</th></tr>
+  <tr><td>写入稳定确认（去抖）</td><td>沿用现有 400ms 去抖 + rename 重建 500ms（合计外部变更后约 0.9s 触发重载）</td><td>介于 LaTeX Workshop 250ms 与 Okular 750ms 之间,无需新旋钮</td></tr>
+  <tr><td>重载失败重试</td><td>1 次,间隔 1s,再失败静默维持旧文档</td><td>SumatraPDF 静默延后模式</td></tr>
+  <tr><td>大文件（&gt;20MB）</td><td>哈希确认跳过,仅 size+mtime 判变</td><td>与既有大文件阈值一致,避免每次事件全量哈希</td></tr>
+  <tr><td>端到端刷新预算（autotest 门槛）</td><td>见 § 8 问题 4</td><td>延迟预算是产品决定,按仓库规则向你确认</td></tr>
+</table>
+
+<h2 id="s6">6. 技术债清单</h2>
+<table>
+  <tr><th>#</th><th>债项</th><th>处置</th></tr>
+  <tr><td>1</td><td><span class="badge debt">在路径上</span>suppressNext 对 rename 路径无效（缺陷 2）</td><td rowspan="6"><strong>随本次需求必然偿还</strong>——它们就在两个需求的实现路径上,不修则功能不成立或违反仓库 trace 规则</td></tr>
+  <tr><td>2</td><td><span class="badge debt">在路径上</span>标注保存静默覆盖外部修改（缺陷 1）</td></tr>
+  <tr><td>3</td><td><span class="badge debt">在路径上</span>FileWatchManager / ImageWatchManager 零 trace 埋点</td></tr>
+  <tr><td>4</td><td><span class="badge debt">在路径上</span><code>pdfAnnotationsDirty</code> 死状态（接入冲突逻辑后复活）</td></tr>
+  <tr><td>5</td><td><span class="badge debt">在路径上</span>GitPdfCompare 丢弃 <code>onward:pdf:trace</code> 中继</td></tr>
+  <tr><td>6</td><td><span class="badge debt">在路径上</span>死 i18n 键 <code>gitDiff.pdfCompare.viewerMissing</code></td></tr>
+  <tr><td>7</td><td><span class="badge opt">上轮遗留</span>标注标签管理不完整（只能新增,不能改名/改色/删除）</td><td rowspan="4">规模独立于本次需求,是否纳入见 § 8 问题 3</td></tr>
+  <tr><td>8</td><td><span class="badge opt">上轮遗留</span>模块边界检查是正则启发式,非 AST</td></tr>
+  <tr><td>9</td><td><span class="badge risk">上轮遗留</span>pdf.js 补丁打在构建产物上,升级需人工重推 11 段（彻底解法=改源码构建,数天级工程）</td></tr>
+  <tr><td>10</td><td><span class="badge risk">上轮遗留</span>caret 引擎超长函数形态（重构会破坏「与上游逐字节可对照」的可验证性）</td></tr>
+</table>
+
+<h2 id="s7">7. 测试设计（按「单测锁数学、autotest 锁接线」双层规则）</h2>
+
+<h3>7.1 单元测试（纯逻辑层,plain Node 毫秒级）</h3>
+<table>
+  <tr><th>文件</th><th>覆盖对象</th><th>用例设计（从用户体验出发）</th></tr>
+  <tr><td><code>pdf-annotation-diff.test.mts</code><br>(PAD-U-01..18)</td><td>新纯模块 <code>annotationDiffModel.ts</code></td><td>空/空、单侧全增、单侧全删、恒等集合零差异;note/color/label/page/textSnapshot 各单字段变化 → changed 且字段名正确;多字段并发变化;增删改混合;排序稳定（页码→时间）;同侧重复 id 的损坏输入确定性处理;undefined 与 '' 不算变化;文件级 added/deleted 单栏退化;跳转目标选择（增/改→右栏,删→左栏）</td></tr>
+  <tr><td><code>file-watch-binary-core.test.mts</code><br>(FWB-U-01..14)</td><td>从 FileWatchManager 抽出的纯决策核 <code>file-watch-core.ts</code></td><td>指纹判定:size 变→变;mtime 变但哈希同→不变（触摸不刷新）;哈希异→变;大文件跳过哈希;压制窗口:窗口内任意事件吞掉、<strong>rename 重建路径同样受约束（缺陷 2 的回归锁）</strong>、压制取消在途去抖、窗口过期恢复;去抖重置语义（Okular 模式:连续写入只触发一次）</td></tr>
+  <tr><td><code>pdf-reload-core</code> 单测<br>(PRC-U-01..10)</td><td>viewer 侧新纯模块 <code>reload-core.js</code></td><td>视图快照→恢复:页码超界钳制（新文档页数变少）、缩放字符串/数值双形态保持、滚动比例换算;重试决策表:首败→1s 重试、再败→放弃维持旧文档;相同指纹重载请求去重</td></tr>
+  <tr><td><code>pdf-annotation-merge.test.mts</code><br>(AMC-U-01..12,若选策略 A)</td><td>新纯模块 <code>annotation-merge-core.js</code></td><td>变基合并决策表:外部有/本地无→采纳;本地有/外部无→保留;同 id 两侧同改→本地胜+冲突计数;同 id 外部删/本地改→本地复活(用户正在编辑的不丢);两侧都未动→原样;合并结果排序与去重恒定</td></tr>
+  <tr><td>既有 <code>pdf-annotation-store</code> 扩展<br>(PAS-U-16+)</td><td>annotation-store.js</td><td>保存前指纹不一致→不再直接写,进入冲突分支;冲突解除后恢复自动保存</td></tr>
+</table>
+
+<h3>7.2 自动化测试（Electron 真实接线）</h3>
+<table>
+  <tr><th>Runner</th><th>Step 0 结论</th><th>断言设计</th></tr>
+  <tr><td><code>run-pdf-epub-diff-autotest</code></td><td><strong>修订既有</strong>（同一特性面:Git Diff × PDF）</td><td>fixture 仓库两版 PDF 带不同标注集;断言差异侧栏行数与三态分组正确;点击「新增」条目 → modified 窗格滚动移动;点击「删除」条目 → original 窗格滚动移动;单栏 added 文件全部显示为新增;trace 中继在 diff 面板生效</td></tr>
+  <tr><td><code>run-pdf-external-refresh-autotest</code><br>(.sh + .ps1)</td><td><strong>新建</strong>（watcher×viewer 跨子系统,独立 fixture 与超时域,索引无既有行）</td><td>净状态外部改写 → 文档更新且页码/缩放恢复(N=5 全过);外部添加标注 → 标注面板出现新行;<strong>自动保存自身不触发重载</strong>(rename 压制回归锁,N=5);写一半的坏文件 → 维持旧文档,补全后恢复;脏状态 + 外部修改 → 按选定策略断言(合并结果/横幅出现);重新打开文件 → 非陈旧内容(cache-buster)</td></tr>
+</table>
+
+<h2 id="s8">8. 决策记录（2026-08-01 用户已拍板）</h2>
+<div class="card">
+<ol>
+  <li><strong>需求 3 冲突策略</strong>:<span class="badge rec">已选</span><strong>自动变基合并</strong>——外部字节为新基底,本地未保存标注重放,同 id 冲突本地胜,trace + 轻提示。</li>
+  <li><strong>需求 2 呈现方式</strong>:<span class="badge rec">已选</span><strong>列表 + 跳转 + 窗格内强调</strong>全套。</li>
+  <li><strong>上轮遗留债</strong>:<span class="badge rec">已选</span><strong>四项全部纳入</strong>(标签管理 UI、AST 边界检查、pdf.js 源码构建、长函数重构)。</li>
+  <li><strong>外部变更端到端刷新预算</strong>:<span class="badge rec">已选</span><strong>&lt; 3 秒</strong>(autotest 门槛,3 取 1)。</li>
+</ol>
+<p class="meta">实现期细化(与已批准策略一致的实现细节):自写压制从「时间窗」升级为「内容指纹识别」——保存时登记写入字节的 sha256,watcher 结算时字节匹配则为自写、不匹配则为外部变更。比时间窗更精确:压制窗口内的真实外部修改不再被误吞,rename(原子替换)路径同样受约束。</p>
+</div>
+
+<h2 id="s9">9. 文档元信息</h2>
+<p class="meta">
+分支:<code>20260727-feat2</code> · 应用版本:<code>2.0.1</code> · 基线提交:<code>470a003</code>(工作区含未提交的 PDF 标注迁移改动) · 文档版本:v1.0<br>
+调研来源(节选):Skim manual/bug#921 wont-fix、SumatraPDF ReloadDocument 源码、KDE Phabricator D7671(原子替换致监听失明修复)、Okular part.cpp 750ms 去抖、LaTeX Workshop watch.pdf.delay 文档、VS Code CustomEditor API 与 issue #13592/#66035、Nutrient Instant JSON how-it-works、Zotero annotations-in-database KB、pyHanko diff_analysis 文档、diff-pdf README、Adobe Acrobat Compare 文档。完整 URL 清单保存在会话记录中,可按需转录。
+</p>
+<table>
+  <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+  <tr><td>v1.0</td><td>2026-08-01</td><td>20260727-feat2</td><td>初版:两需求现状考古、同类产品调研、三态标注 diff 与自动刷新方案、冲突策略选项、技术债清单、双层测试设计</td></tr>
+  <tr><td>v1.1</td><td>2026-08-01</td><td>20260727-feat2</td><td>§ 8 改为决策记录(四项均已拍板:自动变基合并 / 全套呈现 / 四项技术债全纳入 / &lt;3s 预算);记录实现期细化:自写压制由时间窗升级为内容指纹识别(sha256),并在首轮联调中定位修复了「TMPDIR 尾斜杠致双分隔符路径比对失配、watcher 事件被静默丢弃」的真实缺陷(比对函数改为折叠分隔符串)</td></tr>
+  <tr><td>v1.2</td><td>2026-08-01</td><td>20260727-feat2</td><td>实现完成记录:需求 2/3 端到端套件全绿(run-pdf-external-refresh 12 断言、run-pdf-epub-diff 含标注差异 3 断言、run-pdf-highlight 40 断言);第二个真实缺陷定位修复(绝对路径打开的文件因 root+path 拼接失配被静默丢弃 watcher 事件,新增 watchPathMatch 纯模块 + WPM-U-01..09 + 接收点诊断埋点);四项遗留债偿还:标签管理 UI(PAL-U-27..32 + 4 条 autotest)、AST 边界检查(acorn 真作用域分析,含阳性/阴性自检,期间发现并修复了自检样例未镜像 create 工厂形状导致守卫空转的问题)、caret 长函数重构(最长叶子函数 96→72,54 条断言证明行为等价)、pdf.js 源码构建流水线(source-patches.mjs 11/11 锚定上游 v3.11.174 源码 + build-pdfjs-from-source.mjs 克隆/打补丁/构建/对比/同步;已提交产物保持字节不变,--sync 留作升级时步骤)</td></tr>
+</table>
+
+</main>
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav#toc a'));
+  var map = links.map(function (a) { return { a: a, el: document.getElementById(a.getAttribute('href').slice(1)) }; });
+  function onScroll() {
+    var y = window.scrollY + 90, cur = map[0];
+    for (var i = 0; i < map.length; i++) { if (map[i].el && map[i].el.offsetTop <= y) cur = map[i]; }
+    links.forEach(function (a) { a.classList.remove('active'); });
+    if (cur) cur.a.classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+})();
+</script>
+</body>
+</html>

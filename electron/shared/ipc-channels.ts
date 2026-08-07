@@ -195,6 +195,11 @@ export const IPC = {
   PROJECT_READ_FILE_CHUNK: 'project:read-file-chunk',
   PROJECT_RENAME_PATH: 'project:rename-path',
   PROJECT_SAVE_FILE: 'project:save-file',
+  // Atomic in-place rewrite of a PDF, used only by the highlight-annotation
+  // save path. Separate from PROJECT_SAVE_FILE because it takes bytes rather
+  // than a UTF-8 string and because it must not be reachable for other file
+  // types — see writeProjectPdfBytes.
+  PROJECT_SAVE_PDF_BYTES: 'project:save-pdf-bytes',
   PROJECT_SEARCH_CANCEL: 'project:search-cancel',
   PROJECT_SEARCH_DONE: 'project:search-done',
   PROJECT_SEARCH_FILENAMES: 'project:search-filenames',

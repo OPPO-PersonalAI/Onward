@@ -276,6 +276,12 @@ export interface GitDiffDebugApi {
     modifiedHasEmpty: boolean
     paneCount: number
     isSinglePane: boolean
+    annotationDiff?: {
+      added: number
+      removed: number
+      changed: number
+      rowIds: string[]
+    } | null
   } | null
   getEpubCompareState?: () => {
     visible: boolean
@@ -345,6 +351,12 @@ export interface GitHistoryDebugApi {
     modifiedHasEmpty: boolean
     paneCount: number
     isSinglePane: boolean
+    annotationDiff?: {
+      added: number
+      removed: number
+      changed: number
+      rowIds: string[]
+    } | null
   } | null
   getEpubCompareState?: () => {
     visible: boolean

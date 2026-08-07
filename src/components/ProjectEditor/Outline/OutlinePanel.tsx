@@ -45,6 +45,10 @@ interface OutlinePanelProps {
   onItemNavigate?: (item: OutlineItem) => void
   /** Parse-time cap info; when truncated, the header shows a kept/total hint. */
   truncation?: OutlineTruncation
+  /** Show a footer button that re-centres on the section currently being read.
+   *  Only meaningful where an active item tracks a scroll position (PDF), not
+   *  where it tracks a cursor the user is already looking at. */
+  showLocateButton?: boolean
 }
 
 const FILTER_THRESHOLD = 8
@@ -178,6 +182,7 @@ function OutlinePanelImpl({
   activeItem,
   isLoading,
   filePath,
+  showLocateButton,
   editor,
   isMarkdown = false,
   previewRef,
@@ -324,7 +329,7 @@ function OutlinePanelImpl({
   // Smooth-center active item into the middle band of the outline panel
   // when the highlighted heading / symbol changes. Pauses while the user is
   // interacting with the outline themselves (3 s after the last user scroll).
-  useEffect(() => {
+  const revealActiveItem = useCallback((force = false) => {
     const diag = ((window as unknown) as { __onwardOutlineAutoCenterDiag?: {
       effectFires: number; skippedInitial: number; skippedSuppress: number;
       skippedUserScroll: number; skippedNoActive: number; scrolled: number;
@@ -367,7 +372,10 @@ function OutlinePanelImpl({
       diag.lastSkipReason = 'suppress-window'
       return
     }
-    if (now - lastUserScrollAtRef.current < USER_SCROLL_PAUSE_MS) {
+    // Browsing the outline by hand pauses auto-follow, so the list does not
+    // yank itself away mid-read. The locate button is the user explicitly
+    // asking to resync, so it overrides the pause.
+    if (!force && now - lastUserScrollAtRef.current < USER_SCROLL_PAUSE_MS) {
       diag.skippedUserScroll += 1
       diag.lastSkipReason = 'user-scroll-pause'
       return
@@ -386,6 +394,10 @@ function OutlinePanelImpl({
     }
     alignElementCenter(tree, active!, { behavior: 'smooth' })
   }, [effectiveActiveItem])
+
+  useEffect(() => {
+    revealActiveItem(false)
+  }, [effectiveActiveItem, revealActiveItem])
 
   useEffect(() => {
     const tree = treeRef.current
@@ -719,6 +731,24 @@ function OutlinePanelImpl({
           filteredSymbols.map((item, i) => renderItem(item, '', i))
         )}
       </div>
+      {showLocateButton && (
+        <div className="outline-panel-locate-footer">
+          <button
+            type="button"
+            className="outline-panel-locate-btn"
+            disabled={!effectiveActiveItem}
+            title={t('projectEditor.pdfReader.outline.locate')}
+            aria-label={t('projectEditor.pdfReader.outline.locate')}
+            onClick={() => revealActiveItem(true)}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+              <circle cx="8" cy="8" r="4.5" />
+              <circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" />
+              <path d="M8 1v2M8 13v2M1 8h2M13 8h2" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   )
 }

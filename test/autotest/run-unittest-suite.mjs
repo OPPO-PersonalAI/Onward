@@ -41,6 +41,13 @@ const RUNTIME_TEST_PACKAGES = [
       'terminal-output-scheduler-unit.mjs',
     ],
   },
+  {
+    // Real scope analysis behind the viewer module-boundary guard
+    // (js-scope-analysis.mts). devDependency; a checkout without it should
+    // fail the preflight with a clear message, not a resolution stack.
+    name: 'acorn',
+    usedBy: ['pdf-viewer-module-boundaries.test.mts'],
+  },
 ]
 
 async function discoverUnitTests() {

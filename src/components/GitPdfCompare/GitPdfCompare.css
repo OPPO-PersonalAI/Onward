@@ -55,8 +55,15 @@
   text-overflow: ellipsis;
 }
 
+.git-pdf-compare-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
 .git-pdf-compare-panes {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   gap: 1px;

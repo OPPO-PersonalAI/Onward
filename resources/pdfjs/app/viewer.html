@@ -43,6 +43,21 @@
             <option value="4">400%</option>
             <option id="customZoomOption" value="1" hidden>100%</option>
           </select>
+          <!-- Free-form zoom. The preset list covers the common cases; this is
+               for the reader who wants exactly 137% because that is what makes
+               a two-column paper fit their window. -->
+          <input
+            id="customZoomInput"
+            type="text"
+            inputmode="decimal"
+            value="100%"
+            autocomplete="off"
+            spellcheck="false"
+            aria-invalid="false"
+            data-i18n-title="customZoom"
+            data-i18n-aria-label="customZoom"
+            disabled
+          />
           <button id="zoomInBtn" type="button" title="Zoom in" data-i18n-title="zoomIn">+</button>
         </div>
 
@@ -70,10 +85,41 @@
           <div id="viewerContainer">
             <div id="viewer" class="pdfViewer dark-invert"></div>
           </div>
+          <!-- Appears next to the selection itself and is re-parented onto the
+               page element so it scrolls with the content. A fixed toolbar was
+               the earlier design; it lost because a colour picker parked at the
+               screen edge makes the user leave the text they are reading. -->
+          <div
+            id="selectionHighlightPalette"
+            class="selection-highlight-palette"
+            role="toolbar"
+            aria-label="Highlight the selected text"
+            hidden
+          ></div>
           <div id="emptyState" data-i18n="emptyState">No PDF loaded</div>
         </section>
       </main>
     </div>
+
+    <!-- Note editor. Opened by double-clicking a highlight, or by clicking the
+         ◆ marker on one that already has a note. Resizable; the size is
+         persisted by the host. -->
+    <div id="notePopup" hidden>
+      <div id="notePopupHeader">
+        <span id="notePopupLabel" class="note-label-badge"></span>
+        <button id="noteDeleteBtn" type="button" data-i18n="noteDelete" data-i18n-title="noteDeleteTitle">Delete</button>
+      </div>
+      <div id="notePopupSnippet"></div>
+      <textarea id="noteText" data-i18n-placeholder="notePlaceholder"></textarea>
+      <div id="notePopupActions">
+        <button id="noteCloseBtn" type="button" data-i18n="noteDone">Done</button>
+      </div>
+    </div>
+
+    <!-- Hover affordance for a highlight that carries a note. Deliberately a
+         short badge, not the note text: a large tooltip over the paragraph you
+         are reading is worse than no tooltip at all. -->
+    <div id="highlightHoverMarker" hidden aria-hidden="true"></div>
 
     <div id="passwordDialogBackdrop" hidden>
       <div id="passwordDialog" role="dialog" aria-modal="true" aria-labelledby="passwordDialogTitle">
@@ -89,6 +135,16 @@
 
     <script src="../build/pdf.js"></script>
     <script src="../web/pdf_viewer.js"></script>
+    <script src="./outline-follow-core.js"></script>
+    <script src="./text-selection-core.js"></script>
+    <script src="./text-selection.js"></script>
+    <script src="../vendor/pdf-lib.min.js"></script>
+    <script src="./highlight-core.js"></script>
+    <script src="./highlight.js"></script>
+    <script src="./annotation-file.js"></script>
+    <script src="./annotation-merge-core.js"></script>
+    <script src="./annotation-store.js"></script>
+    <script src="./reload-core.js"></script>
     <script src="./viewer.js"></script>
   </body>
 </html>

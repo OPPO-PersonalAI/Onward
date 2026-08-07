@@ -42,6 +42,7 @@ import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fixtureSrcDir = resolve(__dirname, 'fixtures', 'pdf-epub')
+const annotationFixtureDir = resolve(__dirname, 'fixtures', 'pdf-annotation-diff')
 const fixtureRoot = resolve(__dirname, 'fixtures', 'pdf-epub', 'runtime')
 
 // Allow the runner to override the runtime root (e.g. a per-run mktemp dir) so
@@ -57,6 +58,12 @@ const EPUB_ALT_FIXTURE = 'onward-autotest.alt.epub'
 // In-repo committed names the suite asserts against (exact, top-level).
 const PDF_NAME = 'book.pdf'
 const EPUB_NAME = 'book.epub'
+// Annotated pair (fixtures/pdf-annotation-diff): same three pages of text,
+// versions differ in CYY_MARK annotations only — powers the annotation-diff
+// panel assertions.
+const ANNOTATED_BASE_FIXTURE = 'annotated-base.pdf'
+const ANNOTATED_MODIFIED_FIXTURE = 'annotated-modified.pdf'
+const ANNOTATED_PDF_NAME = 'annotated.pdf'
 
 function git(cwd, args) {
   execFileSync('git', args, {
@@ -88,20 +95,24 @@ git(repoRoot, ['init', '-b', 'main'])
 git(repoRoot, ['config', 'core.autocrlf', 'false'])
 git(repoRoot, ['config', 'core.safecrlf', 'false'])
 
-// Commit 1: base PDF/EPUB.
+// Commit 1: base PDF/EPUB + the annotated base.
 copyFixture(PDF_BASE_FIXTURE, PDF_NAME)
 copyFixture(EPUB_BASE_FIXTURE, EPUB_NAME)
-git(repoRoot, ['add', PDF_NAME, EPUB_NAME])
+copyFileSync(join(annotationFixtureDir, ANNOTATED_BASE_FIXTURE), join(repoRoot, ANNOTATED_PDF_NAME))
+git(repoRoot, ['add', PDF_NAME, EPUB_NAME, ANNOTATED_PDF_NAME])
 commit(repoRoot, 'base PDF/EPUB')
 
-// Working tree: overwrite with the alt variants -> two UNSTAGED, MODIFIED files.
+// Working tree: overwrite with the alt variants -> three UNSTAGED, MODIFIED
+// files. annotated.pdf differs from its committed base in annotations ONLY.
 copyFixture(PDF_ALT_FIXTURE, PDF_NAME)
 copyFixture(EPUB_ALT_FIXTURE, EPUB_NAME)
+copyFileSync(join(annotationFixtureDir, ANNOTATED_MODIFIED_FIXTURE), join(repoRoot, ANNOTATED_PDF_NAME))
 
 const manifest = {
   repoPath: repoRoot,
   pdfName: PDF_NAME,
   epubName: EPUB_NAME,
+  annotatedPdfName: ANNOTATED_PDF_NAME,
   // Absolute path to the committed fixture source dir, so the TS can copy the
   // base PDF into the repo to create the later "added" (fresh.pdf) scenario
   // without re-deriving the path from rootPath.

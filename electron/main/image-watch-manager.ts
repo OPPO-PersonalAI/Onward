@@ -8,6 +8,8 @@ import type { FSWatcher, Stats } from 'fs'
 import { resolve, normalize } from 'path'
 import type { BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc-channels'
+import { performanceTrace } from './performance-trace'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 interface ImageWatchEntry {
   watcher: FSWatcher | null
@@ -173,6 +175,9 @@ export class ImageWatchManager {
 
   private emitChange(relativePath: string): void {
     if (this.mainWindow.isDestroyed()) return
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_IMAGE_WATCH_CHANGE_EMITTED, {
+      relativePathLen: relativePath.length
+    })
     this.mainWindow.webContents.send(IPC.PROJECT_IMAGE_FILE_CHANGED, relativePath)
   }
 

@@ -88,13 +88,25 @@ async function getResourcesBasePath(): Promise<string> {
   return app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources')
 }
 
-async function buildPdfViewerUrl(fullPath: string): Promise<string> {
+async function buildPdfViewerUrl(fullPath: string, mtimeMs?: number): Promise<string> {
   const viewerPath = join(await getResourcesBasePath(), 'pdfjs', 'app', 'viewer.html')
   const viewerUrl = toFileUrl(viewerPath)
-  const fileUrl = toFileUrl(fullPath)
+  // The `v` token rides on the file URL (the fetch target), not the viewer
+  // shell URL: it is what makes "reopen after an external edit" and the
+  // in-place external reload load fresh bytes instead of whatever Chromium
+  // decides it may reuse, and it doubles as the reload-dedup identity in the
+  // viewer. Chromium's file loader ignores the query string when reading.
+  const version = Number.isFinite(mtimeMs) ? `?v=${Math.trunc(mtimeMs as number)}` : ''
+  const fileUrl = `${toFileUrl(fullPath)}${version}`
   const parts = fullPath.split(sep)
   const name = parts[parts.length - 1] || ''
-  return `${viewerUrl}?file=${encodeURIComponent(fileUrl)}&name=${encodeURIComponent(name)}`
+  // The viewer runs in a sandboxed iframe and cannot read process.env, so the
+  // autotest gate is passed in the URL. Without it the viewer installs no
+  // `window.__onwardPdfTest` probe object at all, keeping the drag/copy
+  // simulation helpers out of user builds entirely rather than relying on
+  // "nobody calls them".
+  const autotest = process.env.ONWARD_AUTOTEST === '1' ? '&autotest=1' : ''
+  return `${viewerUrl}?file=${encodeURIComponent(fileUrl)}&name=${encodeURIComponent(name)}${autotest}`
 }
 
 const SQLITE_MAGIC_HEADER = Buffer.from('SQLite format 3\u0000', 'utf-8')
@@ -519,9 +531,14 @@ export async function readProjectFile(root: string, path: string, options: Proje
         isImage: false,
         isSqlite: false,
         isPdf: true,
-        previewUrl: await buildPdfViewerUrl(fullPath),
+        previewUrl: await buildPdfViewerUrl(fullPath, fileStat.mtimeMs),
         previewPath: fullPath,
-        sizeBytes: fileStat.size
+        sizeBytes: fileStat.size,
+        // Disk identity at open time. The renderer threads this through every
+        // annotation save as the expected pre-image so an external write
+        // between open and save is caught at the write gate instead of being
+        // clobbered.
+        pdfFileMeta: { size: fileStat.size, mtimeMs: fileStat.mtimeMs }
       }
     }
 
@@ -759,6 +776,120 @@ export async function saveProjectFile(root: string, path: string, content: strin
     return { success: true, root: rootPath, path }
   } catch (error) {
     return { success: false, root: rootPath, path, error: `Failed to save file: ${String(error)}` }
+  }
+}
+
+/**
+ * Overwrite a PDF in place with new bytes, atomically.
+ *
+ * This is the write path for highlight annotations, which the user chose to
+ * store inside the PDF itself. That decision makes this the one place in the
+ * app that rewrites a file the user did not explicitly ask to save, so it is
+ * deliberately more careful than `saveProjectFile`:
+ *
+ *   - Writes a sibling temp file, fsyncs it, then renames over the original.
+ *     A crash or power loss mid-write leaves the original intact instead of
+ *     truncated. A same-directory temp keeps the rename on one filesystem,
+ *     where it is atomic; /tmp would silently degrade to copy-then-delete.
+ *   - Preserves the original file mode, so a rename does not quietly widen
+ *     permissions on a file the user had restricted.
+ *   - Reports a read-only or locked file (EACCES / EPERM / EBUSY, the common
+ *     Windows case) as a distinct outcome, so the renderer can degrade
+ *     silently on an automatic save instead of interrupting reading.
+ */
+export async function writeProjectPdfBytes(
+  root: string,
+  path: string,
+  bytes: Uint8Array,
+  expectedDisk?: { size: number; mtimeMs: number }
+) {
+  const rootPath = resolve(root)
+  const fullPath = resolveInRoot(rootPath, path)
+  if (!fullPath) {
+    return { success: false, root: rootPath, path, reason: 'invalid-path' as const }
+  }
+  if (!isPdfExtension(fullPath)) {
+    // Narrow the blast radius: this endpoint exists for PDF annotations only.
+    return { success: false, root: rootPath, path, reason: 'not-a-pdf' as const }
+  }
+
+  const { chmod } = await import('node:fs/promises')
+  const tempPath = `${fullPath}.onward-tmp`
+
+  let originalMode: number | undefined
+  let currentDisk: { size: number; mtimeMs: number } | undefined
+  try {
+    const current = await stat(fullPath)
+    originalMode = current.mode
+    currentDisk = { size: current.size, mtimeMs: current.mtimeMs }
+  } catch {
+    // Missing original: the rename below still produces a correct file.
+  }
+
+  // Anti-clobber gate: annotation saves rewrite the file from bytes captured
+  // at load time, so a save against a file someone else modified since would
+  // silently discard their change. The caller states which disk pre-image it
+  // believes in; a mismatch turns the save into a refusal the renderer
+  // answers by reloading + rebase-merging, then retrying. (A writer landing
+  // between this stat and the rename below can still slip through — that
+  // residual race is accepted and documented.)
+  if (expectedDisk && currentDisk) {
+    if (
+      currentDisk.size !== expectedDisk.size ||
+      Math.trunc(currentDisk.mtimeMs) !== Math.trunc(expectedDisk.mtimeMs)
+    ) {
+      return {
+        success: false,
+        root: rootPath,
+        path,
+        reason: 'external-modified' as const,
+        currentDisk
+      }
+    }
+  }
+
+  let handle: Awaited<ReturnType<typeof openFileHandle>> | null = null
+  try {
+    handle = await openFileHandle(tempPath, 'w')
+    await handle.write(bytes, 0, bytes.byteLength, 0)
+    // Flush to the device before the rename. Without this, a crash can leave
+    // the rename committed while the data behind it is still in cache.
+    await handle.sync()
+    await handle.close()
+    handle = null
+
+    if (originalMode !== undefined) {
+      try {
+        await chmod(tempPath, originalMode)
+      } catch {
+        // Mode preservation is best-effort; the write itself still stands.
+      }
+    }
+
+    await rename(tempPath, fullPath)
+    let savedDisk: { size: number; mtimeMs: number } | undefined
+    try {
+      const after = await stat(fullPath)
+      savedDisk = { size: after.size, mtimeMs: after.mtimeMs }
+    } catch {
+      // Stat after rename is bookkeeping for the renderer's next expected
+      // pre-image; the write itself already succeeded.
+    }
+    return { success: true, root: rootPath, path, bytes: bytes.byteLength, savedDisk }
+  } catch (error) {
+    if (handle) {
+      try { await handle.close() } catch { /* already failing */ }
+    }
+    try { await unlink(tempPath) } catch { /* temp may not exist */ }
+
+    const code = (error as NodeJS.ErrnoException)?.code
+    const reason =
+      code === 'EACCES' || code === 'EPERM' || code === 'EROFS'
+        ? ('read-only' as const)
+        : code === 'EBUSY'
+          ? ('locked' as const)
+          : ('write-failed' as const)
+    return { success: false, root: rootPath, path, reason, error: String(error) }
   }
 }
 

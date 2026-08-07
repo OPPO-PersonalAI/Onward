@@ -701,7 +701,7 @@ function resolveCompareStatus(container: Element | null): CompareStatus {
 // autotests verify what the user actually sees.
 export function inspectPdfCompareDom() {
   const root = document.querySelector('.git-pdf-compare')
-  if (!root) return { visible: false, status: null, originalSrc: null, modifiedSrc: null, originalHasEmpty: false, modifiedHasEmpty: false, paneCount: 0, isSinglePane: false }
+  if (!root) return { visible: false, status: null, originalSrc: null, modifiedSrc: null, originalHasEmpty: false, modifiedHasEmpty: false, paneCount: 0, isSinglePane: false, annotationDiff: null }
   const panes = Array.from(root.querySelectorAll('.git-pdf-compare-pane')) as HTMLElement[]
   // Look up by data-side so single-pane layouts (status='added' / 'deleted')
   // still resolve original vs modified correctly even though only one is in the DOM.
@@ -711,6 +711,19 @@ export function inspectPdfCompareDom() {
   const modifiedPane = findBySide('modified')
   const readSrc = (pane: HTMLElement | null) =>
     (pane?.querySelector('iframe.git-pdf-compare-frame') as HTMLIFrameElement | null)?.src ?? null
+  // The annotation-diff sidebar publishes its counts as data attributes and
+  // its rows carry the annotation ids, so an autotest can assert the panel's
+  // verdict without reaching into React state.
+  const diffPanel = root.querySelector('.git-pdf-annotation-diff') as HTMLElement | null
+  const annotationDiff = diffPanel
+    ? {
+        added: Number(diffPanel.dataset.addedCount) || 0,
+        removed: Number(diffPanel.dataset.removedCount) || 0,
+        changed: Number(diffPanel.dataset.changedCount) || 0,
+        rowIds: Array.from(diffPanel.querySelectorAll('.git-pdf-annotation-diff-row'))
+          .map(row => (row as HTMLElement).dataset.annotationId ?? '')
+      }
+    : null
   return {
     visible: true,
     status: resolveCompareStatus(root),
@@ -719,7 +732,8 @@ export function inspectPdfCompareDom() {
     originalHasEmpty: Boolean(originalPane?.querySelector('.git-pdf-compare-empty')),
     modifiedHasEmpty: Boolean(modifiedPane?.querySelector('.git-pdf-compare-empty')),
     paneCount: panes.length,
-    isSinglePane: Boolean(root.querySelector('.git-pdf-compare-panes.is-single'))
+    isSinglePane: Boolean(root.querySelector('.git-pdf-compare-panes.is-single')),
+    annotationDiff
   }
 }
 
@@ -7355,6 +7369,17 @@ export function GitDiffViewer({
                 labelModified: t('gitDiff.pdfCompare.labelModified'),
                 noOriginal: t('gitDiff.pdfCompare.noOriginal'),
                 noModified: t('gitDiff.pdfCompare.noModified')
+              }}
+              annotationDiffLabels={{
+                title: t('gitDiff.pdfCompare.annotationDiff.title'),
+                added: t('gitDiff.pdfCompare.annotationDiff.added'),
+                removed: t('gitDiff.pdfCompare.annotationDiff.removed'),
+                changed: t('gitDiff.pdfCompare.annotationDiff.changed'),
+                fieldLabelId: t('gitDiff.pdfCompare.annotationDiff.fieldLabel'),
+                fieldColor: t('gitDiff.pdfCompare.annotationDiff.fieldColor'),
+                fieldPage: t('gitDiff.pdfCompare.annotationDiff.fieldPage'),
+                fieldNote: t('gitDiff.pdfCompare.annotationDiff.fieldNote'),
+                fieldTextSnapshot: t('gitDiff.pdfCompare.annotationDiff.fieldText')
               }}
             />
           )}

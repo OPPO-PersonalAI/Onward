@@ -46,6 +46,12 @@ $FixtureRepo = Join-Path $RunTmpDir 'pdf-epub-repo'
 New-Item -ItemType Directory -Force $UserDataDir | Out-Null
 
 try {
+  # The annotated pair (annotation-diff panel assertions) must match its
+  # builder byte-for-byte before it enters the fixture repo.
+  Write-Host "Verifying the annotated PDF fixture pair..."
+  & node (Join-Path $RootDir 'test\autotest\fixtures\pdf-annotation-diff-fixture-builder.mjs') --check
+  if ($LASTEXITCODE -ne 0) { exit 1 }
+
   # Build the one-commit + alt-working-tree fixture repo (execFileSync; no PTY).
   $fixture = node (Join-Path $RootDir 'test\autotest\create-pdf-epub-diff-fixture.mjs') $FixtureRepo | ConvertFrom-Json
   $ManifestPath = $fixture.manifestPath

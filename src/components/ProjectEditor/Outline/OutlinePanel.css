@@ -372,3 +372,38 @@ body.project-editor-outline-resizing {
 body.project-editor-outline-resizing * {
   pointer-events: none;
 }
+
+/* Locate button — only rendered for readers whose active item tracks a scroll
+ * position (PDF). Browsing the outline by hand pauses auto-follow so the list
+ * does not yank itself away mid-read; this is how the user asks to resync. */
+.outline-panel-locate-footer {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 6px;
+  border-top: 1px solid var(--line);
+}
+
+.outline-panel-locate-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.outline-panel-locate-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text);
+}
+
+.outline-panel-locate-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

@@ -207,6 +207,20 @@ SCRIPTS: List[str] = [
     "test/autotest/run-pdf-epub-preview-pdf-autotest.sh",
     "test/autotest/run-pdf-epub-preview-pdf-outline-autotest.sh",
     "test/autotest/run-pdf-epub-preview-epub-autotest.sh",
+    # New runner rather than a section inside the preview group runners
+    # (5-step SOP Step 0): different fixture, drag assertions that repeat 5x,
+    # and the preview suite was already split to fit the 300 s budget.
+    "test/autotest/run-pdf-text-selection-autotest.sh",
+    # Separate from run-pdf-text-selection: this one MODIFIES the PDF it opens
+    # (highlights are stored inside the file), so it owns a throwaway copy and
+    # a distinct failure mode — a corrupt write here must not be reported as a
+    # selection regression.
+    "test/autotest/run-pdf-highlight-autotest.sh",
+    # Separate runner (5-step SOP Step 0): crosses the watcher x viewer
+    # subsystem boundary (no other PDF runner touches the main-process file
+    # watcher) and owns a distinct fixture lifecycle - a throwaway mktemp
+    # project root whose PDF is mutated externally mid-test.
+    "test/autotest/run-pdf-external-refresh-autotest.sh",
     "test/autotest/run-performance-trace-autotest.sh",
     "test/autotest/run-preview-search-autotest.sh",
     "test/autotest/run-project-editor-file-memory-autotest.sh",

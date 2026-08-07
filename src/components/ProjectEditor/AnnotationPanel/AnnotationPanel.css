@@ -1,0 +1,623 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Annotation list panel. Uses the same tokens as the rest of the Project
+ * Editor so it reads as one surface with the file tree and outline rather than
+ * as a bolted-on sidebar.
+ */
+
+.pdf-annotation-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  position: relative;
+}
+
+.pdf-annotation-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.pdf-annotation-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.pdf-annotation-panel-count {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+  text-transform: none;
+}
+
+.pdf-annotation-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pdf-annotation-panel-icon-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.pdf-annotation-panel-icon-btn:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text);
+}
+
+.pdf-annotation-panel-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.pdf-annotation-control {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pdf-annotation-control select {
+  height: 24px;
+  min-width: 0;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-elevated);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.pdf-annotation-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  grid-column: 1 / -1;
+}
+
+.pdf-annotation-checkbox input {
+  margin: 0;
+}
+
+.pdf-annotation-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.pdf-annotation-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.pdf-annotation-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: var(--panel-elevated);
+}
+
+.pdf-annotation-item:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.pdf-annotation-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.pdf-annotation-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35) inset;
+}
+
+.pdf-annotation-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pdf-annotation-page {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  flex: none;
+}
+
+.pdf-annotation-menu-trigger {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  flex: none;
+}
+
+.pdf-annotation-menu-trigger:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text);
+}
+
+/* The snippet is the jump target. A button rather than a div so it is
+ * keyboard-reachable — the list is a navigation surface, not decoration. */
+.pdf-annotation-snippet {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pdf-annotation-snippet:hover {
+  color: var(--accent);
+}
+
+.pdf-annotation-note {
+  margin-top: 6px;
+  border-top: 1px dashed var(--line);
+  padding-top: 5px;
+}
+
+.pdf-annotation-note-toggle {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.pdf-annotation-note-toggle:hover {
+  color: var(--text);
+}
+
+.pdf-annotation-note-body {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Compact density trims padding and clamps the snippet harder, so roughly
+ * twice as many entries fit before scrolling. */
+.pdf-annotation-panel.density-compact .pdf-annotation-item {
+  padding: 5px 8px;
+  margin-bottom: 4px;
+}
+
+.pdf-annotation-panel.density-compact .pdf-annotation-item-head {
+  margin-bottom: 3px;
+}
+
+.pdf-annotation-panel.density-compact .pdf-annotation-snippet {
+  -webkit-line-clamp: 2;
+  font-size: 12px;
+}
+
+.pdf-annotation-panel-footer {
+  flex: none;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pdf-annotation-manage-labels {
+  width: 100%;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.pdf-annotation-manage-labels:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+}
+
+.pdf-annotation-add-label {
+  width: 100%;
+  height: 26px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pdf-annotation-add-label:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.pdf-annotation-copy-status {
+  position: absolute;
+  left: 50%;
+  bottom: 44px;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel-elevated);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-1);
+  color: var(--text);
+  font-size: 11.5px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* Follows the project-wide context-menu convention: same radius, padding,
+ * hover tint and separator metrics as every other menu in the app. */
+.pdf-annotation-context-menu {
+  position: fixed;
+  min-width: 168px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-1);
+  padding: 6px;
+  z-index: 90;
+  animation: pdf-annotation-context-fade-in 0.15s ease;
+}
+
+@keyframes pdf-annotation-context-fade-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+
+.pdf-annotation-context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pdf-annotation-context-menu button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.pdf-annotation-context-menu button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pdf-annotation-context-menu button.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.pdf-annotation-context-separator {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 6px;
+}
+
+/* ---------- add-label dialog ---------- */
+
+.pdf-annotation-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 120;
+}
+
+.pdf-annotation-dialog {
+  width: min(400px, calc(100vw - 40px));
+  background: var(--panel-elevated);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-1);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pdf-annotation-dialog h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.pdf-annotation-dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pdf-annotation-dialog-field input[type='text'] {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.pdf-annotation-color-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pdf-annotation-color-choice {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35) inset;
+}
+
+.pdf-annotation-color-choice.selected {
+  border-color: var(--text);
+}
+
+.pdf-annotation-dialog-error {
+  margin: 0;
+  font-size: 12px;
+  color: #ff9f9f;
+}
+
+.pdf-annotation-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pdf-annotation-dialog-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.pdf-annotation-dialog-actions button.primary {
+  background: color-mix(in srgb, var(--accent) 25%, var(--panel));
+  border-color: var(--accent);
+}
+
+.pdf-annotation-dialog-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Manage-labels dialog (rename / recolor / delete custom labels) ── */
+
+.pdf-annotation-manage-dialog {
+  width: 420px;
+  max-width: calc(100vw - 48px);
+}
+
+.pdf-annotation-manage-hint {
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.pdf-annotation-manage-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.pdf-annotation-manage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+}
+
+.pdf-annotation-manage-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.pdf-annotation-manage-row.is-builtin {
+  opacity: 0.75;
+}
+
+.pdf-annotation-manage-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+
+.pdf-annotation-manage-name {
+  font-size: 12.5px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 0;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.pdf-annotation-manage-name.is-editable {
+  cursor: text;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.pdf-annotation-manage-name.is-editable:hover {
+  text-decoration: underline dotted;
+}
+
+.pdf-annotation-manage-rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--background);
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 0 6px;
+}
+
+.pdf-annotation-manage-rename-input[aria-invalid='true'] {
+  border-color: #e07070;
+}
+
+.pdf-annotation-manage-builtin-tag {
+  font-size: 10.5px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.pdf-annotation-color-choices.is-inline {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.pdf-annotation-color-choice.is-small {
+  width: 14px;
+  height: 14px;
+}
+
+.pdf-annotation-manage-delete {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 5px;
+  display: inline-flex;
+}
+
+.pdf-annotation-manage-delete:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #e58f8f;
+}
+
+.pdf-annotation-manage-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.pdf-annotation-manage-confirm button {
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-size: 11.5px;
+  cursor: pointer;
+  padding: 0 8px;
+}
+
+.pdf-annotation-manage-confirm button.danger {
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #e58f8f;
+}
+
+.pdf-annotation-manage-confirm button.danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.pdf-annotation-manage-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 6px;
+}

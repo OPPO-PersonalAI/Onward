@@ -18,6 +18,7 @@ import { useViewportMenuPosition } from '../../hooks/useViewportMenuPosition'
 import { useI18n } from '../../i18n/useI18n'
 import { trackFeatureUse } from '../../telemetry/track-feature-use'
 import { perfTrace, perfTraceDiagnostic } from '../../utils/perf-trace'
+import { expectedWatchPath, watchPathsEqual } from './watchPathMatch'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { shouldRetainProjectEditorViewOnClose } from './utils/projectEditorCloseRetention'
 import { isPreviewWorkPending, shouldRevealSettledPreview } from './utils/previewRestoreSettle'
@@ -58,7 +59,17 @@ import { initializeFileIndexCacheBridge } from './GlobalSearch/fileIndexCacheBoo
 import { PreviewSearchBar } from './PreviewSearch/PreviewSearchBar'
 import type { PreviewSearchHandle } from './PreviewSearch/PreviewSearchBar'
 import { SqliteViewer } from './SqliteViewer'
-import { PdfReader, type PdfReaderHandle } from './PdfReader'
+import { PdfReader, type PdfReaderHandle, type PdfAnnotationSummary } from './PdfReader'
+import { AnnotationPanel } from './AnnotationPanel/AnnotationPanel'
+import { AddLabelDialog } from './AnnotationPanel/AddLabelDialog'
+import { ManageLabelsDialog } from './AnnotationPanel/ManageLabelsDialog'
+import {
+  normalizeStoredLabels,
+  shouldOpenPanelOnLoad,
+  type AnnotationDensity,
+  type AnnotationSortMode,
+  type HighlightLabel
+} from './AnnotationPanel/annotationListModel'
 import { mergePdfReaderState } from './pdfReaderState'
 import { EpubReader, type EpubReaderHandle, type EpubReaderProgress } from './EpubReader'
 import { isEpubFrameContentReady } from './epubReaderState'
@@ -1203,11 +1214,71 @@ export function ProjectEditor({
   // Markdown / code / PDF / EPUB all share the same surface (and the same
   // auto-center behavior from the 0418-wk3 merge).
   const [pdfOutlineSymbols, setPdfOutlineSymbols] = useState<OutlineItem[]>([])
+  // PDF highlight annotations. The viewer owns the records; these mirror them
+  // for the list panel, which never mutates them directly.
+  const [pdfAnnotations, setPdfAnnotations] = useState<PdfAnnotationSummary[]>([])
+  // Unsaved-highlight signal from the viewer. A ref, not state: nothing
+  // renders from it — its one consumer is the leave-flush path, which runs
+  // inside async callbacks where a state value would be stale anyway.
+  const pdfAnnotationsDirtyRef = useRef(false)
+  const handlePdfAnnotationsDirtyChange = useCallback((dirty: boolean) => {
+    pdfAnnotationsDirtyRef.current = dirty
+  }, [])
+  const [pdfOutlineActiveOrder, setPdfOutlineActiveOrder] = useState<number | null>(null)
+  const [showAddLabelDialog, setShowAddLabelDialog] = useState(false)
+  const [showManageLabelsDialog, setShowManageLabelsDialog] = useState(false)
+  // null = the user has not chosen; the panel then follows "open it when there
+  // is something in it" so a plain PDF keeps its full reading width.
+  const pdfPanelUserChoiceRef = useRef<boolean | null>(null)
+
+  const DEFAULT_HIGHLIGHT_LABELS = useMemo<HighlightLabel[]>(() => [
+    { id: 'hl-key', name: t('projectEditor.pdfReader.highlight.labelKey'), color: '#f2c14e' },
+    { id: 'hl-question', name: t('projectEditor.pdfReader.highlight.labelQuestion'), color: '#5aa9e6' },
+    { id: 'hl-method', name: t('projectEditor.pdfReader.highlight.labelMethod'), color: '#7bd88f' },
+    { id: 'hl-cite', name: t('projectEditor.pdfReader.highlight.labelCitation'), color: '#e58fb2' }
+  ], [t])
+
+  const [pdfHighlightLabels, setPdfHighlightLabels] = useState<HighlightLabel[]>(
+    () => normalizeStoredLabels(getUIPreferences().projectEditorPdfHighlightLabels, [])
+  )
+  const [pdfAnnotationPanelVisible, setPdfAnnotationPanelVisible] = useState<boolean>(
+    () => getUIPreferences().projectEditorPdfAnnotationPanelVisible ?? false
+  )
+  const [pdfAnnotationPanelWidth, setPdfAnnotationPanelWidth] = useState<number>(() => {
+    const stored = getUIPreferences().projectEditorPdfAnnotationPanelWidth
+    return Number.isFinite(stored) ? Math.min(520, Math.max(240, Number(stored))) : 300
+  })
+  const [pdfAnnotationSort, setPdfAnnotationSort] = useState<AnnotationSortMode>(
+    () => getUIPreferences().projectEditorPdfAnnotationSort ?? 'created'
+  )
+  const [pdfAnnotationDensity, setPdfAnnotationDensity] = useState<AnnotationDensity>(
+    () => getUIPreferences().projectEditorPdfAnnotationDensity ?? 'comfortable'
+  )
+  const [pdfAnnotationNotesExpanded, setPdfAnnotationNotesExpanded] = useState<boolean>(
+    () => getUIPreferences().projectEditorPdfAnnotationNotesExpanded ?? true
+  )
+  const [pdfAnnotationAutoScroll, setPdfAnnotationAutoScroll] = useState<boolean>(
+    () => getUIPreferences().projectEditorPdfAnnotationAutoScroll ?? true
+  )
+  const [pdfNotePopupSize, setPdfNotePopupSize] = useState<{ width: number; height: number }>(
+    () => getUIPreferences().projectEditorPdfNotePopupSize ?? { width: 320, height: 0 }
+  )
+
+  // Labels shown in the palette: the built-in four plus anything the user added.
+  const effectivePdfLabels = useMemo(
+    () => (pdfHighlightLabels.length > 0
+      ? [...DEFAULT_HIGHLIGHT_LABELS, ...pdfHighlightLabels]
+      : DEFAULT_HIGHLIGHT_LABELS),
+    [DEFAULT_HIGHLIGHT_LABELS, pdfHighlightLabels]
+  )
   const [pdfActivePage, setPdfActivePage] = useState<number>(1)
   const [epubOutlineSymbols, setEpubOutlineSymbols] = useState<OutlineItem[]>([])
   const [epubActiveHref, setEpubActiveHref] = useState<string | null>(null)
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null)
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null)
+  // Disk identity of the open PDF (size + mtime), seeded from the read result
+  // and threaded into PdfReader as the annotation save gate's pre-image.
+  const [pdfFileMeta, setPdfFileMeta] = useState<{ size: number; mtimeMs: number } | null>(null)
   const [epubPreviewUrl, setEpubPreviewUrl] = useState<string | null>(null)
   const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string | null>(null)
   const htmlPreviewUrlRef = useRef<string | null>(null)
@@ -1558,6 +1629,18 @@ export function ProjectEditor({
 
   const editorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null)
   const pdfReaderRef = useRef<PdfReaderHandle | null>(null)
+  // Unsaved highlight edits sit inside the autosave quiet window (800 ms).
+  // Unmounting the reader iframe in that window would silently drop them, so
+  // every leave path (file switch, subpage close) forces the write and waits
+  // — bounded — for the dirty flag to clear.
+  const flushPdfAnnotationsBeforeLeave = useCallback(async () => {
+    if (!isPdfRef.current || !pdfAnnotationsDirtyRef.current) return
+    pdfReaderRef.current?.flushAnnotations()
+    const deadline = performance.now() + 1500
+    while (pdfAnnotationsDirtyRef.current && performance.now() < deadline) {
+      await new Promise<void>((resolve) => { window.setTimeout(resolve, 50) })
+    }
+  }, [])
   const epubReaderRef = useRef<EpubReaderHandle | null>(null)
   const editorScrollDisposableRef = useRef<import('monaco-editor').IDisposable | null>(null)
   const editorCursorDisposableRef = useRef<import('monaco-editor').IDisposable | null>(null)
@@ -2505,6 +2588,26 @@ export function ProjectEditor({
   // the current chapter / section stays highlighted as they scroll within it.
   const pdfActiveItem = useMemo<OutlineItem | null>(() => {
     if (!isPdf || pdfOutlineSymbols.length === 0) return null
+    // Scroll-tracked entry wins when the viewer has reported one: it can tell
+    // apart several sections that start on the same page, which page-number
+    // matching cannot. Falls back to the page heuristic before the first
+    // scroll report arrives, and for PDFs whose destinations carry no position.
+    if (pdfOutlineActiveOrder !== null) {
+      let cursor = 0
+      let found: OutlineItem | null = null
+      const visit = (items: OutlineItem[]) => {
+        for (const item of items) {
+          if (cursor === pdfOutlineActiveOrder) { found = item; return }
+          cursor += 1
+          if (item.children.length > 0) {
+            visit(item.children)
+            if (found) return
+          }
+        }
+      }
+      visit(pdfOutlineSymbols)
+      if (found) return found
+    }
     let best: OutlineItem | null = null
     let bestPage = 0
     const walk = (list: OutlineItem[]) => {
@@ -2520,7 +2623,7 @@ export function ProjectEditor({
     }
     walk(pdfOutlineSymbols)
     return best ?? pdfOutlineSymbols[0] ?? null
-  }, [isPdf, pdfActivePage, pdfOutlineSymbols])
+  }, [isPdf, pdfActivePage, pdfOutlineActiveOrder, pdfOutlineSymbols])
 
   // For EPUB: match at the chapter level. Navigation hrefs and relocated hrefs
   // can disagree on root prefixes such as `OEBPS/`, so compare normalized
@@ -5293,6 +5396,9 @@ export function ProjectEditor({
     // while the old file's view still exists.
     if (currentActiveFilePath) {
       await captureHtmlPreviewScrollMemory('open-file')
+      // Highlight edits still inside the autosave quiet window must reach the
+      // disk before the reader iframe unmounts with them.
+      await flushPdfAnnotationsBeforeLeave()
       saveCurrentFileMemory()
     }
 
@@ -5485,6 +5591,7 @@ export function ProjectEditor({
     setEpubActiveHref(null)
     setImagePreviewUrl(result.isImage ? (result.previewUrl ?? null) : null)
     setPdfPreviewUrl(pdfFile ? (result.previewUrl ?? null) : null)
+    setPdfFileMeta(pdfFile ? (result.pdfFileMeta ?? null) : null)
     setEpubPreviewUrl(epubFile ? (result.previewUrl ?? null) : null)
     const nextHtmlPreviewUrl = htmlFile ? (result.previewUrl ?? null) : null
     setHtmlPreviewUrl(nextHtmlPreviewUrl)
@@ -5716,6 +5823,7 @@ export function ProjectEditor({
     beginPreviewRestore,
     clearActiveFileState,
     confirmDiscardChanges,
+    flushPdfAnnotationsBeforeLeave,
     epubPreviewUrl,
     imagePreviewUrl,
     isMarkdownPreviewOpen,
@@ -8108,21 +8216,45 @@ export function ProjectEditor({
   useEffect(() => {
     const root = rootRef.current
     const filePath = activeFilePath
-    if (!root || !filePath || isBinary || isImage || isSqlite || largeFileState) return
+    // PDFs are binary but DO get watched (in the watcher's binary mode): agent
+    // tools rewrite them in the background and the reader must follow. Other
+    // binary surfaces (images have their own watcher, sqlite, large-file
+    // stubs) stay out.
+    if (!root || !filePath || isImage || isSqlite || largeFileState) return
+    if (isBinary && !isPdf) return
 
-    void window.electronAPI.project.watchFile(root, filePath)
+    void window.electronAPI.project.watchFile(root, filePath, isPdf ? 'binary' : 'text')
 
-    const unsubscribe = window.electronAPI.project.onFileChanged((fullPath, changeType, content) => {
+    const unsubscribe = window.electronAPI.project.onFileChanged((fullPath, changeType, content, meta) => {
       const currentPath = activeFilePathRef.current
       const currentRoot = rootRef.current
       if (!currentPath || !currentRoot) return
 
-      const separator = currentRoot.includes('\\') ? '\\' : '/'
-      const expectedPath = currentRoot.endsWith(separator)
-        ? `${currentRoot}${currentPath}`
-        : `${currentRoot}${separator}${currentPath}`
-      const normalizeFullPath = (value: string) => value.replace(/[\\/]/g, '/')
-      if (normalizeFullPath(fullPath) !== normalizeFullPath(expectedPath)) return
+      // watchPathMatch handles the two silent-drop traps here: an
+      // activeFilePath that is already absolute (absolute-path open flows
+      // store it verbatim — root-prefixing it builds garbage), and separator
+      // runs that differ between the main process's normalized event path
+      // and the renderer's root.
+      const matched = watchPathsEqual(fullPath, expectedWatchPath(currentRoot, currentPath))
+      perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PROJECT_FILE_CHANGE_RECEIVED, {
+        matched,
+        changeType,
+        isPdf: isPdfRef.current,
+        hasMeta: Boolean(meta)
+      })
+      if (!matched) return
+
+      if (isPdfRef.current) {
+        if (changeType === 'changed' && meta) {
+          // In-place reload with view-state preservation and rebase-merge of
+          // any unsaved local annotations. The watcher already filtered out
+          // our own saves (fingerprint-based self-write suppression).
+          pdfReaderRef.current?.notifyExternalChange(meta)
+        } else if (changeType === 'deleted') {
+          showStatus('error', t('projectEditor.fileDeletedExternally'))
+        }
+        return
+      }
 
 	      if (changeType === 'changed' && content !== undefined) {
 	        if (content === fileContentRef.current) return
@@ -8189,7 +8321,7 @@ export function ProjectEditor({
       unsubscribe()
       void window.electronAPI.project.unwatchFile(root, filePath)
     }
-  }, [activeFilePath, isBinary, isImage, isSqlite, largeFileState, requestHtmlPreviewReload, scheduleMarkdownRender, showStatus, syncOriginalVersion, t])
+  }, [activeFilePath, isBinary, isImage, isPdf, isSqlite, largeFileState, requestHtmlPreviewReload, scheduleMarkdownRender, showStatus, syncOriginalVersion, t])
 
   const handleSave = useCallback(async (source: SaveSource = 'toolbar') => {
     const targetPath = activeFilePathRef.current
@@ -8244,6 +8376,9 @@ export function ProjectEditor({
   const handleRequestClose = useCallback(async () => {
     const canClose = await confirmDiscardChanges()
     if (!canClose) return
+    // Highlight edits still inside the autosave quiet window must reach the
+    // disk before the subpage (and the reader iframe with them) goes away.
+    await flushPdfAnnotationsBeforeLeave()
     // Capture all scroll positions before final persist
     const scope = lastEditorScopeRef.current
     const retainViewOnClose = shouldRetainProjectEditorViewOnClose({
@@ -8280,6 +8415,7 @@ export function ProjectEditor({
 	    captureEditorSoftCloseSnapshot,
 	    capturePreviewScrollMemory,
 	    confirmDiscardChanges,
+	    flushPdfAnnotationsBeforeLeave,
 	    onClose,
 	    persistProjectEditorState,
 	    resetActiveFileState
@@ -10055,6 +10191,40 @@ export function ProjectEditor({
     document.addEventListener('mouseup', handleMouseUp)
   }, [isHtmlPreviewVisible, isMarkdownPreviewVisible, outlineShowInSplit])
 
+  /**
+   * Drag handle for the annotation pane. Sits to the LEFT of the pane (the
+   * pane is right-aligned, next to the outline), so dragging left widens it.
+   *
+   * Deliberately simpler than the outline resizer: that one has to reserve
+   * room for the markdown editor and preview, which cannot be open at the same
+   * time as a PDF.
+   */
+  const handlePdfAnnotationResizeMouseDown = useCallback((event: React.MouseEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = pdfAnnotationPanelWidth
+    const resizerEl = event.currentTarget as HTMLElement
+    const parentWidth = (resizerEl.parentElement as HTMLElement | null)?.clientWidth ?? 0
+    const containerWidth = previewLayoutRef.current?.clientWidth || parentWidth
+    // Always leave the reader itself a usable width, whatever the user drags.
+    const maxWidth = Math.max(240, Math.min(520, containerWidth - 260))
+    let latestWidth = startWidth
+
+    const onMove = (moveEvent: MouseEvent) => {
+      const next = startWidth - (moveEvent.clientX - startX)
+      latestWidth = Math.min(maxWidth, Math.max(240, next))
+      setPdfAnnotationPanelWidth(latestWidth)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      // Persist once on release, not per frame: a drag is one decision.
+      updateUIPreferences({ projectEditorPdfAnnotationPanelWidth: latestWidth })
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [pdfAnnotationPanelWidth, updateUIPreferences])
+
   const handleOutlineResizeMouseDown = useCallback((event: React.MouseEvent) => {
     if (!outlineShowInSplit) return
     event.preventDefault()
@@ -11091,13 +11261,68 @@ export function ProjectEditor({
                           ref={pdfReaderRef}
                           viewerUrl={pdfPreviewUrl}
                           filePath={activeFilePath}
+                          rootPath={rootPath ?? undefined}
+                          onSaveProblem={(reason) => {
+                            // Only explicit saves reach here; automatic ones
+                            // degrade silently by design (a locked file must
+                            // not interrupt reading).
+                            showStatus(
+                              'error',
+                              reason === 'read-only' || reason === 'locked'
+                                ? t('projectEditor.pdfReader.save.readOnly')
+                                : t('projectEditor.pdfReader.save.failed')
+                            )
+                          }}
                           initialState={{
                             page: memory?.pdfPageNumber,
                             scrollTop: memory?.pdfScrollTop,
                             scale: memory?.pdfScale
                           }}
-                          onOutlineLoaded={setPdfOutlineSymbols}
+                          onOutlineLoaded={(items) => {
+                            setPdfOutlineSymbols(items)
+                            setPdfOutlineActiveOrder(null)
+                          }}
                           onPageChange={setPdfActivePage}
+                          onOutlineActiveChange={setPdfOutlineActiveOrder}
+                          highlightLabels={effectivePdfLabels}
+                          notePopupSize={pdfNotePopupSize}
+                          onNotePopupSizeChange={(size) => {
+                            setPdfNotePopupSize(size)
+                            updateUIPreferences({ projectEditorPdfNotePopupSize: size })
+                          }}
+                          onDirtyChange={handlePdfAnnotationsDirtyChange}
+                          fileMeta={pdfFileMeta ?? undefined}
+                          onExternalReload={(info) => {
+                            if (!info.ok || !info.merge) return
+                            const kept = info.merge.localAdds + info.merge.localMods + info.merge.localDels
+                            if (info.merge.conflicts > 0) {
+                              showStatus('success', t('projectEditor.pdfExternalMergedConflicts', {
+                                count: kept,
+                                conflicts: info.merge.conflicts
+                              }))
+                            } else if (kept > 0) {
+                              showStatus('success', t('projectEditor.pdfExternalMerged', { count: kept }))
+                            }
+                            // A clean reload (no local edits) stays silent —
+                            // SumatraPDF semantics; a toast per agent write
+                            // would be noise.
+                          }}
+                          onAnnotationsChange={(items) => {
+                            setPdfAnnotations(items)
+                            // Open the panel the first time a document turns
+                            // out to have highlights, unless the user has
+                            // already said what they want.
+                            if (
+                              items.length > 0 &&
+                              shouldOpenPanelOnLoad({
+                                annotationCount: items.length,
+                                userChoice: pdfPanelUserChoiceRef.current
+                              }) &&
+                              !pdfAnnotationPanelVisible
+                            ) {
+                              setPdfAnnotationPanelVisible(true)
+                            }
+                          }}
                           onStateChange={(state) => {
                             const current = fileMemoryRef.current.get(normalized)
                             const merged = mergePdfReaderState(current, state)
@@ -11106,6 +11331,104 @@ export function ProjectEditor({
                           }}
                         />
                       </div>
+                      {showAddLabelDialog && (
+                        <AddLabelDialog
+                          existing={effectivePdfLabels}
+                          onCancel={() => setShowAddLabelDialog(false)}
+                          onConfirm={(label) => {
+                            const next = [...pdfHighlightLabels, label]
+                            setPdfHighlightLabels(next)
+                            updateUIPreferences({ projectEditorPdfHighlightLabels: next })
+                            perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PDF_HIGHLIGHT_LABELS_CHANGED, {
+                              source: 'add',
+                              customCount: next.length
+                            })
+                            setShowAddLabelDialog(false)
+                          }}
+                        />
+                      )}
+                      {showManageLabelsDialog && (
+                        <ManageLabelsDialog
+                          labels={effectivePdfLabels}
+                          onChange={(customLabels) => {
+                            setPdfHighlightLabels(customLabels)
+                            updateUIPreferences({ projectEditorPdfHighlightLabels: customLabels })
+                            perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_PDF_HIGHLIGHT_LABELS_CHANGED, {
+                              source: 'manage',
+                              customCount: customLabels.length
+                            })
+                          }}
+                          onClose={() => setShowManageLabelsDialog(false)}
+                        />
+                      )}
+                      {!pdfAnnotationPanelVisible && (
+                        <button
+                          type="button"
+                          className="project-editor-annotation-reopen"
+                          title={t('projectEditor.pdfReader.annotations.toggle')}
+                          aria-label={t('projectEditor.pdfReader.annotations.toggle')}
+                          onClick={() => {
+                            pdfPanelUserChoiceRef.current = true
+                            setPdfAnnotationPanelVisible(true)
+                            updateUIPreferences({ projectEditorPdfAnnotationPanelVisible: true })
+                          }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                            <path d="M2 3h12v2H2V3zm0 4h9v2H2V7zm0 4h12v2H2v-2z" />
+                          </svg>
+                          {pdfAnnotations.length > 0 && (
+                            <span className="project-editor-annotation-reopen-count">
+                              {pdfAnnotations.length}
+                            </span>
+                          )}
+                        </button>
+                      )}
+                      {pdfAnnotationPanelVisible && (
+                        <>
+                          <div
+                            className="project-editor-outline-resizer"
+                            onMouseDown={handlePdfAnnotationResizeMouseDown}
+                          />
+                          <div
+                            className="project-editor-annotation-pane"
+                            style={{ width: pdfAnnotationPanelWidth, flex: '0 0 auto' }}
+                          >
+                            <AnnotationPanel
+                              items={pdfAnnotations}
+                              labels={effectivePdfLabels}
+                              sortMode={pdfAnnotationSort}
+                              onSortModeChange={(mode) => {
+                                setPdfAnnotationSort(mode)
+                                updateUIPreferences({ projectEditorPdfAnnotationSort: mode })
+                              }}
+                              density={pdfAnnotationDensity}
+                              onDensityChange={(density) => {
+                                setPdfAnnotationDensity(density)
+                                updateUIPreferences({ projectEditorPdfAnnotationDensity: density })
+                              }}
+                              notesExpanded={pdfAnnotationNotesExpanded}
+                              onNotesExpandedChange={(expanded) => {
+                                setPdfAnnotationNotesExpanded(expanded)
+                                updateUIPreferences({ projectEditorPdfAnnotationNotesExpanded: expanded })
+                              }}
+                              autoScroll={pdfAnnotationAutoScroll}
+                              onAutoScrollChange={(enabled) => {
+                                setPdfAnnotationAutoScroll(enabled)
+                                updateUIPreferences({ projectEditorPdfAnnotationAutoScroll: enabled })
+                              }}
+                              onJump={(id) => pdfReaderRef.current?.goToAnnotation(id)}
+                              onDelete={(id) => pdfReaderRef.current?.deleteAnnotation(id)}
+                              onClose={() => {
+                                pdfPanelUserChoiceRef.current = false
+                                setPdfAnnotationPanelVisible(false)
+                                updateUIPreferences({ projectEditorPdfAnnotationPanelVisible: false })
+                              }}
+                              onAddLabel={() => setShowAddLabelDialog(true)}
+                              onManageLabels={() => setShowManageLabelsDialog(true)}
+                            />
+                          </div>
+                        </>
+                      )}
                       {outlineShowInSplit && (
                         <>
                           <div className="project-editor-outline-resizer" onMouseDown={handleOutlineResizeMouseDown} />
@@ -11121,6 +11444,7 @@ export function ProjectEditor({
                             <OutlinePanel
                               symbols={pdfOutlineSymbols}
                               activeItem={pdfActiveItem}
+                              showLocateButton
                               isLoading={false}
                               filePath={activeFilePath}
                               editor={null}

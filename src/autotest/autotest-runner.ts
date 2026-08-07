@@ -61,6 +61,9 @@ import { testRenderCorruptionStress } from './test-render-corruption-stress'
 import { testImageDiff } from './test-image-diff'
 import { testImageHistoryDiff } from './test-image-history-diff'
 import { testPdfEpubPreview } from './test-pdf-epub-preview'
+import { testPdfTextSelection } from './test-pdf-text-selection'
+import { testPdfHighlight } from './test-pdf-highlight'
+import { testPdfExternalRefresh } from './test-pdf-external-refresh'
 import { testPdfEpubDiff } from './test-pdf-epub-diff'
 import { testProjectEditorMarkdownNavigation } from './test-project-editor-markdown-navigation'
 import { testProjectEditorHtmlPreview } from './test-project-editor-html-preview'
@@ -882,6 +885,36 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testPdfEpubPreview(ctx)
       collectSuiteResults('PdfEpubPreview', results)
       await ctx.reopenProjectEditor('phase5.56-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('pdf-text-selection')) {
+      log('phase5.565:begin')
+      await ctx.reopenProjectEditor('phase5.565-setup')
+      await sleep(300)
+      const results = await testPdfTextSelection(ctx)
+      collectSuiteResults('PdfTextSelection', results)
+      await ctx.reopenProjectEditor('phase5.565-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('pdf-highlight')) {
+      log('phase5.566:begin')
+      await ctx.reopenProjectEditor('phase5.566-setup')
+      await sleep(300)
+      const results = await testPdfHighlight(ctx)
+      collectSuiteResults('PdfHighlight', results)
+      await ctx.reopenProjectEditor('phase5.566-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('pdf-external-refresh')) {
+      log('phase5.567:begin')
+      await ctx.reopenProjectEditor('phase5.567-setup')
+      await sleep(300)
+      const results = await testPdfExternalRefresh(ctx)
+      collectSuiteResults('PdfExternalRefresh', results)
+      await ctx.reopenProjectEditor('phase5.567-cleanup')
       await sleep(500)
     }
 

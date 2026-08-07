@@ -3,13 +3,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { trackFeatureUse } from '../../telemetry/track-feature-use'
+import { perfTraceDiagnostic } from '../../utils/perf-trace'
 import { redispatchPdfHostKey } from '../../utils/pdfHostKey'
+import {
+  resolveViewerTraceEvent,
+  sanitizeTracePayload
+} from '../ProjectEditor/pdfViewerTrace'
+import {
+  diffForFileStatus,
+  emphasisIdsForPanes,
+  type AnnotationDiffEntry,
+  type PdfDiffAnnotation
+} from './annotationDiffModel'
+import {
+  GitPdfAnnotationDiffPanel,
+  type GitPdfAnnotationDiffLabels
+} from './GitPdfAnnotationDiffPanel'
 import { computePaneVisibility, type GitPdfStatus } from './computePaneVisibility'
 import './GitPdfCompare.css'
 
 export type { GitPdfStatus }
+export type { GitPdfAnnotationDiffLabels }
 
 export interface GitPdfCompareLabels {
   statusAdded: string
@@ -40,6 +56,8 @@ interface GitPdfCompareProps {
    */
   viewerUrl: string | null
   labels: GitPdfCompareLabels
+  /** Copy for the annotation-diff sidebar. Absent = sidebar disabled. */
+  annotationDiffLabels?: GitPdfAnnotationDiffLabels
 }
 
 function formatFileSize(bytes: number | undefined): string {
@@ -70,10 +88,17 @@ export function GitPdfCompare({
   modifiedSize,
   filename,
   viewerUrl,
-  labels
+  labels,
+  annotationDiffLabels
 }: GitPdfCompareProps) {
   const originalBlobRef = useRef<string | null>(null)
   const modifiedBlobRef = useRef<string | null>(null)
+
+  // Annotation sets as each side's viewer reports them. `null` = that side
+  // has not broadcast yet; the diff waits for every VISIBLE pane so a
+  // half-loaded comparison never flashes "everything added".
+  const [originalAnnotations, setOriginalAnnotations] = useState<PdfDiffAnnotation[] | null>(null)
+  const [modifiedAnnotations, setModifiedAnnotations] = useState<PdfDiffAnnotation[] | null>(null)
 
   // Product telemetry: count once per PDF-diff view open (mount), never per re-render.
   useEffect(() => { trackFeatureUse('pdf-diff') }, [])
@@ -147,11 +172,30 @@ export function GitPdfCompare({
         target?.contentWindow?.postMessage({ type: 'onward:pdf:theme', vars }, '*')
       } else if (event.data.type === 'onward:pdf:hostKey') {
         redispatchPdfHostKey(event.data as Record<string, unknown>)
+      } else if (event.data.type === 'onward:pdf:annotations') {
+        // Both viewers parse and broadcast the annotations their PDF carries
+        // anyway; catching the message is what powers the diff sidebar — no
+        // extra parsing, no extra transfer.
+        const items = Array.isArray(event.data.items)
+          ? (event.data.items as PdfDiffAnnotation[])
+          : []
+        if (fromOriginal) setOriginalAnnotations(items)
+        else setModifiedAnnotations(items)
+      } else if (event.data.type === 'onward:pdf:trace') {
+        // Same whitelist relay as PdfReader — the compare panes previously
+        // dropped viewer diagnostics on the floor.
+        const traceEvent = resolveViewerTraceEvent(event.data.name)
+        if (traceEvent) perfTraceDiagnostic(traceEvent, sanitizeTracePayload(event.data.payload))
       }
     }
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
   }, [originalSrc, modifiedSrc])
+
+  // A pane whose document was swapped out (new blob URL) must re-earn its
+  // annotation set; stale records would diff against the wrong version.
+  useEffect(() => { setOriginalAnnotations(null) }, [originalSrc])
+  useEffect(() => { setModifiedAnnotations(null) }, [modifiedSrc])
 
   const statusLabel =
     status === 'added' ? labels.statusAdded
@@ -161,12 +205,47 @@ export function GitPdfCompare({
 
   const { showOriginalPane, showModifiedPane, isSinglePane } = computePaneVisibility(status)
 
+  // The diff waits for every visible pane's annotation broadcast; the hidden
+  // side of a single-pane comparison is an empty set by construction.
+  const panesReported =
+    (!showOriginalPane || originalAnnotations !== null) &&
+    (!showModifiedPane || modifiedAnnotations !== null)
+
+  const annotationDiff = useMemo(() => {
+    if (!annotationDiffLabels || !panesReported) return null
+    return diffForFileStatus(status, originalAnnotations ?? [], modifiedAnnotations ?? [])
+  }, [annotationDiffLabels, panesReported, status, originalAnnotations, modifiedAnnotations])
+
+  // Outline the diffed records inside each pane so a jump from the sidebar
+  // lands on something visually distinct.
+  useEffect(() => {
+    if (!annotationDiff) return
+    const emphasis = emphasisIdsForPanes(annotationDiff)
+    originalFrameRef.current?.contentWindow?.postMessage(
+      { type: 'onward:pdf:emphasizeAnnotations', ids: emphasis.original },
+      '*'
+    )
+    modifiedFrameRef.current?.contentWindow?.postMessage(
+      { type: 'onward:pdf:emphasizeAnnotations', ids: emphasis.modified },
+      '*'
+    )
+  }, [annotationDiff])
+
+  const handleDiffJump = (entry: AnnotationDiffEntry) => {
+    const frame = entry.jumpPane === 'original' ? originalFrameRef.current : modifiedFrameRef.current
+    frame?.contentWindow?.postMessage(
+      { type: 'onward:pdf:goToAnnotation', annotationId: entry.annotation.id },
+      '*'
+    )
+  }
+
   return (
     <div className="git-pdf-compare">
       <div className="git-pdf-compare-header">
         <span className={statusClass}>{statusLabel}</span>
         <span className="git-pdf-compare-filename" title={filename}>{filename}</span>
       </div>
+      <div className="git-pdf-compare-body">
       <div className={`git-pdf-compare-panes${isSinglePane ? ' is-single' : ''}`}>
         {showOriginalPane && (
           <div className="git-pdf-compare-pane" data-side="original">
@@ -208,6 +287,14 @@ export function GitPdfCompare({
             )}
           </div>
         )}
+      </div>
+      {annotationDiffLabels && annotationDiff && annotationDiff.entries.length > 0 && (
+        <GitPdfAnnotationDiffPanel
+          result={annotationDiff}
+          labels={annotationDiffLabels}
+          onJump={handleDiffJump}
+        />
+      )}
       </div>
     </div>
   )

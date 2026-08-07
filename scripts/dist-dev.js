@@ -138,6 +138,12 @@ const version = getPackageVersion()
 const productName = `Under Development ${version}-${branch}`
 
 run('node', [join(__dirname, 'check-chinese-comments.js')])
+// The embedded PDF viewer depends on private patches to the vendored pdf.js
+// build (hidden/OCR text marking, Arabic logical order, a null-guard that
+// stops the second PDF in a session from throwing). A dependency bump silently
+// reverts them, and the resulting text-selection defects are subtle enough to
+// ship unnoticed — so the build refuses to package an unpatched bundle.
+run('node', [join(__dirname, 'apply-pdfjs-patches.mjs'), '--check'])
 run('node', [join(__dirname, 'compile-changelog.js')])
 run('pnpm', ['typecheck'])
 // Generate third-party license notices for binary distribution

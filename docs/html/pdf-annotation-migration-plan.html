@@ -1,0 +1,1300 @@
+<!doctype html>
+<!--
+  SPDX-FileCopyrightText: 2026 OPPO
+  SPDX-License-Identifier: Apache-2.0
+
+  Dark PDF Reader → Onward Project Editor 功能迁移分析与选择清单。
+  这是一份「决策前」文档：先罗列两边现状、完整功能清单、三种存储策略对比，
+  由用户确认后才进入实现阶段。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF 标注功能迁移：分析与选择清单</title>
+    <style>
+      /* Jump without animation — hard requirement. */
+      html { scroll-behavior: auto; }
+
+      :root {
+        --bg: #0d1117;
+        --bg-soft: #131a23;
+        --panel: #161d27;
+        --panel-2: #1b2430;
+        --line: #263140;
+        --line-soft: #1e2937;
+        --text: #e6edf3;
+        --muted: #9aa8b8;
+        --dim: #6e7d8f;
+        --accent: #58a6ff;
+        --accent-2: #7ee787;
+        --warn: #e3b341;
+        --danger: #f85149;
+        --purple: #bc8cff;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.75;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* ---------- Fixed left TOC ---------- */
+      #toc {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 288px;
+        height: 100vh;
+        overflow-y: auto;
+        background: var(--bg-soft);
+        border-right: 1px solid var(--line);
+        padding: 24px 16px 40px;
+        z-index: 50;
+      }
+      #toc .toc-title {
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--dim);
+        margin: 0 0 14px 10px;
+      }
+      #toc a {
+        display: block;
+        color: var(--muted);
+        text-decoration: none;
+        padding: 6px 10px;
+        border-radius: 6px;
+        border-left: 2px solid transparent;
+        font-size: 13.5px;
+        line-height: 1.5;
+      }
+      #toc a:hover { background: rgba(88, 166, 255, 0.1); color: var(--text); }
+      #toc a.active {
+        background: rgba(88, 166, 255, 0.14);
+        border-left-color: var(--accent);
+        color: var(--text);
+        font-weight: 600;
+      }
+      #toc a.lvl2 { padding-left: 24px; font-size: 12.5px; color: var(--dim); }
+      #toc a.lvl2:hover, #toc a.lvl2.active { color: var(--text); }
+
+      /* ---------- Main ---------- */
+      main {
+        margin-left: 288px;
+        padding: 48px 56px 120px;
+        max-width: 1080px;
+      }
+
+      h1 {
+        font-size: 30px;
+        line-height: 1.3;
+        margin: 0 0 8px;
+        letter-spacing: -0.01em;
+      }
+      .subtitle { color: var(--muted); margin: 0 0 32px; font-size: 15px; }
+
+      h2 {
+        font-size: 22px;
+        margin: 56px 0 16px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--line);
+        scroll-margin-top: 20px;
+      }
+      h3 {
+        font-size: 17px;
+        margin: 32px 0 12px;
+        color: var(--text);
+        scroll-margin-top: 20px;
+      }
+      h4 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); }
+
+      p { margin: 12px 0; }
+      ul, ol { margin: 12px 0; padding-left: 22px; }
+      li { margin: 6px 0; }
+      code {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        background: var(--panel-2);
+        border: 1px solid var(--line-soft);
+        border-radius: 4px;
+        padding: 1px 5px;
+        color: #a5d6ff;
+      }
+      pre {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 16px 18px;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        line-height: 1.7;
+      }
+      pre code { background: none; border: none; padding: 0; color: var(--text); }
+      .k { color: var(--purple); }
+      .s { color: #a5d6ff; }
+      .c { color: var(--dim); font-style: italic; }
+      .n { color: var(--accent-2); }
+
+      /* ---------- Cards ---------- */
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 20px 22px;
+        margin: 18px 0;
+      }
+      .card > h4:first-child { margin-top: 0; }
+      .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+      @media (max-width: 1100px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+      /* ---------- Callouts ---------- */
+      .callout {
+        border-left: 3px solid var(--accent);
+        background: rgba(88, 166, 255, 0.07);
+        border-radius: 0 10px 10px 0;
+        padding: 14px 18px;
+        margin: 18px 0;
+      }
+      .callout.warn { border-left-color: var(--warn); background: rgba(227, 179, 65, 0.08); }
+      .callout.danger { border-left-color: var(--danger); background: rgba(248, 81, 73, 0.08); }
+      .callout.ok { border-left-color: var(--accent-2); background: rgba(126, 231, 135, 0.07); }
+      .callout .lead { font-weight: 700; display: block; margin-bottom: 4px; }
+
+      /* ---------- Badges ---------- */
+      .badge {
+        display: inline-block;
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        padding: 2px 9px;
+        border-radius: 999px;
+        white-space: nowrap;
+        vertical-align: middle;
+      }
+      .b-must { background: rgba(126, 231, 135, 0.16); color: var(--accent-2); border: 1px solid rgba(126, 231, 135, 0.35); }
+      .b-rec  { background: rgba(88, 166, 255, 0.16); color: var(--accent); border: 1px solid rgba(88, 166, 255, 0.35); }
+      .b-ask  { background: rgba(227, 179, 65, 0.16); color: var(--warn); border: 1px solid rgba(227, 179, 65, 0.35); }
+      .b-skip { background: rgba(248, 81, 73, 0.14); color: var(--danger); border: 1px solid rgba(248, 81, 73, 0.32); }
+      .b-have { background: rgba(188, 140, 255, 0.15); color: var(--purple); border: 1px solid rgba(188, 140, 255, 0.33); }
+
+      /* ---------- Tables ---------- */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 16px 0;
+        font-size: 13.5px;
+      }
+      th, td {
+        border: 1px solid var(--line);
+        padding: 9px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--panel-2);
+        font-weight: 700;
+        color: var(--muted);
+        font-size: 12.5px;
+        letter-spacing: 0.03em;
+      }
+      tbody tr:nth-child(odd) { background: rgba(255, 255, 255, 0.015); }
+      td.num { font-family: var(--mono); color: var(--dim); text-align: center; width: 46px; }
+      td.center { text-align: center; }
+
+      /* ---------- Diagram ---------- */
+      .diagram {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 22px;
+        margin: 20px 0;
+        overflow-x: auto;
+      }
+      .diagram-title {
+        font-size: 12px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--dim);
+        margin-bottom: 14px;
+      }
+      .flow { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; }
+      .node {
+        flex: 1 1 150px;
+        min-width: 150px;
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 12px 14px;
+      }
+      .node .nt { font-weight: 700; font-size: 13.5px; margin-bottom: 5px; }
+      .node .nd { font-size: 12px; color: var(--muted); line-height: 1.55; }
+      .node.accent { border-color: rgba(88, 166, 255, 0.45); }
+      .node.green { border-color: rgba(126, 231, 135, 0.4); }
+      .node.warn { border-color: rgba(227, 179, 65, 0.4); }
+      .arrow {
+        display: flex;
+        align-items: center;
+        color: var(--dim);
+        font-size: 20px;
+        padding: 0 2px;
+      }
+
+      /* ---------- Bars ---------- */
+      .bar-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; font-size: 13px; }
+      .bar-label { width: 210px; flex: none; color: var(--muted); }
+      .bar-track { flex: 1; height: 16px; background: var(--panel-2); border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }
+      .bar-fill { height: 100%; border-radius: 8px; }
+      .bar-val { width: 96px; flex: none; text-align: right; font-family: var(--mono); font-size: 12px; color: var(--dim); }
+
+      /* ---------- Before/After ---------- */
+      .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 18px 0; }
+      @media (max-width: 1100px) { .ba { grid-template-columns: 1fr; } }
+      .ba-pane { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+      .ba-head { padding: 9px 16px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; }
+      .ba-pane.before .ba-head { background: rgba(248, 81, 73, 0.13); color: var(--danger); }
+      .ba-pane.after .ba-head { background: rgba(126, 231, 135, 0.13); color: var(--accent-2); }
+      .ba-body { padding: 14px 18px; background: var(--panel); font-size: 13.5px; }
+      .ba-body ul { padding-left: 20px; margin: 6px 0; }
+
+      /* ---------- Footer meta ---------- */
+      .meta {
+        margin-top: 80px;
+        padding-top: 26px;
+        border-top: 2px solid var(--line);
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .meta table { font-size: 12.5px; }
+      .pill-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+      .pill {
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 3px 12px;
+        font-size: 12px;
+        color: var(--muted);
+        font-family: var(--mono);
+      }
+    </style>
+  </head>
+  <body>
+    <nav id="toc">
+      <p class="toc-title">目录</p>
+      <a href="#s1">1. 一句话结论</a>
+      <a href="#s2">2. 两边现状对比</a>
+      <a href="#s2-1" class="lvl2">2.1 Onward 现在的 PDF 通路</a>
+      <a href="#s2-2" class="lvl2">2.2 Dark PDF Reader 的规模</a>
+      <a href="#s2-3" class="lvl2">2.3 已经存在的一个缺陷</a>
+      <a href="#s3">3. 完整功能清单</a>
+      <a href="#s3-a" class="lvl2">A. 阅读与浏览</a>
+      <a href="#s3-b" class="lvl2">B. 文本选择引擎</a>
+      <a href="#s3-c" class="lvl2">C. 高亮与标注</a>
+      <a href="#s3-d" class="lvl2">D. 持久化与保存</a>
+      <a href="#s3-e" class="lvl2">E. 浏览器外壳功能</a>
+      <a href="#s4">4. 需要你选择的清单</a>
+      <a href="#s5">5. 存储策略：三选一</a>
+      <a href="#s5-1" class="lvl2">5.1 当前架构</a>
+      <a href="#s5-2" class="lvl2">5.2 方案 A：写回 PDF</a>
+      <a href="#s5-3" class="lvl2">5.3 方案 B：旁车文件</a>
+      <a href="#s5-4" class="lvl2">5.4 方案 C：AppState</a>
+      <a href="#s5-5" class="lvl2">5.5 对比与推荐</a>
+      <a href="#s5-6" class="lvl2">5.6 用户决策记录 ✅</a>
+      <a href="#s6">6. 技术难点</a>
+      <a href="#s6-1" class="lvl2">6.1 pdf.js 需要打补丁</a>
+      <a href="#s6-2" class="lvl2">6.2 iframe 边界</a>
+      <a href="#s6-3" class="lvl2">6.3 没有 File System Access</a>
+      <a href="#s6-4" class="lvl2">6.4 跨平台</a>
+      <a href="#s6-5" class="lvl2">6.5 许可证</a>
+      <a href="#s7">7. 测试计划草案</a>
+      <a href="#s8">8. 分期实施建议</a>
+      <a href="#s10">10. 迁移清单：逐字 / 改造 / 未迁移</a>
+      <a href="#s10-1" class="lvl2">10.1 逐字迁移</a>
+      <a href="#s10-2" class="lvl2">10.2 迁移但改造过</a>
+      <a href="#s10-3" class="lvl2">10.3 完全没有迁移</a>
+      <a href="#s9">9. 文档元数据与更新历史</a>
+    </nav>
+
+    <main>
+      <h1>PDF 标注功能迁移：分析与选择清单</h1>
+      <p class="subtitle">
+        Dark PDF Reader v0.3.16 → Onward Project Editor 内置 PDF 阅读器 ·
+        决策前文档，等待确认后再进入实现
+      </p>
+
+      <!-- ============================================================ -->
+      <h2 id="s1">1. 一句话结论</h2>
+
+      <div class="callout ok">
+        <span class="lead">Onward 里的 PDF 阅读器，本来就是 Dark PDF Reader 早期版本的一次「裁剪移植」。</span>
+        <code>resources/pdfjs/app/viewer.js</code> 文件头就写着「Adapted from the Dark_PDF_Reader Chrome extension
+        reference」。所以这次不是从零对接两套代码，而是<strong>把同一份代码的新版本重新裁剪一次</strong>——
+        路径是通的，难点在于新增的部分体量很大，而且底层依赖了对 pdf.js 的私有补丁。
+      </div>
+
+      <div class="grid-3">
+        <div class="card">
+          <h4 style="color: var(--accent-2)">好消息</h4>
+          <p style="font-size: 13.5px; margin: 0">
+            两边用的是同一个 pdf.js 版本（<code>3.11.174</code>），viewer 的骨架、消息协议、状态记忆结构都对得上，
+            高亮渲染层是独立的 <code>.highlightLayer</code>，不侵入 pdf.js 自身。
+          </p>
+        </div>
+        <div class="card">
+          <h4 style="color: var(--warn)">代价</h4>
+          <p style="font-size: 13.5px; margin: 0">
+            要迁移的新代码约 <strong>6000 行 JS + 1200 行 CSS</strong>。其中「文本选择引擎」一个模块就占了
+            2500 行，而且它是高亮功能的<strong>前置条件</strong>——选不准，就框不准。
+          </p>
+        </div>
+        <div class="card">
+          <h4 style="color: var(--danger)">必须先定的事</h4>
+          <p style="font-size: 13.5px; margin: 0">
+            标注数据存在哪里，是一个<strong>策略级决定</strong>（数据格式 + 持久化 schema），
+            按项目规范必须先由你拍板，不能由我单方面写进代码。见第 5 节。
+          </p>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="s2">2. 两边现状对比</h2>
+
+      <h3 id="s2-1">2.1 Onward 现在的 PDF 通路</h3>
+
+      <div class="diagram">
+        <div class="diagram-title">当前链路</div>
+        <div class="flow">
+          <div class="node">
+            <div class="nt">ProjectEditor.tsx</div>
+            <div class="nd">判定 <code>isPdf</code>，渲染分栏：左阅读器 + 右 OutlinePanel</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="node accent">
+            <div class="nt">PdfReader.tsx</div>
+            <div class="nd">298 行。一个 <code>&lt;iframe&gt;</code> + postMessage 桥：主题、i18n、状态恢复、目录、按键转发</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="node accent">
+            <div class="nt">viewer.html / viewer.js</div>
+            <div class="nd">798 行。<code>file://</code> 加载，沙箱 iframe</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="node">
+            <div class="nt">pdf.js 3.11.174</div>
+            <div class="nd"><code>resources/pdfjs/</code>，未打任何补丁</div>
+          </div>
+        </div>
+      </div>
+
+      <p>已具备的能力：翻页、缩放（含适应宽度/页面）、搜索、暗色反色与临时关闭、加密 PDF 密码、错误分类提示、
+        目录树（提取后交给宿主的 <code>OutlinePanel</code> 渲染）、按文件记忆阅读位置（页码 + 滚动 + 缩放）、
+        <code>Cmd+P</code> / <code>Esc</code> 向宿主转发。</p>
+
+      <p>缺失的能力：<strong>任何标注相关的东西都没有</strong>——没有高亮、没有备注、没有标注列表、没有保存，
+        文本选择也只是 pdf.js 的默认行为。</p>
+
+      <h3 id="s2-2">2.2 Dark PDF Reader 的规模</h3>
+
+      <div class="bar-row">
+        <div class="bar-label">viewer.js（阅读器主体）</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 100%; background: linear-gradient(90deg, #58a6ff, #bc8cff)"></div></div>
+        <div class="bar-val">10191 行</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">└ 文本选择引擎</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 24%; background: #e3b341"></div></div>
+        <div class="bar-val">~2500 行</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">└ 高亮 / 标注 / 持久化</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 30%; background: #7ee787"></div></div>
+        <div class="bar-val">~3100 行</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">└ 阅读 / 目录 / 缩放（部分已有）</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 18%; background: #58a6ff"></div></div>
+        <div class="bar-val">~1800 行</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">└ 浏览器外壳（不迁移）</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 28%; background: #6e7d8f"></div></div>
+        <div class="bar-val">~2800 行</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">viewer.css</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 15%; background: #bc8cff"></div></div>
+        <div class="bar-val">1549 行</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">background.js（Service Worker，不迁移）</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 18%; background: #6e7d8f"></div></div>
+        <div class="bar-val">1819 行</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">options.js（设置页）</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 10%; background: #e3b341"></div></div>
+        <div class="bar-val">1042 行</div>
+      </div>
+
+      <h3 id="s2-3">2.3 已经存在的一个缺陷</h3>
+
+      <div class="callout danger">
+        <span class="lead">Onward 当前的 viewer.css 里有一行会破坏文本选择精度的样式。</span>
+        <code>resources/pdfjs/app/viewer.css:116</code> 写着
+        <code>.pdfViewer .textLayer :is(span, br) { letter-spacing: 1px; }</code>。
+        这行改变了 textLayer 的文字度量，导致文本层几何和实际渲染出来的字形对不上——
+        Dark PDF Reader 在做文本选择精度攻关时，<strong>第一步就是把这行删掉</strong>
+        （见 <code>docs/TEXT_SELECTION_ADVERSARIAL.md</code>「已移除会改变 textLayer 几何的 letter-spacing」）。
+        也就是说，Onward 现在选中文字时看到的高亮框和实际选中的内容本来就有偏差，只是没有高亮功能所以没人注意到。
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="s3">3. 完整功能清单</h2>
+
+      <p>下面按五个层次穷举 Dark PDF Reader v0.3.16 的能力。徽章含义：</p>
+      <div class="pill-list" style="margin-bottom: 18px">
+        <span class="badge b-have">Onward 已有</span>
+        <span class="badge b-must">必迁（你已明确要求）</span>
+        <span class="badge b-rec">建议迁</span>
+        <span class="badge b-ask">需你决定</span>
+        <span class="badge b-skip">建议不迁</span>
+      </div>
+
+      <h3 id="s3-a">A. 阅读与浏览</h3>
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>功能</th><th style="width: 110px">状态</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="num">A1</td><td>整页暗色反色 + 临时关闭改色</td><td class="center"><span class="badge b-have">已有</span></td><td>Onward 已实现，且已接宿主主题变量</td></tr>
+          <tr><td class="num">A2</td><td>翻页、页码跳转、上一页/下一页</td><td class="center"><span class="badge b-have">已有</span></td><td>—</td></tr>
+          <tr><td class="num">A3</td><td>缩放：适应宽度 / 适应页面 / 固定档位</td><td class="center"><span class="badge b-have">已有</span></td><td>—</td></tr>
+          <tr><td class="num">A4</td><td>自定义缩放百分比输入框（25%–500%）</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>DPR 新增。输入 <code>137%</code> 直接生效，带校验和边界钳制</td></tr>
+          <tr><td class="num">A5</td><td>手动缩放历史（下拉里的「手动历史」分组，最近 10 条）</td><td class="center"><span class="badge b-ask">需决定</span></td><td>DPR 新增。价值中等，实现要额外持久化一份历史</td></tr>
+          <tr><td class="num">A6</td><td>搜索文本（高亮、上/下一个、计数）</td><td class="center"><span class="badge b-have">已有</span></td><td>—</td></tr>
+          <tr><td class="num">A7</td><td>文档目录侧栏</td><td class="center"><span class="badge b-have">已有</span></td><td>Onward 用宿主侧 <code>OutlinePanel</code>，设计比 DPR 的 viewer 内目录更统一</td></tr>
+          <tr><td class="num">A8</td><td>目录随滚动自动跟随高亮当前章节</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>DPR 有 <code>syncOutlineToLocation</code> 的完整实现；Onward 现在只在翻页时更新，滚动中不跟随</td></tr>
+          <tr><td class="num">A9</td><td>目录「聚焦当前章节」按钮 + 手动浏览后暂停自动跟随</td><td class="center"><span class="badge b-ask">需决定</span></td><td>A8 的配套交互，要一起做才完整</td></tr>
+          <tr><td class="num">A10</td><td>目录侧栏宽度可拖动</td><td class="center"><span class="badge b-have">已有</span></td><td>Onward 的 <code>project-editor-outline-resizer</code> 已实现</td></tr>
+          <tr><td class="num">A11</td><td>有目录时自动展开并适应宽度</td><td class="center"><span class="badge b-ask">需决定</span></td><td>DPR 是一个设置项；Onward 的目录展开由宿主统一管，可能冲突</td></tr>
+          <tr><td class="num">A12</td><td>记住阅读位置（页码 + 缩放 + 滚动）</td><td class="center"><span class="badge b-have">已有</span></td><td>Onward 用 AppState 按文件记忆，比 DPR 的指纹方案更稳</td></tr>
+          <tr><td class="num">A13</td><td>加密 PDF 密码输入</td><td class="center"><span class="badge b-have">已有</span></td><td>—</td></tr>
+          <tr><td class="num">A14</td><td>损坏 PDF 的分类错误提示</td><td class="center"><span class="badge b-have">已有</span></td><td>—</td></tr>
+          <tr><td class="num">A15</td><td>暗色主题预设（5 种）+ 自定义底色 RGB/HEX</td><td class="center"><span class="badge b-skip">建议不迁</span></td><td>Onward 有自己的主题系统，PDF 底色应该跟随宿主主题，不该单独一套</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="s3-b">B. 文本选择引擎 <span class="badge b-must">必迁</span></h3>
+
+      <div class="callout warn">
+        <span class="lead">这一层不是「可选增强」，是高亮功能的地基。</span>
+        高亮是用「选区的每一行矩形」换算成 PDF 用户空间的 QuadPoints 存下来的。
+        选区不准 = 高亮框不准 = 存进 PDF 的坐标不准。DPR 为此写了一整套对抗性测试
+        （<code>docs/TEXT_SELECTION_ADVERSARIAL.md</code>），强制验收条件是
+        <code>视觉高亮 === Selection.toString() === 剪贴板文本 === 期望文本</code> 四者完全一致。
+      </div>
+
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>功能</th><th style="width: 110px">状态</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="num">B1</td><td>删除 <code>letter-spacing: 1px</code>，恢复 pdf.js 原生 textLayer 几何</td><td class="center"><span class="badge b-must">必迁</span></td><td>见 2.3。这是修 Onward 的既有缺陷</td></tr>
+          <tr><td class="num">B2</td><td>拖选：<code>caretRangeFromPoint</code> 映射 + 几何 fallback</td><td class="center"><span class="badge b-must">必迁</span></td><td>浏览器 API 不可用时退回自己算字形几何</td></tr>
+          <tr><td class="num">B3</td><td>拖到边缘自动滚动（垂直 + 水平）</td><td class="center"><span class="badge b-must">必迁</span></td><td>适应宽度下可以从第 1 页拖到第 3 页</td></tr>
+          <tr><td class="num">B4</td><td>跨页选区 overlay（多页连选的视觉高亮）</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">B5</td><td>字素簇（grapheme）边界：<code>Intl.Segmenter</code> + 代理对/组合符 fallback</td><td class="center"><span class="badge b-must">必迁</span></td><td>避免把一个 emoji / 带音标字符拖成半个</td></tr>
+          <tr><td class="num">B6</td><td>连字（ligature）作为一个选择单元：<code>ffi</code> / <code>ff</code> / <code>fi</code> / <code>fl</code> / 阿拉伯语 lam-alef</td><td class="center"><span class="badge b-must">必迁</span></td><td>学术 PDF 极常见</td></tr>
+          <tr><td class="num">B7</td><td>标注遮挡判定：表单控件 / FreeText / Stamp / Redact 等阻断穿透选择</td><td class="center"><span class="badge b-must">必迁</span></td><td>否则会选中并复制出用户看不见的底层文字</td></tr>
+          <tr><td class="num">B8</td><td>透明标注穿透：Highlight / Underline / 透明 Square 等允许选中下方正文</td><td class="center"><span class="badge b-must">必迁</span></td><td>B7 的反面，两者必须成对</td></tr>
+          <tr><td class="num">B9</td><td>隐藏 / OCR 文本处理（<code>Tr=3</code>、alpha=0）</td><td class="center"><span class="badge b-must">必迁</span></td><td><strong>依赖 pdf.js worker 补丁</strong>，见 6.1</td></tr>
+          <tr><td class="num">B10</td><td>阿拉伯语 CID 保留逻辑顺序（不被 bidi 翻成视觉顺序）</td><td class="center"><span class="badge b-ask">需决定</span></td><td><strong>依赖 worker 补丁</strong>。如果你的 PDF 里没有阿拉伯语，可以不打这个补丁</td></tr>
+          <tr><td class="num">B11</td><td><code>copy</code> 事件接管：剪贴板严格等于选区文本</td><td class="center"><span class="badge b-must">必迁</span></td><td>避免连字被默认逻辑改写成别的字符串</td></tr>
+          <tr><td class="num">B12</td><td>点击任意位置清空选区 + 拖选后的合成 click 抑制</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">B13</td><td>annotation link 覆盖区：拖动可选文本、单击仍然跳转</td><td class="center"><span class="badge b-must">必迁</span></td><td>目录页 link 覆盖正文时的关键行为</td></tr>
+          <tr><td class="num">B14</td><td>换文档 / 搜索 / 缩放后清理旧选区与 overlay</td><td class="center"><span class="badge b-must">必迁</span></td><td>生命周期正确性</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="s3-c">C. 高亮与标注 <span class="badge b-must">必迁</span></h3>
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>功能</th><th style="width: 110px">状态</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="num">C1</td><td>高亮标签体系（颜色 + 名称），默认 4 个：核心论点 / 存疑 / 方法 / 引用出处</td><td class="center"><span class="badge b-must">必迁</span></td><td>默认标签名要走 i18n（en + zh-CN）</td></tr>
+          <tr><td class="num">C2</td><td>选区就近调色板：选中文字后在页面上弹出，跟随页面滚动</td><td class="center"><span class="badge b-must">必迁</span></td><td>DPR 迭代到第 3 版的形态，取代了固定工具栏</td></tr>
+          <tr><td class="num">C3</td><td>数字键 <code>1</code>–<code>9</code> 快速上色，<code>Esc</code> 关闭调色板</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">C4</td><td>从选区创建高亮：按行合并矩形 → QuadPoints</td><td class="center"><span class="badge b-must">必迁</span></td><td>跨页选区会拆成每页一条记录，共享 <code>groupId</code></td></tr>
+          <tr><td class="num">C5</td><td>页面内高亮渲染层（<code>.highlightLayer</code>）</td><td class="center"><span class="badge b-must">必迁</span></td><td>独立于 pdf.js 的 annotationLayer，缩放时按 viewport 重算</td></tr>
+          <tr><td class="num">C6</td><td>有备注的高亮显示 <code>◆</code> 标记</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">C7</td><td>悬停时只显示轻量提示，不弹备注全文大框</td><td class="center"><span class="badge b-must">必迁</span></td><td>DPR 需求 #1 的结论</td></tr>
+          <tr><td class="num">C8</td><td>单击高亮 → 重新打开调色板改标签；双击 → 打开备注编辑器</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">C9</td><td>备注编辑弹窗：标签徽章 + 原文片段 + 输入框 + 删除按钮</td><td class="center"><span class="badge b-must">必迁</span></td><td>点击空白自动关闭</td></tr>
+          <tr><td class="num">C10</td><td>备注弹窗尺寸可拖动且记忆</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>DPR 需求 #15。只在从右下角 resize 区起拖时才写入，避免误存</td></tr>
+          <tr><td class="num">C11</td><td>删除高亮</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">C12</td><td>标注列表侧栏（右侧）</td><td class="center"><span class="badge b-must">必迁</span></td><td>Onward 里放哪儿要定：见第 4 节 Q</td></tr>
+          <tr><td class="num">C13</td><td>列表排序：标注时间 / 页码顺序</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">C14</td><td>列表按标签筛选</td><td class="center"><span class="badge b-must">必迁</span></td><td>—</td></tr>
+          <tr><td class="num">C15</td><td>点击列表条目跳转，且跳转对齐逻辑与目录跳转完全一致</td><td class="center"><span class="badge b-must">必迁</span></td><td>DPR 用 <code>scrollPageIntoView</code> + <code>XYZ</code> destination，有数值对照测试</td></tr>
+          <tr><td class="num">C16</td><td>列表密度：舒适 / 紧凑</td><td class="center"><span class="badge b-ask">需决定</span></td><td>锦上添花</td></tr>
+          <tr><td class="num">C17</td><td>新增标注后自动滚到列表底部（可关）</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>—</td></tr>
+          <tr><td class="num">C18</td><td>备注默认全部展开，单条折叠状态不被排序/筛选/保存重置</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>DPR 需求 #21，踩过坑才做对的</td></tr>
+          <tr><td class="num">C19</td><td>条目右键/菜单：复制高亮 / 复制备注 / 两者都复制 + 状态提示</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>Onward 的右键菜单有统一 CSS + SVG 图标规范，需要重做样式</td></tr>
+          <tr><td class="num">C20</td><td>列表侧栏宽度可拖动</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>—</td></tr>
+          <tr><td class="num">C21</td><td>侧栏默认展开策略（本地/远程、有无既有标注、首次新增时自动展开）</td><td class="center"><span class="badge b-ask">需决定</span></td><td>DPR 的规则围绕「本地 vs 网络 PDF」设计，Onward 只有本地文件，规则要简化</td></tr>
+          <tr><td class="num">C22</td><td>新增标签（名称 + 颜色）</td><td class="center"><span class="badge b-ask">需决定</span></td><td>DPR 用 <code>window.prompt</code>，Onward 里要做成正经对话框或设置页</td></tr>
+          <tr><td class="num">C23</td><td>标题旁「* 未保存」红色标记</td><td class="center"><span class="badge b-ask">需决定</span></td><td>取决于第 5 节的保存策略；如果自动保存做得够稳，这个标记可以不要</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="s3-d">D. 持久化与保存</h3>
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>功能</th><th style="width: 110px">状态</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="num">D1</td><td>标注写进 PDF 文件本体（标准 <code>/Highlight</code> + <code>/QuadPoints</code>）</td><td class="center"><span class="badge b-ask">需决定</span></td><td>第 5 节方案 A 的核心。任何 PDF 阅读器都能看到高亮</td></tr>
+          <tr><td class="num">D2</td><td>私有识别键 <code>/CYY_MARK*</code> + 内嵌 <code>CYY_MARK-manifest.json</code></td><td class="center"><span class="badge b-ask">需决定</span></td><td>键名要不要改成 Onward 自己的前缀，也需要你定</td></tr>
+          <tr><td class="num">D3</td><td>从 PDF 反向读回标注（换台电脑也能看到）</td><td class="center"><span class="badge b-ask">需决定</span></td><td>与 D1 成对</td></tr>
+          <tr><td class="num">D4</td><td>工作副本（编辑时先存本地，不依赖文件写权限）</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>Electron 里可以简化——直接写 sidecar 或 AppState</td></tr>
+          <tr><td class="num">D5</td><td>手动保存 <code>Cmd/Ctrl+S</code></td><td class="center"><span class="badge b-ask">需决定</span></td><td>—</td></tr>
+          <tr><td class="num">D6</td><td>自动保存（2 秒轮询 + 800ms 静默窗口 + 失败退避 15 秒）</td><td class="center"><span class="badge b-ask">需决定</span></td><td>—</td></tr>
+          <tr><td class="num">D7</td><td>冲突分支：多标签页/多设备并发修改时保留最多 3 份备份并可恢复</td><td class="center"><span class="badge b-skip">建议不迁</span></td><td>DPR 需要它是因为同一个 PDF 可能在多个浏览器标签页里开着。Onward 的 Project Editor 同一文件同一时刻只有一个编辑面，复杂度不划算</td></tr>
+          <tr><td class="num">D8</td><td>抑制 pdf.js 对「我们自己写的标注」的原生渲染与默认大弹窗</td><td class="center"><span class="badge b-must">必迁</span></td><td>否则保存后重开会看到双份高亮 + pdf.js 的丑弹窗。仅在选了方案 A 时需要</td></tr>
+          <tr><td class="num">D9</td><td>清理外部删除标注后残留的原生高亮层</td><td class="center"><span class="badge b-rec">建议迁</span></td><td>D8 的边界情况</td></tr>
+          <tr><td class="num">D10</td><td>Python 提取脚本 <code>extract_annotations.py</code></td><td class="center"><span class="badge b-ask">需决定</span></td><td>你自己的下游工作流可能在用；迁不迁看你</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="s3-e">E. 浏览器外壳功能</h3>
+      <div class="callout">
+        <span class="lead">这一整层基本都不适用于 Onward。</span>
+        它们要么依赖 Chrome 扩展 API（<code>chrome.storage</code> / <code>chrome.tabs</code> / <code>chrome.contextMenus</code> /
+        <code>declarativeNetRequest</code>），要么在 Onward 里已经由文件树/标签页体系覆盖了。
+      </div>
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>功能</th><th style="width: 110px">建议</th><th>理由</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="num">E1</td><td>Save to GitHub Issue</td><td class="center"><span class="badge b-skip">不迁</span></td><td><strong>你已明确排除</strong></td></tr>
+          <tr><td class="num">E2</td><td>自动接管网页 PDF、白名单/黑名单</td><td class="center"><span class="badge b-skip">不迁</span></td><td>浏览器概念，Onward 里不存在</td></tr>
+          <tr><td class="num">E3</td><td>右键菜单「用插件打开 PDF 链接」</td><td class="center"><span class="badge b-skip">不迁</span></td><td>同上</td></tr>
+          <tr><td class="num">E4</td><td>「非 DarkMode 打开」/「返回原网页」</td><td class="center"><span class="badge b-skip">不迁</span></td><td>同上</td></tr>
+          <tr><td class="num">E5</td><td>通过 Finder 打开 / 通过 URL 打开 / 拖文件进窗口</td><td class="center"><span class="badge b-skip">不迁</span></td><td>Onward 从文件树打开，入口已存在</td></tr>
+          <tr><td class="num">E6</td><td>「最近打开」二级菜单（默认 20 条）</td><td class="center"><span class="badge b-skip">不迁</span></td><td>Onward 有自己的最近文件 / 标签页体系</td></tr>
+          <tr><td class="num">E7</td><td>复制 PDF 标题 / arXiv 链接 / PDF 链接 / 路径</td><td class="center"><span class="badge b-ask">需决定</span></td><td>「复制标题」「复制路径」在 Onward 里也说得通，可以并进文件树右键菜单</td></tr>
+          <tr><td class="num">E8</td><td>结构化诊断日志（JSONL 导出 + 镜像到固定文件）</td><td class="center"><span class="badge b-skip">不迁</span></td><td>Onward 有 perf-trace + 诊断包体系，应该复用而不是再造一套</td></tr>
+          <tr><td class="num">E9</td><td>浏览器级自定义快捷键（<code>chrome.commands</code>）</td><td class="center"><span class="badge b-skip">不迁</span></td><td>Onward 的快捷键体系独立</td></tr>
+          <tr><td class="num">E10</td><td>设置页：配置导出 / 导入 JSON</td><td class="center"><span class="badge b-skip">不迁</span></td><td>Onward 设置有自己的持久化</td></tr>
+          <tr><td class="num">E11</td><td>紧凑工具栏开关</td><td class="center"><span class="badge b-ask">需决定</span></td><td>Onward 的 PDF 工具栏空间比浏览器整页阅读器紧张，可能反而更需要</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ============================================================ -->
+      <h2 id="s4">4. 需要你选择的清单</h2>
+
+      <p>把上面标了 <span class="badge b-ask">需决定</span> 的项集中在这里。默认按「建议」执行，
+        你只需要告诉我哪几条要改。</p>
+
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>项目</th><th style="width: 120px">我的建议</th><th>如果你选反面</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="num">A5</td><td>手动缩放历史</td><td class="center">不迁</td><td>+1 份持久化 + 下拉分组渲染，约 150 行</td></tr>
+          <tr><td class="num">A9</td><td>目录「聚焦当前章节」按钮 + 暂停自动跟随</td><td class="center">迁</td><td>与 A8 拆开会让自动跟随变得难用</td></tr>
+          <tr><td class="num">A11</td><td>有目录时自动展开 + 适应宽度</td><td class="center">不迁</td><td>会和 Onward 宿主的目录展开记忆打架</td></tr>
+          <tr><td class="num">B10</td><td>阿拉伯语逻辑顺序（需 pdf.js worker 补丁）</td><td class="center">迁</td><td>不迁就少改一处 vendor，但阿拉伯语 PDF 会显示成反序</td></tr>
+          <tr><td class="num">C16</td><td>标注列表密度：舒适 / 紧凑</td><td class="center">迁</td><td>纯 CSS，成本很低</td></tr>
+          <tr><td class="num">C21</td><td>标注列表默认展开策略</td><td class="center">简化为「有标注就展开」</td><td>DPR 的本地/远程分支在 Onward 无意义</td></tr>
+          <tr><td class="num">C22</td><td>新增自定义标签</td><td class="center">迁，但做成正规对话框</td><td><code>window.prompt</code> 在 Electron 里体验差且不符合项目 UI 规范</td></tr>
+          <tr><td class="num">C23</td><td>「* 未保存」标记</td><td class="center">看第 5 节结论</td><td>选了自动保存就不需要</td></tr>
+          <tr><td class="num">D1/D2/D3</td><td>写回 PDF 文件本体</td><td class="center"><strong>见第 5 节，必须你拍板</strong></td><td>—</td></tr>
+          <tr><td class="num">D5/D6</td><td>手动保存 vs 自动保存</td><td class="center"><strong>见第 5 节</strong></td><td>—</td></tr>
+          <tr><td class="num">D7</td><td>冲突分支备份</td><td class="center">不迁</td><td>约 600 行状态机 + 恢复 UI，Onward 场景用不上</td></tr>
+          <tr><td class="num">D10</td><td>Python 提取脚本</td><td class="center">迁（只是一个脚本）</td><td>取决于你的下游工作流</td></tr>
+          <tr><td class="num">E7</td><td>复制标题 / 复制路径</td><td class="center">不迁（Onward 文件树已有复制路径）</td><td>—</td></tr>
+          <tr><td class="num">E11</td><td>紧凑工具栏</td><td class="center">不迁</td><td>先看实际布局够不够用</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ============================================================ -->
+      <h2 id="s5">5. 存储策略：三选一</h2>
+
+      <div class="callout danger">
+        <span class="lead">按项目 CLAUDE.md 的硬性规则，这一节的决定必须由你做。</span>
+        「持久化 schema / 数据格式」被明确列为策略级决定，我不能单方面写进代码。
+        下面把三种方案的取舍摊开。
+      </div>
+
+      <h3 id="s5-1">5.1 当前架构（Onward 侧）</h3>
+      <div class="diagram">
+        <div class="diagram-title">今天的数据流：只有阅读位置，没有标注</div>
+        <div class="flow">
+          <div class="node"><div class="nt">viewer.js（iframe）</div><div class="nd">滚动 / 翻页 / 缩放</div></div>
+          <div class="arrow">→</div>
+          <div class="node"><div class="nt">postMessage</div><div class="nd"><code>onward:pdf:state</code></div></div>
+          <div class="arrow">→</div>
+          <div class="node"><div class="nt">PdfReader.tsx</div><div class="nd">归一化</div></div>
+          <div class="arrow">→</div>
+          <div class="node accent"><div class="nt">AppState</div><div class="nd">按文件路径记 <code>pdfPageNumber / pdfScrollTop / pdfScale</code></div></div>
+        </div>
+      </div>
+      <p>PDF 文件本身<strong>始终只读</strong>。这是 Onward 目前的一个隐含契约：Project Editor 打开 PDF 不会改动磁盘上的文件。
+        引入标注保存就会打破这个契约——这正是需要你确认的核心。</p>
+
+      <h3 id="s5-2">5.2 方案 A：写回 PDF 文件本体（Dark PDF Reader 的做法）</h3>
+      <div class="diagram">
+        <div class="diagram-title">方案 A</div>
+        <div class="flow">
+          <div class="node green"><div class="nt">viewer.js</div><div class="nd">高亮 / 备注</div></div>
+          <div class="arrow">→</div>
+          <div class="node green"><div class="nt">pdf-lib 重写字节</div><div class="nd"><code>/Highlight</code> + <code>/QuadPoints</code> + 私有键</div></div>
+          <div class="arrow">→</div>
+          <div class="node green"><div class="nt">新增 IPC</div><div class="nd"><code>project:writeBinaryFile</code></div></div>
+          <div class="arrow">→</div>
+          <div class="node green"><div class="nt">磁盘上的 .pdf</div><div class="nd">原地覆盖</div></div>
+        </div>
+      </div>
+      <div class="ba">
+        <div class="ba-pane after">
+          <div class="ba-head">优点</div>
+          <div class="ba-body">
+            <ul>
+              <li>标注跟着文件走：换电脑、发给别人、用 Preview / Acrobat / Zotero 打开都能看到</li>
+              <li>Git 能追踪（Onward 本来就有 PDF diff 能力）</li>
+              <li>你现有的 Python 提取工作流可以直接复用</li>
+              <li>不占 AppState 体积</li>
+            </ul>
+          </div>
+        </div>
+        <div class="ba-pane before">
+          <div class="ba-head">代价</div>
+          <div class="ba-body">
+            <ul>
+              <li><strong>会修改用户的源文件</strong>——打破「打开 PDF 不改文件」的隐含契约</li>
+              <li>pdf-lib 全量重写：会丢掉原有数字签名和线性化</li>
+              <li>只读文件 / 无写权限 / 文件被别的程序占用时要有明确降级</li>
+              <li>大 PDF（100MB+）每次保存都要整份重写，开销不小</li>
+              <li>需要引入 pdf-lib（+525KB）</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <h3 id="s5-3">5.3 方案 B：旁车文件（sidecar）</h3>
+      <div class="diagram">
+        <div class="diagram-title">方案 B</div>
+        <div class="flow">
+          <div class="node accent"><div class="nt">viewer.js</div><div class="nd">高亮 / 备注</div></div>
+          <div class="arrow">→</div>
+          <div class="node accent"><div class="nt">JSON 序列化</div><div class="nd">quads / 颜色 / 备注 / 原文片段</div></div>
+          <div class="arrow">→</div>
+          <div class="node accent"><div class="nt">新增 IPC</div><div class="nd"><code>project:writeAnnotations</code></div></div>
+          <div class="arrow">→</div>
+          <div class="node accent"><div class="nt">paper.pdf.onward-annots.json</div><div class="nd">与 PDF 同目录（或 <code>.onward/</code> 子目录）</div></div>
+        </div>
+      </div>
+      <div class="ba">
+        <div class="ba-pane after">
+          <div class="ba-head">优点</div>
+          <div class="ba-body">
+            <ul>
+              <li><strong>绝不动源文件</strong>，契约不破</li>
+              <li>写入极快（几 KB），可以放心自动保存</li>
+              <li>不需要 pdf-lib，少 525KB 依赖</li>
+              <li>Git 可追踪，且 diff 可读（JSON 而不是二进制）</li>
+              <li>不需要 D8「抑制 pdf.js 原生渲染」那一整块逻辑</li>
+            </ul>
+          </div>
+        </div>
+        <div class="ba-pane before">
+          <div class="ba-head">代价</div>
+          <div class="ba-body">
+            <ul>
+              <li>标注<strong>只在 Onward 里可见</strong>，别的 PDF 阅读器看不到</li>
+              <li>PDF 移动 / 重命名后旁车文件会失联（可以用内容 hash 兜住一部分）</li>
+              <li>目录里多出一堆 <code>.json</code>（放 <code>.onward/</code> 子目录可缓解）</li>
+              <li>你现有的 Python 提取脚本要改</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <h3 id="s5-4">5.4 方案 C：存进 Onward AppState</h3>
+      <div class="ba">
+        <div class="ba-pane after">
+          <div class="ba-head">优点</div>
+          <div class="ba-body">
+            <ul>
+              <li>零新增文件、零新增 IPC，复用现有 <code>fileMemory</code> 通道</li>
+              <li>实现最快</li>
+            </ul>
+          </div>
+        </div>
+        <div class="ba-pane before">
+          <div class="ba-head">代价</div>
+          <div class="ba-body">
+            <ul>
+              <li>AppState 会被撑爆——一本书几百条标注 × 每条都带 quads 数组和原文片段</li>
+              <li>AppState 是「界面状态」，不是「用户内容」，语义上放错地方</li>
+              <li>换电脑、换 workspace 全丢</li>
+              <li>标注和 PDF 分离，删了 PDF 数据还在</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <h3 id="s5-5">5.5 对比与推荐</h3>
+      <table>
+        <thead>
+          <tr><th>维度</th><th>A · 写回 PDF</th><th>B · 旁车 JSON</th><th>C · AppState</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>标注可移植（别的阅读器可见）</td><td>✅ 完全</td><td>❌ 仅 Onward</td><td>❌ 仅本机</td></tr>
+          <tr><td>不修改源文件</td><td>❌ 会改</td><td>✅</td><td>✅</td></tr>
+          <tr><td>自动保存成本</td><td>高（整份重写）</td><td>极低（几 KB）</td><td>极低</td></tr>
+          <tr><td>Git 可读性</td><td>二进制</td><td>✅ JSON diff 可读</td><td>不进 Git</td></tr>
+          <tr><td>新增依赖</td><td>pdf-lib 525KB</td><td>无</td><td>无</td></tr>
+          <tr><td>实现工作量</td><td>大（含 D8/D9 全套）</td><td>中</td><td>小</td></tr>
+          <tr><td>数据丢失风险</td><td>写坏源文件</td><td>旁车失联</td><td>换机全丢</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout ok">
+        <span class="lead">我的推荐：B 为主 + A 作为显式导出动作（可以叫「混合方案」）。</span>
+        日常编辑走旁车 JSON——写得快、不动源文件、可以放心自动保存；
+        当你需要把带标注的 PDF 发给别人或换台机器看时，手动触发一次「将标注写入 PDF」，
+        走 pdf-lib 生成一份带标准 <code>/Highlight</code> 的文件。
+        这样既保住「打开不改文件」的契约，又保留了标注可移植性，而且自动保存的性能问题自然消失。
+        代价是 pdf-lib 依赖仍然要引入，D8/D9 那套「抑制原生渲染」的逻辑在读回带标注 PDF 时仍然需要。
+      </div>
+
+      <h3 id="s5-6">5.6 用户决策记录 ✅</h3>
+
+      <div class="callout ok">
+        <span class="lead">2026-07-28 用户已拍板。以下为最终执行口径，取代 5.5 的推荐。</span>
+        推荐的「混合方案」未被采纳，用户选择了更强的可移植性优先路线。
+      </div>
+
+      <table>
+        <thead>
+          <tr><th style="width: 150px">决策点</th><th style="width: 260px">用户选择</th><th>对实现的直接影响</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>存储策略</strong></td>
+            <td><strong>方案 A：始终写回 PDF 文件本体</strong></td>
+            <td>引入 pdf-lib；D1/D2/D3/D8/D9 全部纳入范围；需新增二进制写文件 IPC；<strong>Onward「打开 PDF 不改文件」的隐含契约就此解除</strong>，需要在 UI 上让用户对此有认知</td>
+          </tr>
+          <tr>
+            <td><strong>保存时机</strong></td>
+            <td><strong>自动保存为主 + <code>Cmd/Ctrl+S</code> 强制保存</strong></td>
+            <td>D5 + D6 都要；C23「* 未保存」标记<strong>不需要</strong>（自动保存下无意义）；但见下方风险条目——自动保存 + 全量重写是本方案最大的性能与数据安全风险点</td>
+          </tr>
+          <tr>
+            <td><strong>标注列表位置</strong></td>
+            <td><strong>React 宿主侧</strong></td>
+            <td>标注数组需通过 postMessage 双向同步（viewer ⇄ PdfReader.tsx）；列表 UI 复用 Onward 的右键菜单规范（SVG 图标 + 统一 CSS）、i18n 体系、主题变量；<code>ProjectEditor</code> 的分栏从两栏变三栏</td>
+          </tr>
+          <tr>
+            <td><strong>数据兼容</strong></td>
+            <td><strong>沿用 <code>CYY_MARK</code> 私有键，完全互通</strong></td>
+            <td>Onward 能直接读出已有的 Dark PDF Reader 标注；写出的 PDF 也能被 Dark PDF Reader 与 <code>extract_annotations.py</code> 读取；<strong>两边的 schema 从此耦合</strong>，任一侧改格式都要同步</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4>方案 A + 自动保存的风险与必须内建的保护</h4>
+
+      <div class="callout warn">
+        <span class="lead">这个组合的核心矛盾：pdf-lib 是全量重写，没有增量写。</span>
+        Dark PDF Reader 在浏览器里能承受 2 秒轮询的自动保存，是因为它拿到的是 File System Access 的可写句柄，
+        写入路径短。Onward 要经过「iframe → postMessage → 渲染进程 → IPC → 主进程 → fs」，
+        而且每次都是整份字节。一本 100MB 的书，单次保存是秒级开销。
+      </div>
+
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>风险</th><th>必须内建的保护</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="num">R1</td>
+            <td>高频自动保存拖垮渲染线程 / 磁盘</td>
+            <td><strong>静默窗口</strong>：停止操作 800ms 后才触发；<strong>内容指纹去重</strong>：标注集合的 hash 没变就直接跳过，不做任何字节工作</td>
+          </tr>
+          <tr>
+            <td class="num">R2</td>
+            <td>写到一半崩溃 / 断电 → 源 PDF 被写坏，用户原始资料丢失</td>
+            <td><strong>临时文件 + 原子 rename</strong>：先写 <code>&lt;name&gt;.pdf.onward-tmp</code>，<code>fsync</code> 后再 rename 覆盖。Windows 上 rename 覆盖需用 <code>fs.rename</code> 并处理 <code>EBUSY</code></td>
+          </tr>
+          <tr>
+            <td class="num">R3</td>
+            <td>pdf-lib 重写会丢掉原有数字签名与线性化</td>
+            <td>首次对某个 PDF 写入前<strong>检测是否含签名</strong>，含签名则弹一次明确确认，之后记住选择</td>
+          </tr>
+          <tr>
+            <td class="num">R4</td>
+            <td>只读文件 / 无写权限 / 被别的程序占用</td>
+            <td>自动保存<strong>静默降级</strong>（不弹窗打断阅读），改为在标题旁显示可点击的状态；手动 <code>Cmd+S</code> 时才给出完整错误说明</td>
+          </tr>
+          <tr>
+            <td class="num">R5</td>
+            <td>超大 PDF 上自动保存永远追不上编辑速度</td>
+            <td>按文件大小自适应：超过阈值时把自动保存的静默窗口拉长，并在 UI 上明示「大文件已切换为低频保存」。阈值需要一次实测定标</td>
+          </tr>
+          <tr>
+            <td class="num">R6</td>
+            <td>写盘触发 Onward 自己的文件监听 → Git 状态刷新 → 可能引起循环</td>
+            <td>写入前后打自有标记，让 watcher 识别「这是我自己写的」，避免误判为外部修改而触发全量重算</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>以上每一条都要有对应的 trace 事件（<code>main:pdf-annotation.save-*</code> /
+        <code>renderer:pdf-annotation.autosave-*</code>），否则用户报「保存失败」时无从定位。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s6">6. 技术难点</h2>
+
+      <h3 id="s6-1">6.1 pdf.js 需要打私有补丁</h3>
+      <p>Dark PDF Reader 改过 vendor 里的 pdf.js，Onward 的那份是<strong>原版</strong>。我已经把差异 diff 出来了，
+        一共三处：</p>
+      <pre><code><span class="c">// 1) pdf.js:4260 —— 换文档时 altTextManager 可能为 null，原版会抛错中断打开流程</span>
+- this.#altTextManager.destroy();
++ this.#altTextManager?.destroy();
+
+<span class="c">// 2) pdf.js:12613 —— 把 worker 传来的隐藏文本标记落到 DOM 上</span>
++ if (geom.isInvisibleText) {
++   textDiv.dataset.pdfInvisibleText = <span class="s">"1"</span>;
++ }
+
+<span class="c">// 3) pdf.worker.js —— 追踪 text rendering mode（Tr）和 ExtGState 的 ca/CA，</span>
+<span class="c">//    识别「不可见文本」；另加阿拉伯语 CID 保留逻辑顺序（约 80 行）</span>
++ <span class="k">function</span> <span class="n">isCurrentTextRenderingVisible</span>() { ... }
++ <span class="k">function</span> <span class="n">shouldKeepOriginalArabicBidiText</span>(text, bidiText) { ... }</code></pre>
+      <p>补丁 1 是纯 bug 修复，无条件该打。补丁 2、3 是 B9 / B10 的前置。
+        麻烦在于这些补丁改的是<strong>构建产物</strong>（webpack 打包后的 <code>pdf.js</code> / <code>pdf.worker.js</code>），
+        以后升级 pdf.js 时要手工重新应用。建议做法：把补丁提取成 <code>patches/pdfjs-*.patch</code>，
+        在 <code>scripts/</code> 里加一个应用脚本，这样升级时至少能看到冲突。</p>
+
+      <h3 id="s6-2">6.2 iframe 边界</h3>
+      <p>Onward 的 viewer 跑在 <code>sandbox="allow-same-origin allow-scripts"</code> 的 iframe 里，
+        只能通过 postMessage 和宿主通信。这带来几个具体约束：</p>
+      <ul>
+        <li>标注列表侧栏放在 iframe 里（跟 DPR 一样）还是提到 React 宿主侧？宿主侧样式更统一、能复用 Onward 的右键菜单规范，
+          但要把整个标注数组通过 postMessage 同步过去。</li>
+        <li>保存要走 IPC，而 iframe 里没有 <code>window.electron</code>。必须：iframe → postMessage → PdfReader.tsx → preload IPC → 主进程写文件。
+          需要新增一条 <code>onward:pdf:save</code> 消息和对应的回执。</li>
+        <li>快捷键 <code>Cmd+S</code> 现在没有被转发给宿主。要加进 <code>forwardHostKey</code> 的白名单，
+          或者在 iframe 内直接处理。</li>
+      </ul>
+
+      <h3 id="s6-3">6.3 Electron 里没有 File System Access API</h3>
+      <p>DPR 的保存逻辑有一大块（<code>resolvePdfSaveHandle</code> / <code>requestLocalFileWriteHandle</code> /
+        <code>hasHandleWritePermission</code> / <code>downloadPdfCopy</code>，约 350 行）是在处理浏览器的文件句柄授权、
+        权限过期、另存副本。<strong>这些在 Electron 里全部不需要</strong>——主进程直接 <code>fs.writeFile</code> 就行。
+        这是迁移中少数「变简单」的部分。</p>
+
+      <h3 id="s6-4">6.4 跨平台</h3>
+      <ul>
+        <li><strong>Windows</strong>：写文件要处理文件被占用（<code>EBUSY</code>）、路径分隔符、只读属性。
+          方案 A 的原地覆盖在 Windows 上风险更高，建议「写临时文件 + 原子 rename」。</li>
+        <li><strong>Linux</strong>：<code>Intl.Segmenter</code> 在旧版 Electron 上可用性要确认（当前 Electron 43，没问题）。</li>
+        <li><strong>三平台一致</strong>：<code>Cmd</code> vs <code>Ctrl</code> 的快捷键分支；旁车文件的换行符不要被 Git 的 autocrlf 改掉。</li>
+      </ul>
+
+      <h3 id="s6-5">6.5 许可证</h3>
+      <table>
+        <thead><tr><th>组件</th><th>许可证</th><th>与 Apache-2.0 兼容</th></tr></thead>
+        <tbody>
+          <tr><td>pdf.js（已在用）</td><td>Apache-2.0</td><td>✅</td></tr>
+          <tr><td>pdf-lib（方案 A/混合需要）</td><td>MIT</td><td>✅</td></tr>
+          <tr><td>Dark PDF Reader 自身代码</td><td>ISC（你自己的工程）</td><td>✅ 且是自有代码</td></tr>
+        </tbody>
+      </table>
+      <p>引入 pdf-lib 后需要跑 <code>pnpm generate-notices</code> 重新生成 <code>ThirdPartyNotices.txt</code>。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s7">7. 测试计划草案</h2>
+
+      <p>按项目的「单元测试 + autotest 成对交付」硬性规则，两层都要有。</p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h4>单元测试（<code>test/unittest/</code>，纯逻辑）</h4>
+          <ul style="font-size: 13.5px">
+            <li><code>pdf-annotation-quads.test.mts</code> — 选区矩形 → 按行合并 → QuadPoints → 反算回 viewport 矩形，往返一致</li>
+            <li><code>pdf-annotation-record.test.mts</code> — 标注记录的归一化 / 版本迁移 / 非法数据剔除</li>
+            <li><code>pdf-annotation-sort-filter.test.mts</code> — 列表排序（时间/页码）+ 标签筛选的判定表</li>
+            <li><code>pdf-text-grapheme.test.mts</code> — 字素簇与连字切分（<code>ffi</code> / emoji / 组合符）</li>
+            <li><code>pdf-annotation-blocking.test.mts</code> — 哪些 annotation subtype 阻断选择、哪些穿透（纯判定表）</li>
+            <li><code>pdf-sidecar-path.test.mts</code> — 旁车文件路径推导（三平台路径分隔符）</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>autotest（<code>test/autotest/</code>，真实 DOM + IPC）</h4>
+          <ul style="font-size: 13.5px">
+            <li>按 5 步 SOP 的 Step 0：优先<strong>扩充现有的</strong>
+              <code>run-pdf-epub-preview-pdf-autotest.sh</code>（已有 <code>pdf-reader-*</code> 断言），
+              而不是新起一个 runner</li>
+            <li>但标注是一个独立子系统、有独立 fixture 成本，很可能要新建
+              <code>run-pdf-annotation-autotest.sh</code>（并登记进 <code>SCRIPTS</code> 和 <code>test/README.md</code> § 2）</li>
+            <li>覆盖：拖选精度四元一致、创建高亮、改标签、写备注、删除、
+              列表排序/筛选/跳转、保存往返（存→关→重开→标注还在）、
+              缩放后高亮位置正确、跨页高亮</li>
+            <li>fixture：<code>test/autotest/fixtures/pdf-annotation/</code> 下放真实 PDF 文件，不用 base64 内联</li>
+            <li>时序敏感项（自动保存、调色板跟随滚动）按规范做 N 次内部聚合</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <span class="lead">延迟预算需要你定。</span>
+        「选中文字 → 调色板出现」和「按下数字键 → 高亮渲染完成」这两条是延迟敏感路径，
+        按项目规范我必须先问你要多少毫秒的预算，再把它写成测试里的常量。
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="s8">8. 分期实施建议</h2>
+
+      <table>
+        <thead>
+          <tr><th class="num">期</th><th>内容</th><th>能验证什么</th><th>规模估计</th></tr>
+        </thead>
+        <tbody>
+          <tr style="background: rgba(126, 231, 135, 0.06)">
+            <td class="num">P0</td>
+            <td><strong>✅ 已完成</strong> — pdf.js 补丁 + 删 <code>letter-spacing</code> + 文本选择引擎（B1–B14）</td>
+            <td>选中文字，视觉高亮 / <code>Selection.toString()</code> / 剪贴板三者一致</td>
+            <td>实际 ~3300 行</td>
+          </tr>
+          <tr style="background: rgba(126, 231, 135, 0.06)">
+            <td class="num">P1</td>
+            <td><strong>✅ 已完成</strong> — 高亮核心 + 备注编辑器（C1–C11）</td>
+            <td>能划高亮、改标签、写备注、删除；缩放后位置正确</td>
+            <td>实际 ~1800 行</td>
+          </tr>
+          <tr style="background: rgba(126, 231, 135, 0.06)">
+            <td class="num">P2</td>
+            <td><strong>✅ 已完成</strong> — 方案 A 写回 PDF + 自动保存 + 读回 + R1–R6 保护</td>
+            <td>关闭重开后标注 / 备注 / quads 全部从文件读回，无重复渲染</td>
+            <td>实际 ~1100 行</td>
+          </tr>
+          <tr style="background: rgba(126, 231, 135, 0.06)">
+            <td class="num">P3</td>
+            <td><strong>✅ 已完成</strong> — 标注列表侧栏（C12–C21）+ 自定义标签对话框（C22）</td>
+            <td>列表与查看器记录数一致、筛选/排序/跳转/删除、备注折叠状态按 id 保持</td>
+            <td>实际 ~1200 行</td>
+          </tr>
+          <tr style="background: rgba(126, 231, 135, 0.06)">
+            <td class="num">P4</td>
+            <td><strong>✅ 已完成</strong> — 目录随滚动自动跟随（A8）+ 聚焦按钮（A9）+ 自定义缩放（A4）</td>
+            <td>同一页多个章节能分辨；缩放输入应用 / 钳制 / 拒绝非法值</td>
+            <td>实际 ~600 行</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>每一期都按项目规范配对交付单元测试 + autotest，并做 trace 事件登记（<code>src/utils/perf-trace-names.ts</code> +
+        <code>infra/trace.md</code>）。P0 结束就能看到明显改善——因为它顺手修了 2.3 那个既有缺陷。</p>
+
+      <h3>P0 交付实况（2026-07-28）</h3>
+
+      <div class="grid-2">
+        <div class="card">
+          <h4 style="color: var(--accent-2)">新增</h4>
+          <ul style="font-size: 13.5px">
+            <li><code>resources/pdfjs/app/text-selection.js</code>（2846 行）—— 引擎主体，从源工程的文件级全局重整为可注入依赖的模块</li>
+            <li><code>resources/pdfjs/app/text-selection-core.js</code>（482 行）—— 27 个纯判定函数，无 DOM 依赖，可在 Node 下直接单元测试</li>
+            <li><code>infra/pdfjs-patches/patches.mjs</code> + <code>scripts/apply-pdfjs-patches.mjs</code> —— 11 段锚定式补丁，幂等、三平台一致、<code>--check</code> 可作为 CI 闸门</li>
+            <li><code>src/components/ProjectEditor/pdfViewerTrace.ts</code> —— iframe 诊断事件的白名单中继与载荷消毒</li>
+            <li><code>src/autotest/test-pdf-text-selection.ts</code> + runner（<code>.sh</code> / <code>.ps1</code> 双平台）+ 确定性 PDF fixture 生成器</li>
+            <li>3 个单元测试文件，共 <strong>53 条断言</strong></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4 style="color: var(--accent)">验证结果</h4>
+          <ul style="font-size: 13.5px">
+            <li>单元测试 145/145 通过（含新增 3 个文件）</li>
+            <li><code>run-pdf-text-selection</code> 14/14 通过，用时 14 s</li>
+            <li>相邻既有套件无回归：<code>run-pdf-epub-preview-pdf</code>、<code>-pdf-outline</code>、<code>run-pdf-epub-diff</code> 全绿</li>
+            <li>trace 自检通过；<code>pnpm typecheck</code>、<code>pnpm lint:comments</code> 通过</li>
+            <li>补丁应用后的 <code>pdf.js</code> / <code>pdf.worker.js</code> 与参考实现逐字节一致（仅差文件末尾换行）</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <span class="lead">写测试过程中发现并修掉了一个真实缺陷。</span>
+        事件名白名单原本用普通对象字面量查表，<code>VIEWER_TRACE_EVENTS['constructor']</code>
+        会沿原型链命中 <code>Object.prototype.constructor</code> 返回一个函数——truthy，直接绕过
+        <code>?? null</code> 兜底进入 trace 流。改用 <code>Object.hasOwn</code> 显式校验。
+        这条是单元测试 <code>PVT-U-02</code> 抓出来的，不是code review 看出来的。
+      </div>
+
+      <h4>断言的“非空洞性”核查</h4>
+      <p>一次通过的测试不等于一条有效的测试。首轮 14 条全绿之后逐条回看载荷，发现两条实质是空洞的：
+        pdf.js 每个 <code>Tj</code> 输出一个 span，整行文字就是一个 span，
+        因此“从 span 左缘拖到 span 右缘”永远选中整行——无论 caret 映射错得多离谱都会绿。
+        已改为按<strong>子串实测矩形</strong>拖选，断言随之变得可证伪：</p>
+      <table>
+        <thead><tr><th>断言</th><th>收紧前</th><th>收紧后的实测值</th></tr></thead>
+        <tbody>
+          <tr><td>单词边界</td><td>包含 <code>SELECTME</code>（整行也满足）</td><td>精确等于 <code>SELECTME</code>，5/5 次</td></tr>
+          <tr><td>连字完整性</td><td>不以 <code>ff</code> 结尾（整行也满足）</td><td>光标落在 <code>ffi</code> 字形水平中点，选区回退为 <code>'o'</code>，5/5 次，从不出现 <code>'off'</code></td></tr>
+          <tr><td>跨词拖选</td><td>整行首尾</td><td>行中间起止，精确等于 <code>uniqueword ENDMARK</code>，且剪贴板一致</td></tr>
+        </tbody>
+      </table>
+      <p>隐藏文本一条同样核查过非空洞性：文本层实际内容为
+        <code>…Second line continues hereVISIBLETEXTBLOCKEDTEXT</code> —— <code>HIDDENTEXT</code> 确实被打过补丁的
+        worker 标记出来并被引擎移除，而不是这条断言恰好没东西可查。</p>
+
+
+      <!-- ============================================================ -->
+      <h2 id="s10">10. 迁移清单：逐字 / 改造 / 未迁移</h2>
+
+      <p>Dark PDF Reader 的 <code>viewer.js</code> 共 10192 行。下面按「代码在 Onward 里是什么状态」分三类。
+        统计口径是从源文件里实际抽取的行范围，不是估计。</p>
+
+      <div class="bar-row">
+        <div class="bar-label">逐字迁移（仅改依赖引用）</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 43%; background: #7ee787"></div></div>
+        <div class="bar-val">4466 行 · 43%</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">未迁移</div>
+        <div class="bar-track"><div class="bar-fill" style="width: 56%; background: #6e7d8f"></div></div>
+        <div class="bar-val">5726 行 · 56%</div>
+      </div>
+
+      <h3 id="s10-1">10.1 逐字迁移（算法与行为完全一致）</h3>
+
+      <div class="callout ok">
+        <span class="lead">这部分是机械抽取 + 程序化替换全局引用得到的，不是手抄。</span>
+        替换只做了三类：<code>els.viewer</code> → 注入的元素、<code>currentDocument</code> → <code>getDocument()</code>、
+        <code>pdfViewer.getPageView</code> → 注入的取页函数。<strong>函数体内部的算法逻辑一行未改。</strong>
+        这样做是因为这些代码是源工程反复攻关得来的，重写等于把踩过的坑重新踩一遍。
+      </div>
+
+      <table>
+        <thead>
+          <tr><th style="width: 230px">子系统</th><th style="width: 90px">行数</th><th>落在 Onward 的哪里</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>文本选择引擎</strong><br><span style="color:var(--dim);font-size:12px">caret 映射、拖选、自动滚动、跨页 overlay、字素簇与连字切分、遮挡判定、剪贴板接管</span></td><td>2920</td><td><code>text-selection.js</code> + <code>text-selection-core.js</code></td></tr>
+          <tr><td><strong>调色板定位</strong><br><span style="color:var(--dim);font-size:12px">锚点计算、跟随页面滚动、远离后自动隐藏</span></td><td>464</td><td><code>highlight.js</code></td></tr>
+          <tr><td><strong>高亮创建与渲染</strong><br><span style="color:var(--dim);font-size:12px">选区→按行合并→QuadPoints、页面高亮层、chip 渲染</span></td><td>408</td><td><code>highlight.js</code> + <code>highlight-core.js</code></td></tr>
+          <tr><td><strong>PDF 读写</strong><br><span style="color:var(--dim);font-size:12px">pdf-lib 写入 /Highlight + CYY_MARK 私有键 + 内嵌 manifest；反向读回</span></td><td>281</td><td><code>annotation-file.js</code></td></tr>
+          <tr><td><strong>标注交互与备注编辑器</strong><br><span style="color:var(--dim);font-size:12px">单击改标签、双击开备注、hover 标记、删除、弹窗尺寸记忆</span></td><td>247</td><td><code>highlight.js</code></td></tr>
+          <tr><td><strong>原生标注抑制</strong><br><span style="color:var(--dim);font-size:12px">隐藏 pdf.js 对我们自己标注的重复渲染与默认弹窗，含 canvas 层注入</span></td><td>111</td><td><code>annotation-file.js</code></td></tr>
+          <tr><td><strong>共用小工具</strong><br><span style="color:var(--dim);font-size:12px">记录克隆、文档 id 归一化、颜色转换、clamp、hash</span></td><td>35</td><td><code>highlight-core.js</code> / <code>annotation-file.js</code></td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>vendor 补丁同样逐字迁移</strong>：对 <code>pdf.js</code> / <code>pdf.worker.js</code> 的 11 段改动
+        （隐藏文本标记、阿拉伯语逻辑顺序、altTextManager 空值保护）应用后与参考实现<strong>逐字节一致</strong>，
+        只差文件末尾换行。<strong>on-disk 格式也逐字保留</strong>：私有键仍是 <code>CYY_MARK*</code>，
+        没有改成 Onward 自己的前缀——这是你选的「完全互通」，改了就等于悄悄断掉与
+        <code>extract_annotations.py</code> 的兼容。</p>
+
+      <h3 id="s10-2">10.2 迁移了，但按 Onward 的规范改造过</h3>
+
+      <table>
+        <thead>
+          <tr><th style="width: 190px">项目</th><th style="width: 200px">源工程做法</th><th>Onward 的做法与原因</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>代码组织</td>
+            <td>单文件 10192 行，全部文件级全局</td>
+            <td>拆成 6 个模块，纯逻辑与 DOM 逻辑分层。<strong>不是为了好看</strong>——纯逻辑层能在 Node 下直接单元测试，这是项目「单元测试锁数学、autotest 锁接线」两层要求的前提</td>
+          </tr>
+          <tr>
+            <td>持久化</td>
+            <td>chrome.storage 工作副本 + File System Access 句柄 + 冲突分支状态机（~600 行）</td>
+            <td>删掉整层。Electron 直接 IPC 写盘，<strong>不需要浏览器的句柄授权/权限过期/另存副本那 350 行</strong>；冲突分支按你的决定不迁</td>
+          </tr>
+          <tr>
+            <td>写盘安全</td>
+            <td>直接 <code>writable.write()</code> 覆盖</td>
+            <td>临时文件 + fsync + 原子 rename，保留原文件权限位，区分只读/占用/写失败三种降级。<strong>这是方案 A 的必要代价</strong>：我们在改用户的源文件，写一半崩溃不能毁掉他的资料</td>
+          </tr>
+          <tr>
+            <td>自动保存</td>
+            <td>2 秒轮询 + 800ms 静默 + 15 秒退避</td>
+            <td>去掉轮询，改为纯静默窗口触发；加内容指纹去重（内容没变直接跳过）；加大文件自适应（&gt;20MB 静默窗口 ×5）。<strong>因为 pdf-lib 是全量重写，没有增量写</strong></td>
+          </tr>
+          <tr>
+            <td>诊断日志</td>
+            <td>自建 JSONL 循环日志 + 镜像文件（~1100 行）</td>
+            <td>接进 Onward 现有的 perf-trace 体系，新增 19 个注册事件。<strong>不再造一套</strong></td>
+          </tr>
+          <tr>
+            <td>文案</td>
+            <td>中文硬编码在 JS 里</td>
+            <td>全部走 i18n（en + zh-CN 各 18 个键）。<strong>标签 id 保持不变</strong>（<code>hl-key</code> 等），只翻译显示名——id 是写进 PDF 的，改了会让用户已有文档里的标注失去归属</td>
+          </tr>
+          <tr>
+            <td>目录 / 缩放 / 阅读位置</td>
+            <td>viewer 内部实现</td>
+            <td>不迁，用 Onward 已有的 OutlinePanel、缩放控件、AppState 按文件记忆</td>
+          </tr>
+          <tr>
+            <td>测试钩子</td>
+            <td>无（用 Playwright 直接驱动）</td>
+            <td>viewer 内 <code>__onwardPdfTest</code> 探针，且<strong>只在 <code>ONWARD_AUTOTEST=1</code> 时才安装</strong>——用户版本里根本不存在这些模拟拖拽/复制的入口</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 id="s10-3">10.3 完全没有迁移（5726 行，56%）</h3>
+
+      <table>
+        <thead>
+          <tr><th style="width: 240px">功能</th><th style="width: 110px">为什么</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Save to GitHub Issue</td><td class="center"><span class="badge b-skip">你已排除</span></td><td>含 options 页的 token 配置、验证、创建 issue</td></tr>
+          <tr><td>自动接管网页 PDF + 白名单 / 黑名单</td><td class="center"><span class="badge b-skip">浏览器概念</span></td><td>依赖 <code>declarativeNetRequest</code> / <code>webNavigation</code></td></tr>
+          <tr><td>background.js Service Worker（1819 行）</td><td class="center"><span class="badge b-skip">浏览器概念</span></td><td>右键菜单、标签页跳转、网页 PDF 识别</td></tr>
+          <tr><td>通过 Finder / URL 打开、拖文件进窗口</td><td class="center"><span class="badge b-skip">已有替代</span></td><td>Onward 从文件树打开</td></tr>
+          <tr><td>「最近打开」二级菜单（~350 行）</td><td class="center"><span class="badge b-skip">已有替代</span></td><td>Onward 有自己的最近文件与标签页体系</td></tr>
+          <tr><td>options 设置页（1042 行 JS + 495 行 CSS）</td><td class="center"><span class="badge b-skip">已有替代</span></td><td>主题预设、配置导入导出、快捷键配置，Onward 设置有自己的体系</td></tr>
+          <tr><td>诊断日志系统（1144 行）</td><td class="center"><span class="badge b-skip">已有替代</span></td><td>改用 perf-trace，见 10.2</td></tr>
+          <tr><td>标注冲突分支备份（~600 行）</td><td class="center"><span class="badge b-skip">你已确认</span></td><td>源工程需要它是因为同一 PDF 可能开在多个浏览器标签页；Onward 同一文件同时只有一个编辑面</td></tr>
+          <tr><td>标注列表侧栏（~700 行）</td><td class="center"><span class="badge b-rec">已重写</span></td><td>功能已实现，但<strong>源代码没有迁</strong>：按你的决定在 React 宿主侧重写，复用 Onward 的右键菜单规范、i18n 与主题变量</td></tr>
+          <tr><td>手动缩放历史（下拉里的最近 10 条）</td><td class="center"><span class="badge b-skip">不迁</span></td><td>A5，按默认执行。自定义缩放输入（A4）已实现</td></tr>
+          <tr><td>目录自动跟随的源实现</td><td class="center"><span class="badge b-rec">已重写</span></td><td>A8/A9 功能已实现，但比较逻辑重写为可单元测试的纯函数；聚焦按钮直接复用 OutlinePanel 已有的「手动浏览暂停自动跟随」机制</td></tr>
+          <tr><td>新增自定义标签（<code>window.prompt</code>）</td><td class="center"><span class="badge b-rec">已重写</span></td><td>C22 功能已实现，做成了带颜色选择和重名校验的正规对话框；源工程的 prompt 版本不迁</td></tr>
+          <tr><td>暗色主题预设 + 自定义底色</td><td class="center"><span class="badge b-skip">已有替代</span></td><td>PDF 底色跟随 Onward 宿主主题</td></tr>
+          <tr><td>Python 提取脚本</td><td class="center"><span class="badge b-must">已迁移</span></td><td>放在 <code>scripts/pdf/extract-pdf-annotations.py</code>，逻辑一字未改（只把中文文档串译成英文并加 SPDX 头）。私有键格式未变，所以它对 Onward 写出的 PDF 和源工程写出的 PDF 都可用</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ============================================================ -->
+      <h2 id="s9">9. 文档元数据与更新历史</h2>
+
+      <div class="meta">
+        <table>
+          <thead><tr><th style="width: 160px">项</th><th>值</th></tr></thead>
+          <tbody>
+            <tr><td>生成分支</td><td><code>20260727-feat2</code></td></tr>
+            <tr><td>对应应用版本</td><td><code>2.0.1</code></td></tr>
+            <tr><td>对应提交</td><td><code>470a003</code></td></tr>
+            <tr><td>参考源工程</td><td><code>/Users/yingyun/Projects/Dark_PDF_Reader</code> @ <code>03b9623</code>（v0.3.16）</td></tr>
+            <tr><td>文档版本</td><td>v1.4</td></tr>
+            <tr><td>状态</td><td><strong>P0–P4 全部实现并通过验证</strong>。存储策略见 5.6，迁移清单见第 10 节。第 4 节清单中标记为「不迁」的项按默认执行</td></tr>
+          </tbody>
+        </table>
+
+        <h4 style="margin-top: 24px">更新历史（仅追加，不改写既有行）</h4>
+        <table>
+          <thead>
+            <tr><th style="width: 80px">版本</th><th style="width: 110px">日期</th><th style="width: 150px">分支</th><th>变更摘要</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>v1.0</td>
+              <td>2026-07-28</td>
+              <td><code>20260727-feat2</code></td>
+              <td>首次创建。梳理 Dark PDF Reader v0.3.16 全部功能，分 A–E 五层列出迁移清单；给出三种标注存储策略的对比与推荐；记录 pdf.js 私有补丁 diff、iframe 边界约束、跨平台风险与许可证核查；给出测试计划草案与 P0–P4 分期建议。</td>
+            </tr>
+            <tr>
+              <td>v1.1</td>
+              <td>2026-07-28</td>
+              <td><code>20260727-feat2</code></td>
+              <td>新增 § 5.6「用户决策记录」：存储策略确定为方案 A（始终写回 PDF 本体）、保存时机为自动保存 + Cmd/Ctrl+S、标注列表放在 React 宿主侧、私有键沿用 <code>CYY_MARK</code> 与 Dark PDF Reader 完全互通。同时记录该组合特有的 R1–R6 风险与必须内建的保护措施（静默窗口、内容指纹去重、临时文件原子 rename、签名检测、大文件自适应、watcher 自写标记）。C23「* 未保存」标记因自动保存决策而移出范围。</td>
+            </tr>
+            <tr>
+              <td>v1.2</td>
+              <td>2026-07-28</td>
+              <td><code>20260727-feat2</code></td>
+              <td>记录 P0（文本选择引擎）的实际交付：新增 text-selection.js / text-selection-core.js 双层模块、11 段 pdf.js 锚定补丁与幂等应用脚本、iframe 诊断中继、双平台 autotest runner 与确定性 fixture、3 个单元测试文件共 53 条断言。记录测试期间发现并修复的原型链绕过白名单缺陷（PVT-U-02），以及首轮全绿后对两条空洞断言的收紧过程与收紧后的实测值。补充 engine-reset 生命周期 trace 事件。</td>
+            </tr>
+            <tr>
+              <td>v1.3</td>
+              <td>2026-07-29</td>
+              <td><code>20260727-feat2</code></td>
+              <td>P1（高亮核心 + 备注编辑器）与 P2（方案 A 写回 PDF + 自动保存）实现完成并通过验证。新增 § 10「迁移清单」，按逐字迁移 / 改造迁移 / 未迁移三类逐项列出，含实测行数占比（逐字 43%、未迁移 56%）。技术债清理：pdf.js 补丁检查接入 dev 与生产构建、viewer 测试探针改为仅在 ONWARD_AUTOTEST=1 下安装。记录测试期间发现并修复的三个真实缺陷：零 quads 写出非法 /Rect、跨模块私有状态泄漏导致选择路径整个失效、给只读 getter 赋值使删除功能不可用；并新增结构性防线 pdf-viewer-module-boundaries 阻断该缺陷类。</td>
+            </tr>
+            <tr>
+              <td>v1.4</td>
+              <td>2026-07-29</td>
+              <td><code>20260727-feat2</code></td>
+              <td>P3（标注列表侧栏 + 自定义标签对话框）与 P4（目录随滚动自动跟随 + 聚焦按钮 + 自定义缩放输入）实现完成并通过验证。Python 提取脚本迁入 <code>scripts/pdf/</code>。第 10 节清单相应更新：列表侧栏、目录跟随、自定义标签由「待做」改为「已重写」（功能实现但源代码未搬，按用户决定在宿主侧重写）。新增单元测试 pdf-annotation-list-model（PAL-U-01..26）覆盖列表排序/筛选/备注折叠覆盖/标签校验与目录跟随比较器。修正两条最初空洞的 autotest 断言：备注编辑器未关闭挡住后续拖选、单页 fixture 在默认缩放下不可滚动导致跳转断言不可证伪。</td>
+            </tr>
+            <tr>
+              <td>v1.5</td>
+              <td>2026-08-01</td>
+              <td><code>20260727-feat2</code></td>
+              <td>后续迭代对本清单的两点修订（详见 docs/html/pdf-diff-and-refresh-design.html）：(1) 经用户批准的长函数重构拆分了 <code>text-selection.js</code> / <code>highlight.js</code> 中最长的四个叶子函数（96/95/77/75 行 → 上限 72 行），「逐字迁移」类中这两个文件与 Dark PDF Reader 的逐字节可对照性自此终止，行为等价性改由 54 条 autotest 断言 + 全部单元测试锁定；(2) pdf.js 的 11 段私有补丁新增了源码级表达（infra/pdfjs-patches/source-patches.mjs，锚定上游 v3.11.174 源码树 11/11 通过）与源码构建流水线（scripts/pdf/build-pdfjs-from-source.mjs），升级 pdf.js 不再需要对着 webpack 产物人工重推补丁；已提交产物保持不变，产物级 patches.mjs 继续作为守卫。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </main>
+
+    <script>
+      // Instant jump (no smooth scrolling) + current-section highlight.
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+        var targets = links
+          .map(function (a) {
+            var el = document.querySelector(a.getAttribute('href'));
+            return el ? { link: a, el: el } : null;
+          })
+          .filter(Boolean);
+
+        links.forEach(function (a) {
+          a.addEventListener('click', function (e) {
+            e.preventDefault();
+            var el = document.querySelector(a.getAttribute('href'));
+            if (!el) return;
+            // Direct position assignment — no animation of any kind.
+            window.scrollTo(0, el.getBoundingClientRect().top + window.pageYOffset - 12);
+            history.replaceState(null, '', a.getAttribute('href'));
+            setActive(a);
+          });
+        });
+
+        function setActive(active) {
+          links.forEach(function (a) {
+            a.classList.toggle('active', a === active);
+          });
+        }
+
+        var ticking = false;
+        function onScroll() {
+          if (ticking) return;
+          ticking = true;
+          requestAnimationFrame(function () {
+            ticking = false;
+            var probe = window.pageYOffset + 90;
+            var current = null;
+            for (var i = 0; i < targets.length; i++) {
+              if (targets[i].el.offsetTop <= probe) current = targets[i].link;
+            }
+            if (current) setActive(current);
+          });
+        }
+        window.addEventListener('scroll', onScroll, { passive: true });
+        onScroll();
+      })();
+    </script>
+  </body>
+</html>

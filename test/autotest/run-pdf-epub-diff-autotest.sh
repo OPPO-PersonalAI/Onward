@@ -73,6 +73,11 @@ if [[ ! -x "$APP_BIN" ]]; then
   exit 1
 fi
 
+# The annotated pair (annotation-diff panel assertions) must match its
+# builder byte-for-byte before it enters the fixture repo.
+echo "Verifying the annotated PDF fixture pair..."
+node "$REPO_ROOT/test/autotest/fixtures/pdf-annotation-diff-fixture-builder.mjs" --check
+
 # Build the one-commit + alt-working-tree fixture repo (execFileSync; no PTY).
 FIXTURE_JSON="$(node "$REPO_ROOT/test/autotest/create-pdf-epub-diff-fixture.mjs" "$FIXTURE_REPO")"
 MANIFEST_PATH="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$FIXTURE_JSON")"

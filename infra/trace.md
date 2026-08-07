@@ -789,6 +789,75 @@ the buffer mode and the scrollback extent were both invisible. See
 | `MAIN_PROJECT_TREE_WATCH_SUBSCRIBE` | `main:project-tree-watch.subscribe` | `i` | `project-tree-watch-manager.ts::subscribe()` — @parcel/watcher subscribe outcome (`ok` / `failed` / `disposed-race`); primary breadcrumb for "Cmd+P never sees new files" |
 | `MAIN_PROJECT_TREE_WATCH_INAPP_MUTATION` | `main:project-tree-watch.inapp-mutation` | `i` | `project-tree-watch-manager.ts::notifyMutation()` — in-app `project.createFile`/`renamePath`/`deletePath` direct-notify to the file index, bypassing the OS watcher so the app's own edits propagate even with zero native FS events |
 
+#### PDF text-selection engine (2026-07-28)
+
+These originate **inside the embedded PDF viewer iframe**, which is sandboxed,
+loaded from `file://`, and cannot import the renderer's trace registry. The
+viewer posts a short name over `postMessage` (`onward:pdf:trace`);
+`PdfReader.tsx` maps it through `pdfViewerTrace.ts` and re-emits it here. Names
+not in that table are dropped, so a stale or tampered iframe cannot inject
+event names.
+
+All are **diagnostic tier** and fire at user-action frequency — once per drag,
+once per page render — never inside a pointer or `requestAnimationFrame` body.
+Payloads carry lengths and counts only: no selected text ever leaves the
+viewer, so a user's diagnostic bundle stays readable without exposing the
+document they were reading.
+
+| Constant | Event name | `ph` | Emitted where / meaning |
+| --- | --- | --- | --- |
+| `RENDERER_PDF_TEXT_SELECTION_BLOCKED_AT_ANCHOR` | `renderer:pdf-text-selection.blocked-at-anchor` | `i` | `text-selection.js::handleTextSelectionMouseDown` — refused to start a drag because an annotation with no DOM section of its own (form widget, stamp, redaction) covers the anchor point. Tagged `page`. **First thing to check for "I can't select this paragraph".** |
+| `RENDERER_PDF_TEXT_SELECTION_DRAG_COMMITTED` | `renderer:pdf-text-selection.drag-committed` | `i` | `text-selection.js::handleTextSelectionMouseUp` — a drag produced a selection. Tagged `path` (`engine` / `native-fallback`), `chars`, `lines`. A run of `native-fallback` means the caret engine keeps declining and the browser's own selection is being accepted instead — the signature of a caret-mapping regression. |
+| `RENDERER_PDF_TEXT_SELECTION_COPY_OVERRIDDEN` | `renderer:pdf-text-selection.copy-overridden` | `i` | `text-selection.js::handleTextLayerCopy` — we took the clipboard away from pdf.js, whose default copy path rewrites ligatures and can yield text that differs from the visible highlight. Tagged `chars`. Answers "did our override actually run?" when clipboard content is reported wrong. |
+| `RENDERER_PDF_TEXT_SELECTION_AUTOSCROLL_ENGAGED` | `renderer:pdf-text-selection.autoscroll-engaged` | `i` | `text-selection.js::updateTextSelectionAutoScroll` — edge auto-scroll started during a drag. Emitted **once per drag**, not per frame. Tagged `horizontal`, `vertical`. |
+| `RENDERER_PDF_TEXT_SELECTION_ANNOTATIONS_INDEXED` | `renderer:pdf-text-selection.annotations-indexed` | `i` | `text-selection.js::indexTextSelectionAnnotations` (on pdf.js `annotationlayerrendered`) — a page's annotations were classified blocking / passthrough for the caret engine. Tagged `page`, `total`, `virtualBlockers`. |
+| `RENDERER_PDF_TEXT_SELECTION_ANNOTATION_INDEX_FAILED` | `renderer:pdf-text-selection.annotation-index-failed` | `i` | Same, catch arm — classification failed. The page still renders, but its blocking annotations are invisible to the caret engine, so text hidden under a form widget becomes selectable. Tagged `page`, `error` (≤120 chars). |
+| `RENDERER_PDF_TEXT_SELECTION_INVISIBLE_SPANS_DROPPED` | `renderer:pdf-text-selection.invisible-spans-dropped` | `i` | `text-selection.js::filterCoveredInvisibleTextLayerSpans` (on `textlayerrendered`) — hidden text spans (an OCR layer under visible text, or text drawn with `Tr 3` / alpha 0) were removed so they cannot enter a selection or the clipboard. Tagged `page`, `dropped`. **A constant zero on a scanned PDF means the vendored pdf.js patches were lost** — verify with `node scripts/apply-pdfjs-patches.mjs --check`. |
+| `RENDERER_PDF_TEXT_SELECTION_ENGINE_RESET` | `renderer:pdf-text-selection.engine-reset` | `i` | `text-selection.js::reset` (from `viewer.js::resetCurrentDocument`) — per-document state dropped because a different PDF is loading. Emitted **before** clearing, so the payload describes what was discarded. Tagged `indexedPages`, `dragActive`. Breadcrumb for "selection stopped working after I opened another PDF": says whether the reset ran, and whether it ran mid-drag. |
+
+#### PDF highlight annotations (2026-07-29)
+
+Same relay as the text-selection events above. These carry more weight than
+usual because this feature **writes to the user's file**: highlights are stored
+inside the PDF and saved automatically, so when someone reports "my annotations
+are gone" or "Onward modified my PDF", these events have to answer whether a
+save ran, what it decided, and whether the bytes landed. Payloads carry counts,
+sizes and reason codes only — never note text or the highlighted passage.
+
+| Constant | Event name | `ph` | Emitted where / meaning |
+| --- | --- | --- | --- |
+| `RENDERER_PDF_ANNOTATION_CHANGED` | `renderer:pdf-annotation.changed` | `i` | `annotation-store.js::markChanged` — a record was created / relabelled / annotated / deleted. Tagged `reason`, `count`. The single entry point that makes a save eligible. |
+| `RENDERER_PDF_ANNOTATION_ADOPTED` | `renderer:pdf-annotation.adopted` | `i` | `annotation-store.js::adopt` — annotations read from a newly opened document became the baseline. Tagged `count`, `documentBytes`, `hasSignature`, `large`. `large` says whether the slower autosave cadence is in force. |
+| `RENDERER_PDF_ANNOTATION_SAVE_START` | `renderer:pdf-annotation.save-start` | `i` | A write began. Tagged `mode` (`auto` / `manual`), `count`, `revision`. |
+| `RENDERER_PDF_ANNOTATION_SAVE_DONE` | `renderer:pdf-annotation.save-done` | `i` | …and finished. Tagged `mode`, `count`, `bytes`, `durationMs` — the whole serialise + IPC + fsync + rename round trip. This is the number to read when annotating a large document feels sluggish. |
+| `RENDERER_PDF_ANNOTATION_SAVE_FAILED` | `renderer:pdf-annotation.save-failed` | `i` | The write failed. Tagged `mode`, `reason` (`read-only` / `locked` / `write-failed` / …). **An automatic failure is silent to the user by design, so this event is the only evidence it happened.** |
+| `RENDERER_PDF_ANNOTATION_SAVE_CANCELLED` | `renderer:pdf-annotation.save-cancelled` | `i` | Abandoned because the user opened another PDF mid-write. Tagged `mode`, `reason`. Proves the guard fired rather than annotations landing in the wrong file. |
+| `RENDERER_PDF_ANNOTATION_SAVE_BLOCKED_SIGNATURE` | `renderer:pdf-annotation.save-blocked-signature` | `i` | Refused to rewrite a digitally signed document without confirmation. Tagged `mode`. |
+| `RENDERER_PDF_ANNOTATION_READ_FAILED` | `renderer:pdf-annotation.read-failed` | `i` | Annotations could not be read out of the opened PDF; the session starts empty. Tagged `error`. **Distinguishes "this document has no highlights" from "we failed to see the ones it has"** — which matters, because the next save would overwrite them. |
+| `RENDERER_PDF_ANNOTATION_NATIVE_CLEANUP` | `renderer:pdf-annotation.native-cleanup` | `i` | Our saved highlights, which return as native PDF annotations, were hidden so pdf.js does not paint them a second time. Tagged `nativeCount`, `renderedCount`. |
+| `RENDERER_PDF_HIGHLIGHT_DELETED` | `renderer:pdf-highlight.deleted` | `i` | A highlight was deleted. Tagged `page`, `removed`, `remaining`. Separate from `changed` because deletion is the one edit that destroys user data. |
+| `RENDERER_PDF_HIGHLIGHT_NOTE_EDITED` | `renderer:pdf-highlight.note-edited` | `i` | A note was edited. Tagged `page`, `chars` — length only, never content. |
+
+### 2026-08-01 — single-file watcher + PDF external-change refresh
+
+The single-file watcher was the one refresh surface with zero breadcrumbs; a "my file didn't refresh" report produced an empty trace. These events make every settle decision and every reload round trip visible.
+
+| Constant | Event name | ph | Where / meaning |
+| --- | --- | --- | --- |
+| `MAIN_FILE_WATCH_REGISTERED` | `main:file-watch.registered` | `i` | `file-watch-manager.ts::watch` — a path entered the watch set. Tagged `mode` (`text`/`binary`), `pathLen`. |
+| `MAIN_FILE_WATCH_SETTLED` | `main:file-watch.settled` | `i` | A quieted-down change was classified. Tagged `mode`, `action` (`emit-changed` / `skip-own-write` / `skip-unchanged` / `emit-deleted`). `skip-own-write` is the fingerprint-based self-save suppression working; "the PDF reloads every time I highlight" is answered by whether these show `emit-changed` instead. |
+| `MAIN_FILE_WATCH_REBUILD_SCHEDULED` | `main:file-watch.rebuild-scheduled` | `i` | Watcher lost its inode (rename / atomic replace / error) and scheduled a re-attach. Tagged `mode`, `retry`. The annotation autosave's atomic replace lands here; its absence after a PDF save means the OS never surfaced the rename. |
+| `MAIN_IMAGE_WATCH_CHANGE_EMITTED` | `main:image-watch.change-emitted` | `i` | `image-watch-manager.ts::emitChange` — a referenced markdown image changed on disk. Tagged `relativePathLen`. |
+| `MAIN_PROJECT_PDF_SAVE_BLOCKED_EXTERNAL` | `main:project-editor.pdf-save-blocked-external` | `i` | A PDF byte write was refused because the disk no longer matches the renderer's expected pre-image — an external writer got there first. Tagged `expectedSize`, `diskSize`, `mtimeDeltaMs`. The write-gate half of the anti-clobber design. |
+| `RENDERER_PDF_READER_EXTERNAL_RELOAD` | `renderer:pdf-reader.external-reload` | `X` | Host-side round trip: reload request posted to the viewer → `reloadResult` received. Tagged `durationMs`, `ok`, `reason`, `generation`. |
+| `RENDERER_PDF_VIEWER_EXTERNAL_RELOAD_START` | `renderer:pdf-viewer.external-reload-start` | `i` | Viewer began loading the replacement document (load-then-swap; the old document stays up until the new one parses). Tagged `generation`, `attempt`. |
+| `RENDERER_PDF_VIEWER_EXTERNAL_RELOAD_DONE` | `renderer:pdf-viewer.external-reload-done` | `i` | Swap completed and view state restored. Tagged `generation`, `numPages`, `restoredPage`, `durationMs`. |
+| `RENDERER_PDF_VIEWER_EXTERNAL_RELOAD_DEFERRED` | `renderer:pdf-viewer.external-reload-deferred` | `i` | Replacement failed to load (typically a writer caught mid-write); the old document stays, silently — SumatraPDF semantics. Tagged `generation`, `attempt`, `willRetry`, `reason`. |
+| `RENDERER_PDF_ANNOTATION_REBASE_MERGED` | `renderer:pdf-annotation.rebase-merged` | `i` | Unsaved local records replayed onto an externally modified document (three-way rebase, local wins on same-id conflicts). Tagged `adds`, `mods`, `dels`, `conflicts`, `externalCount` — the only evidence of what the merge decided when a highlight survives or vanishes across an agent edit. |
+| `RENDERER_PROJECT_FILE_CHANGE_RECEIVED` | `renderer:project-editor.file-change-received` | `i` | The renderer received a single-file watcher event and decided whether it belongs to the active file. Tagged `matched`, `changeType`, `isPdf`, `hasMeta`. This was the one silent hop in the refresh chain — two real bugs (doubled separators; absolute activeFilePath) hid in exactly this comparison because a dropped event left no evidence. |
+| `RENDERER_PDF_HIGHLIGHT_LABELS_CHANGED` | `renderer:pdf-highlight.labels-changed` | `i` | The custom highlight-label palette persisted to UIPreferences changed (add / manage dialogs). Tagged `source` (`add`/`manage`), `customCount`. Label ids are written into users' PDFs, so palette mutations deserve a breadcrumb. |
+| `RENDERER_GIT_DIFF_FILE_CHANGE_RECEIVED` | `renderer:git-diff.file-change-received` | `i` | Git Diff's twin of `file-change-received`: the diff viewer's single-file watch received an event and decided whether it belongs to the selected file. Tagged `matched`, `changeType`, `mode`. Same silent-drop defect class as the Project Editor comparison, same breadcrumb. |
+
 ---
 
 ## 3. Planned coverage gaps

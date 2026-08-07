@@ -112,14 +112,38 @@ input[type="number"] { padding: 0 8px; }
 #viewer { margin: 0 auto; }
 
 .pdfViewer .canvasWrapper { border-radius: 4px; }
-.pdfViewer .textLayer { z-index: 5; overflow: visible; opacity: 1; }
-.pdfViewer .textLayer :is(span, br) { letter-spacing: 1px; }
+
+/* The text layer must keep pdf.js's own geometry, clipping and stacking.
+ * Anything that changes text metrics here (letter-spacing above all) shifts
+ * the invisible text spans away from the glyphs painted on the canvas, so the
+ * caret engine maps pointer coordinates to the wrong character. That is
+ * invisible until you try to highlight: a highlight is stored as the PDF-space
+ * quads of the selection, so a drifted text layer is silently written into the
+ * annotation geometry. Only `opacity` is safe to override — it makes the text
+ * layer selectable-but-transparent instead of pdf.js's debug 0.25. */
+.pdfViewer .textLayer { opacity: 1; }
 .pdfViewer .textLayer ::selection { background: rgba(0, 80, 255, 0.3); }
 .pdfViewer .textLayer .endOfContent.active { top: 100%; }
+
+/* Cross-page selection. Chromium paints no native ::selection for a range that
+ * spans sibling page elements, so the engine draws its own rects per page and
+ * suppresses the native paint to avoid double-drawing on the first page. */
+.pdfViewer.cross-page-text-selection .textLayer ::selection { background: transparent; }
+.pdfViewer .textSelectionOverlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+.pdfViewer .textSelectionOverlayRect {
+  position: absolute;
+  background: rgba(0, 80, 255, 0.3);
+}
 
 .pdfViewer.dark-invert .page { background: var(--onward-pdf-page-tint); }
 .pdfViewer.dark-invert .canvasWrapper { filter: invert(1) hue-rotate(180deg); }
 .pdfViewer.dark-invert .textLayer ::selection { background: rgba(30, 100, 255, 0.45); }
+.pdfViewer.dark-invert .textSelectionOverlayRect { background: rgba(30, 100, 255, 0.45); }
 
 #emptyState {
   position: absolute;
@@ -156,3 +180,286 @@ input[type="number"] { padding: 0 8px; }
 #passwordPrompt { margin: 0 0 12px; color: var(--onward-pdf-muted); font-size: 13px; }
 #passwordInput { width: 100%; height: 34px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+/* ==================== highlight annotations ==================== */
+
+/* Per-page highlight layer, appended to the pdf.js `.page` element rather than
+ * into its annotationLayer. Keeping it separate means pdf.js can re-render the
+ * page freely without fighting us over ownership of that subtree, and our
+ * rects are re-projected from PDF-space quads on every repaint so zoom and
+ * rotation stay correct without reading anything back from screen pixels. */
+.highlightLayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.highlightAnnotRect {
+  position: absolute;
+  border-radius: 2px;
+  mix-blend-mode: normal;
+}
+
+/* Git-compare emphasis: the diff panel's records get a dashed outline so a
+ * jump lands on something visually distinct from ordinary highlights. */
+.highlightAnnotRect-emphasized {
+  outline: 2px dashed var(--onward-pdf-accent, #5aa0f2);
+  outline-offset: 1px;
+}
+
+/* A highlight that carries a note gets a small marker instead of showing the
+ * note text on hover. Reading is the priority; the note is one click away. */
+.highlight-note-marker {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(10, 10, 10, 0.92);
+  color: #fff5cf;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 22px;
+  text-align: center;
+  pointer-events: auto;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.52);
+  cursor: pointer;
+  z-index: 5;
+}
+
+.highlight-note-marker:hover {
+  border-color: #ffe082;
+  background: #1f1f1f;
+}
+
+#highlightHoverMarker {
+  position: fixed;
+  z-index: 45;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 224, 130, 0.76);
+  background: rgba(18, 18, 18, 0.96);
+  color: #ffe082;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+/* ---------- selection palette ---------- */
+
+/* Positioned absolutely and re-parented onto the page element the selection
+ * sits on, so it tracks the content while scrolling instead of hovering at a
+ * fixed screen position over unrelated text. */
+.selection-highlight-palette {
+  position: absolute;
+  z-index: 48;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--onward-pdf-line);
+  border-radius: 10px;
+  background: var(--onward-pdf-panel-elevated);
+  box-shadow: var(--onward-pdf-shadow);
+  backdrop-filter: blur(10px);
+}
+
+.selection-highlight-palette[hidden],
+#viewerSection:not(.has-document) .selection-highlight-palette {
+  display: none;
+}
+
+.highlight-chip {
+  display: inline-flex;
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--onward-pdf-line);
+  background: var(--onward-pdf-panel);
+  color: var(--onward-pdf-text);
+  font-size: 12.5px;
+  cursor: pointer;
+  flex: none;
+  box-sizing: border-box;
+}
+
+.highlight-chip:hover {
+  border-color: var(--onward-pdf-accent);
+  background: color-mix(in srgb, var(--onward-pdf-accent) 15%, transparent);
+}
+
+.highlight-chip .chip-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  flex: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45) inset;
+}
+
+.highlight-chip.active {
+  border-color: var(--onward-pdf-accent);
+  box-shadow: 0 0 0 1px var(--onward-pdf-accent) inset;
+}
+
+/* The label name is a hover tooltip rather than inline text: four inline
+ * labels would make the palette wider than the paragraph it points at. */
+.highlight-chip .chip-name {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  min-width: 0;
+  max-width: 168px;
+  padding: 5px 8px;
+  transform: translateX(-50%);
+  border: 1px solid var(--onward-pdf-line);
+  border-radius: 8px;
+  background: var(--onward-pdf-panel-elevated);
+  color: var(--onward-pdf-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  box-shadow: var(--onward-pdf-shadow);
+  transition: opacity 0.12s ease, visibility 0.12s ease;
+}
+
+.highlight-chip:hover .chip-name,
+.highlight-chip:focus-visible .chip-name {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* ---------- note editor ---------- */
+
+#notePopup {
+  position: fixed;
+  box-sizing: border-box;
+  width: 320px;
+  min-width: 260px;
+  min-height: 220px;
+  max-width: min(520px, calc(100vw - 32px));
+  max-height: min(70vh, 620px);
+  resize: both;
+  overflow: auto;
+  z-index: 40;
+  background: var(--onward-pdf-panel-elevated);
+  border: 1px solid var(--onward-pdf-line);
+  border-radius: 12px;
+  box-shadow: var(--onward-pdf-shadow);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#notePopupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.note-label-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+#noteDeleteBtn {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--onward-pdf-muted);
+}
+
+#noteDeleteBtn:hover {
+  color: #ff9f9f;
+  border-color: rgba(255, 120, 120, 0.5);
+}
+
+#notePopupSnippet {
+  font-size: 12.5px;
+  color: var(--onward-pdf-muted);
+  line-height: 1.4;
+  max-height: 3.2em;
+  overflow: hidden;
+}
+
+#noteText {
+  width: 100%;
+  min-height: 120px;
+  flex: 1;
+  resize: vertical;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid var(--onward-pdf-line);
+  background: var(--onward-pdf-panel);
+  color: var(--onward-pdf-text);
+  padding: 8px 10px;
+  font-size: 13.5px;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+#notePopupActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+#notePopupActions button {
+  height: 30px;
+}
+
+/* pdf.js draws its own popup for any annotation carrying /Contents. Ours
+ * already have a purpose-built note editor, so suppress the default one —
+ * otherwise reopening a saved PDF shows both. */
+.annotationLayer section[data-onward-annotation-popup="true"].popupAnnotation,
+.annotationLayer section[data-onward-annotation-popup="true"] .popup {
+  display: none !important;
+}
+
+/* Likewise the native /Highlight rendering: we repaint those ourselves from
+ * the stored quads, so leaving pdf.js's copy visible would double the colour. */
+.annotationLayer section.highlightAnnotation[data-onward-annotation="true"] {
+  display: none !important;
+}
+
+/* Free-form zoom entry. Narrow on purpose — it sits between the preset list
+ * and the +/- buttons and must not push the search field off the toolbar. */
+#customZoomInput {
+  width: 62px;
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid var(--onward-pdf-line);
+  border-radius: 6px;
+  background: var(--onward-pdf-panel-elevated);
+  color: var(--onward-pdf-text);
+  font-size: 12.5px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+#customZoomInput:disabled { opacity: 0.5; }
+
+/* Unparseable entry. The field keeps the real scale; the border is what says
+ * "that input was not accepted" without stealing focus for a dialog. */
+#customZoomInput[aria-invalid="true"] {
+  border-color: var(--onward-pdf-danger-line);
+  background: var(--onward-pdf-danger-bg);
+}

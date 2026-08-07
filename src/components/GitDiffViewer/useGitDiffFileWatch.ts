@@ -5,6 +5,9 @@
 
 import { useEffect, useRef } from 'react'
 import type { GitFileStatus } from '../../types/electron'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { perfTraceDiagnostic } from '../../utils/perf-trace'
+import { expectedWatchPath, watchPathsEqual } from '../ProjectEditor/watchPathMatch'
 
 interface UseGitDiffFileWatchOptions {
   /** Whether the diff viewer is currently open / visible. */
@@ -47,21 +50,27 @@ export function useGitDiffFileWatch({
     const filename = selectedFile.filename
     const root = selectedFile.repoRoot || repoRoot
 
-    // Start watching the working-tree file.
-    void window.electronAPI.project.watchFile(root, filename)
+    // Start watching the working-tree file. Binary formats get the watcher's
+    // binary mode: a UTF-8 content read of a PDF/EPUB is both lossy and
+    // expensive, and the diff refresh only needs "it changed", not content.
+    const watchMode = /\.(pdf|epub)$/i.test(filename) ? 'binary' as const : 'text' as const
+    void window.electronAPI.project.watchFile(root, filename, watchMode)
 
-    // Build the expected absolute path for filtering incoming events.
-    // Match the normalisation that FileWatchManager uses (Node path.normalize).
-    const separator = root.includes('\\') ? '\\' : '/'
-    const expectedPath = root.endsWith(separator)
-      ? `${root}${filename}`
-      : `${root}${separator}${filename}`
-    const normalizePath = (value: string) => value.replace(/[\\/]/g, '/')
+    // Same shared matcher as the Project Editor's subscriber (watchPathMatch):
+    // hand-rolled root+sep+path comparisons silently dropped events for
+    // doubled-separator roots and absolute file paths — twice.
+    const expectedPath = expectedWatchPath(root, filename)
 
     const unsubscribe = window.electronAPI.project.onFileChanged(
       (fullPath, changeType) => {
         if (changeType !== 'changed' && changeType !== 'deleted') return
-        if (normalizePath(fullPath) !== normalizePath(expectedPath)) return
+        const matched = watchPathsEqual(fullPath, expectedPath)
+        perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_CHANGE_RECEIVED, {
+          matched,
+          changeType,
+          mode: watchMode
+        })
+        if (!matched) return
         onFileChangedRef.current(changeType)
       }
     )

@@ -606,6 +606,8 @@ export interface ProjectReadResult {
   /** Absolute filesystem path of the previewed file (PDF/EPUB/HTML). */
   previewPath?: string
   sizeBytes?: number
+  /** Disk identity at open time (PDF only) — seed for the save-gate pre-image. */
+  pdfFileMeta?: { size: number; mtimeMs: number }
   openMode?: ProjectFileResolvedOpenMode
   requiresConfirmation?: boolean
   requiresOpenChoice?: boolean
@@ -624,6 +626,25 @@ export interface ProjectFileChunkResult {
   sizeBytes: number
   text?: string
   base64?: string
+  error?: string
+}
+
+/**
+ * Outcome of an in-place PDF rewrite. `reason` is deliberately an enum rather
+ * than a message: the renderer degrades silently on an automatic save when the
+ * file is read-only or locked, and only surfaces an error for an explicit save,
+ * so it has to distinguish those cases without parsing text.
+ */
+export interface ProjectPdfSaveResult {
+  success: boolean
+  root: string
+  path: string
+  bytes?: number
+  reason?: 'invalid-path' | 'not-a-pdf' | 'read-only' | 'locked' | 'write-failed' | 'external-modified'
+  /** Disk identity found when an 'external-modified' refusal was issued. */
+  currentDisk?: { size: number; mtimeMs: number }
+  /** Disk identity after a successful write — the caller's next expected pre-image. */
+  savedDisk?: { size: number; mtimeMs: number }
   error?: string
 }
 
@@ -836,6 +857,8 @@ export interface ProjectAPI {
   filesExist: (root: string, paths: string[]) => Promise<boolean[]>
   readFileChunk: (root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) => Promise<ProjectFileChunkResult>
   saveFile: (root: string, path: string, content: string) => Promise<ProjectSaveResult>
+  /** Atomic in-place rewrite of a PDF; highlight-annotation save path only. */
+  savePdfBytes: (root: string, path: string, bytes: ArrayBuffer, expectedDisk?: { size: number; mtimeMs: number }) => Promise<ProjectPdfSaveResult>
   createFile: (root: string, path: string, content?: string) => Promise<ProjectActionResult>
   createFolder: (root: string, path: string) => Promise<ProjectActionResult>
   renamePath: (root: string, oldPath: string, newPath: string) => Promise<ProjectRenameResult>
@@ -850,9 +873,9 @@ export interface ProjectAPI {
   searchCancel: () => Promise<{ success: boolean }>
   onSearchResult: (callback: (searchId: string, matches: ProjectSearchMatch[]) => void) => () => void
   onSearchDone: (callback: (stats: ProjectSearchStats) => void) => () => void
-  watchFile: (root: string, path: string) => Promise<{ success: boolean; error?: string }>
+  watchFile: (root: string, path: string, mode?: 'text' | 'binary') => Promise<{ success: boolean; error?: string }>
   unwatchFile: (root: string, path: string) => Promise<{ success: boolean }>
-  onFileChanged: (callback: (fullPath: string, changeType: 'changed' | 'deleted', content?: string) => void) => () => void
+  onFileChanged: (callback: (fullPath: string, changeType: 'changed' | 'deleted', content?: string, meta?: { mtimeMs: number; size: number }) => void) => () => void
   watchImageFiles: (root: string, paths: string[]) => Promise<{ success: boolean }>
   unwatchImageFiles: (root: string, paths: string[]) => Promise<{ success: boolean }>
   unwatchAllImageFiles: () => Promise<{ success: boolean }>
@@ -1175,7 +1198,7 @@ export interface DebugAPI {
   gitStateMirrorDebugInspect: () => Promise<Record<string, unknown>>
   getApiServerPort: () => Promise<number>
   postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
-  writeExternalFile: (payload: { root: string; relPath: string; content: string }) => Promise<{ ok: boolean; error?: string }>
+  writeExternalFile: (payload: { root: string; relPath: string; content?: string; contentBase64?: string; atomic?: boolean }) => Promise<{ ok: boolean; error?: string }>
   gitInitForAutotest: (payload: { dir: string }) => Promise<{ ok: boolean; error?: string }>
   poisonRepoProbeForAutotest: (payload: { cwd: string; durationMs?: number }) => Promise<{ ok: boolean; error?: string }>
   gitAutofetchForAutotest: (payload: { repoRoot: string }) => Promise<{ ok: boolean; reason?: string; durationMs?: number; error?: string }>

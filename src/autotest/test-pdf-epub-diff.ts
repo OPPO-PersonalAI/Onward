@@ -43,6 +43,9 @@ import { buildChangeDirectoryCommand } from '../utils/terminal-command'
 
 const PDF_NAME = 'book.pdf'
 const EPUB_NAME = 'book.epub'
+// Annotation-diff scenario: committed base vs working-tree modified differ in
+// CYY_MARK annotations only (fixtures/pdf-annotation-diff).
+const ANNOTATED_PDF_NAME = 'annotated.pdf'
 // Base PDF fixture copied into the repo at runtime to create the later "added"
 // (fresh.pdf) single-pane scenario. Resolved against the manifest's absolute
 // fixtureSrcDir so it never depends on rootPath.
@@ -334,6 +337,74 @@ export async function testPdfEpubDiff(ctx: AutotestContext): Promise<TestResult[
     pdfState?.paneCount === 2 && pdfState?.isSinglePane === false,
     { state: pdfState }
   )
+
+  // ---------- Git Diff: annotation diff panel (annotated.pdf) ----------
+  // The two versions of annotated.pdf carry the same three pages of text and
+  // differ in CYY_MARK annotations only — one added (page 3), one removed
+  // (page 3), one changed (color+note). The panel must report exactly that,
+  // outline the records in the panes, and a row click must move the right
+  // pane. Fixture literals: pdf-annotation-diff-fixture-builder.mjs.
+
+  {
+    const annIdx = (getGitDiffApi()?.getFileList?.() ?? []).findIndex(
+      f => f.filename === ANNOTATED_PDF_NAME
+    )
+    getGitDiffApi()?.selectFileByIndex(annIdx)
+    const annPanelReady = await waitFor(
+      'git-diff-pdf-annotation-panel',
+      () => Boolean(getGitDiffApi()?.getPdfCompareState?.()?.annotationDiff),
+      20000,
+      200
+    )
+    const annState = getGitDiffApi()?.getPdfCompareState?.() ?? null
+    const annDiff = annState?.annotationDiff ?? null
+    record('git-diff-pdf-annotation-diff-counts',
+      annPanelReady
+        && annDiff?.added === 1
+        && annDiff?.removed === 1
+        && annDiff?.changed === 1
+        && ['anndiff-fresh', 'anndiff-drop', 'anndiff-edit'].every(id => (annDiff?.rowIds ?? []).includes(id)),
+      { annDiff }
+    )
+
+    const modifiedFrame = document.querySelector(
+      '.git-pdf-compare-pane[data-side="modified"] iframe.git-pdf-compare-frame'
+    ) as HTMLIFrameElement | null
+    const frameDoc = modifiedFrame?.contentDocument ?? null
+
+    // The panel's emphasis message paints a dashed outline on the listed
+    // records; page 1 holds the changed record, so at least one emphasized
+    // rect is on-screen without scrolling.
+    const emphasized = await waitFor(
+      'git-diff-pdf-annotation-emphasis',
+      () => (frameDoc?.querySelectorAll('.highlightAnnotRect-emphasized').length ?? 0) > 0,
+      10000,
+      200
+    )
+    record('git-diff-pdf-annotation-emphasis-painted', emphasized, {
+      emphasizedRects: frameDoc?.querySelectorAll('.highlightAnnotRect-emphasized').length ?? -1
+    })
+
+    // Jump: the added record lives on page 3, off-screen at open. Clicking
+    // its row must scroll the MODIFIED pane (added/changed target that side).
+    const container = frameDoc?.getElementById('viewerContainer') as HTMLElement | null
+    const scrollBefore = container?.scrollTop ?? -1
+    const row = document.querySelector(
+      '.git-pdf-annotation-diff-row[data-annotation-id="anndiff-fresh"]'
+    ) as HTMLElement | null
+    row?.click()
+    const jumped = await waitFor(
+      'git-diff-pdf-annotation-jump',
+      () => Boolean(container && container.scrollTop > scrollBefore + 100),
+      8000,
+      150
+    )
+    record('git-diff-pdf-annotation-jump-scrolls-pane', jumped && scrollBefore >= 0, {
+      scrollBefore,
+      scrollAfter: container?.scrollTop ?? -1,
+      rowFound: Boolean(row)
+    })
+  }
 
   // ---------- Git Diff: click the EPUB ----------
 

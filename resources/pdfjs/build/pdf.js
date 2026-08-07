@@ -4260,7 +4260,7 @@ class AnnotationEditorUIManager {
     this.#activeEditor = null;
     this.#selectedEditors.clear();
     this.#commandManager.destroy();
-    this.#altTextManager.destroy();
+    this.#altTextManager?.destroy();
   }
   get hcmFilter() {
     return (0, _util.shadow)(this, "hcmFilter", this.#pageColors ? this.#filterFactory.addHCMFilter(this.#pageColors.foreground, this.#pageColors.background) : "none");
@@ -12613,6 +12613,9 @@ function appendText(task, geom, styles) {
   textDiv.setAttribute("role", "presentation");
   textDiv.textContent = geom.str;
   textDiv.dir = geom.dir;
+  if (geom.isInvisibleText) {
+    textDiv.dataset.pdfInvisibleText = "1";
+  }
   if (task._fontInspectorEnabled) {
     textDiv.dataset.fontName = geom.fontName;
   }

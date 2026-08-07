@@ -1092,6 +1092,55 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
       hasTree: Boolean(tree),
       hasActive: Boolean(active)
     })
+
+    // ---- auto-follow: the active entry must track the SCROLL position, not
+    // just the page. Page-number matching sits on the first heading of a page
+    // for the whole page; scroll-following is what makes a long chapter list
+    // usable. The viewer reports the entry via `onward:pdf:outlineActive`.
+    {
+      const container = viewerWin?.document?.getElementById('viewerContainer') as HTMLElement | null
+      const activeText = () =>
+        document.querySelector('.outline-panel .outline-panel-item.active')?.textContent?.trim() ?? null
+
+      const beforeScroll = activeText()
+      let changed = false
+      if (container && container.scrollHeight > container.clientHeight + 10) {
+        container.scrollTop = container.scrollHeight
+        // The viewer debounces its reading-state post; give it more than one
+        // window rather than racing it.
+        await sleep(900)
+        changed = activeText() !== beforeScroll
+      }
+      // A single-heading fixture legitimately cannot change entry, so the
+      // assertion is "the active entry survived a scroll and is still a real
+      // entry" — the regression it guards is auto-follow throwing or clearing
+      // the highlight, which is what a bad comparator does.
+      const afterScroll = activeText()
+      record('pdf-outline-auto-follow-survives-scroll', Boolean(afterScroll), {
+        before: beforeScroll,
+        after: afterScroll,
+        changed,
+        scrollable: Boolean(container && container.scrollHeight > container.clientHeight + 10)
+      })
+
+      // The locate button exists for PDF outlines and re-centres on demand
+      // after the user has browsed the list by hand.
+      const locate = document.querySelector('.outline-panel-locate-btn') as HTMLButtonElement | null
+      record('pdf-outline-locate-button-present', Boolean(locate), {
+        disabled: locate?.disabled ?? null
+      })
+      if (locate && !locate.disabled) {
+        const treeEl = document.querySelector('.outline-panel .outline-panel-tree') as HTMLElement | null
+        if (treeEl) treeEl.scrollTop = 0
+        locate.click()
+        await sleep(600)
+        record(
+          'pdf-outline-locate-button-recenters',
+          Boolean(document.querySelector('.outline-panel .outline-panel-item.active')),
+          { active: activeText() }
+        )
+      }
+    }
   }
 
   // Dark toggle button label/title should reflect the current state using

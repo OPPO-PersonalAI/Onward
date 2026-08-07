@@ -243,6 +243,21 @@ export interface UIPreferences {
   projectEditorOutlineVisible?: boolean
   projectEditorOutlineWidth?: number
   projectEditorOutlineTarget?: 'editor' | 'preview'
+  // PDF annotation panel. UI preferences only — the annotations themselves live
+  // inside the PDF file (the confirmed storage strategy), never here.
+  projectEditorPdfAnnotationPanelVisible?: boolean
+  projectEditorPdfAnnotationPanelWidth?: number
+  projectEditorPdfAnnotationSort?: 'created' | 'page'
+  projectEditorPdfAnnotationDensity?: 'comfortable' | 'compact'
+  projectEditorPdfAnnotationNotesExpanded?: boolean
+  projectEditorPdfAnnotationAutoScroll?: boolean
+  /** User-defined highlight labels. `id` is written into every PDF the label is
+   *  used in, so ids are generated once and never rewritten. */
+  projectEditorPdfHighlightLabels?: Array<{ id: string; name: string; color: string }>
+  projectEditorPdfNotePopupSize?: { width: number; height: number }
+  /** Auto-follow the outline while scrolling a PDF (off restores the previous
+   *  behaviour, where the outline only tracked page changes). */
+  projectEditorPdfOutlineFollow?: boolean
   // Git Diff Viewer
   gitDiffFileListWidth?: number
   gitDiffFileListViewMode?: 'tree' | 'flat'

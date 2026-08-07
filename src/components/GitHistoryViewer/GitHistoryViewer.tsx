@@ -2283,6 +2283,17 @@ export function GitHistoryViewer({
             noOriginal: t('gitDiff.pdfCompare.noOriginal'),
             noModified: t('gitDiff.pdfCompare.noModified')
           }}
+          annotationDiffLabels={{
+            title: t('gitDiff.pdfCompare.annotationDiff.title'),
+            added: t('gitDiff.pdfCompare.annotationDiff.added'),
+            removed: t('gitDiff.pdfCompare.annotationDiff.removed'),
+            changed: t('gitDiff.pdfCompare.annotationDiff.changed'),
+            fieldLabelId: t('gitDiff.pdfCompare.annotationDiff.fieldLabel'),
+            fieldColor: t('gitDiff.pdfCompare.annotationDiff.fieldColor'),
+            fieldPage: t('gitDiff.pdfCompare.annotationDiff.fieldPage'),
+            fieldNote: t('gitDiff.pdfCompare.annotationDiff.fieldNote'),
+            fieldTextSnapshot: t('gitDiff.pdfCompare.annotationDiff.fieldText')
+          }}
         />
       )
     }
