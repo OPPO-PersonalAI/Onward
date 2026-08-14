@@ -63,7 +63,7 @@ import {
   removeMirrorAlias,
   resolveTerminalGitDisplayState
 } from './gitStatusIdentity'
-import { resolveGitSyncDisplay, resolveGitSyncFreshness } from './gitSyncDisplay'
+import { resolveGitSyncDisplay, resolveGitSyncFreshness, bucketSyncAge } from './gitSyncDisplay'
 import '@xterm/xterm/css/xterm.css'
 import './TerminalGrid.css'
 import '../../styles/path-copy-toast.css'
@@ -141,16 +141,6 @@ const TERMINAL_PATH_SEGMENTS = 3
  * diagnostic itself becoming the storm.
  */
 const MIRROR_UPDATE_TRACE_THROTTLE_MS = 250
-/**
- * Re-render cadence for the sync-staleness treatment (BUG-0005 R3).
- *
- * Staleness is a function of ELAPSED TIME, not of an incoming event: when the
- * fetch loop stops succeeding there is no delta to re-render on, so without a
- * tick the badge would never admit its number had gone stale. 60 s against the
- * 20-min threshold is ample resolution and costs one setState per minute — it
- * runs only while the grid is visible and only when a repo has an upstream.
- */
-const SYNC_FRESHNESS_TICK_MS = 60_000
 const FOCUS_REQUEST_MAX_ATTEMPTS = 12
 const FOCUS_REQUEST_RETRY_MS = 50
 const TERMINAL_CONTEXT_MENU_MARGIN = 8
@@ -386,7 +376,7 @@ export const TerminalGrid = memo(function TerminalGrid({
     status: TerminalGitStatus | null
     ahead: number
     behind: number
-    syncStale: boolean
+    syncKind: string
   }>>({})
   /**
    * Per-cwd throttle for the mirror-update diagnostic. A single `git pull` that
@@ -395,8 +385,10 @@ export const TerminalGrid = memo(function TerminalGrid({
    * that burst, not amplify it.
    */
   const mirrorUpdateTraceAtRef = useRef<Map<string, number>>(new Map())
-  /** Bumped by a slow timer so time-based sync staleness re-evaluates. */
-  const [syncFreshnessTick, setSyncFreshnessTick] = useState(0)
+  /** repoRoots with a user-initiated fetch in flight — keeps the badge idempotent. */
+  const [syncingRepoRoots, setSyncingRepoRoots] = useState<ReadonlySet<string>>(() => new Set())
+  /** Sampled on hover so the tooltip's "X minutes ago" is honest without a timer. */
+  const [branchTooltipNow, setBranchTooltipNow] = useState<number>(() => Date.now())
   // macOS canonicalises `/var/...` to `/private/var/...` (the actual mount
   // point of the symlink). The mirror worker uses `path.resolve` so its
   // emitted `cwd` carries the `/private/` prefix; the renderer subscribes
@@ -1150,6 +1142,7 @@ export const TerminalGrid = memo(function TerminalGrid({
       const freshnessSignal = resolveGitSyncFreshness({
         lastFetchOkAt: gitState.lastFetchOkAt,
         lastFetchAttemptAt: gitState.lastFetchAttemptAt,
+        remoteUnreachable: gitState.remoteUnreachable,
         now: Date.now(),
         hasUpstream: gitState.ahead !== null || gitState.behind !== null
       })
@@ -1159,7 +1152,7 @@ export const TerminalGrid = memo(function TerminalGrid({
         status,
         ahead: syncSignal.ahead,
         behind: syncSignal.behind,
-        syncStale: freshnessSignal.stale
+        syncKind: freshnessSignal.kind
       }
       const previous = lastRenderedGitSignalRef.current[termInfo.id]
       if (!previous || previous.branch !== signal.branch) {
@@ -1185,14 +1178,14 @@ export const TerminalGrid = memo(function TerminalGrid({
         !previous ||
         previous.ahead !== signal.ahead ||
         previous.behind !== signal.behind ||
-        previous.syncStale !== signal.syncStale
+        previous.syncKind !== signal.syncKind
       ) {
         perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_TERMINAL_TITLE_SYNC_RENDERED, {
           terminalId: termInfo.id,
           cwd: signal.cwd,
           ahead: signal.ahead,
           behind: signal.behind,
-          stale: signal.syncStale
+          syncKind: signal.syncKind
         })
       }
       nextSignals[termInfo.id] = signal
@@ -1204,38 +1197,42 @@ export const TerminalGrid = memo(function TerminalGrid({
     terminalInfos,
     oscDetectedCwds,
     mirrorSnapshots,
-    mirrorSnapshotAliases,
-    syncFreshnessTick
+    mirrorSnapshotAliases
   ])
 
-  // Drive the staleness re-evaluation. See SYNC_FRESHNESS_TICK_MS: without a
-  // tick, a badge whose fetch stopped succeeding would keep presenting its last
-  // number as current forever, because "nothing changed" produces no delta.
-  useEffect(() => {
-    if (hidden) return
-    const timer = setInterval(() => {
-      setSyncFreshnessTick((tick) => tick + 1)
-    }, SYNC_FRESHNESS_TICK_MS)
-    return () => { clearInterval(timer) }
-  }, [hidden])
 
   /**
-   * A single "now" shared by every badge in one render pass. Reading
-   * `Date.now()` per badge would let otherwise-identical rows disagree about
-   * staleness at a threshold boundary; one value per pass keeps the grid
-   * internally consistent.
+   * The recovery path: a user-initiated `git fetch` for this Task's repo.
    *
-   * Both deps are load-bearing even though neither appears in the body — they
-   * are the invalidation triggers, not inputs. `syncFreshnessTick` re-dates the
-   * value on the slow timer (staleness is a function of elapsed time, so nothing
-   * else would ever invalidate it); `mirrorSnapshots` re-dates it the instant a
-   * fetch lands, so a badge clears its stale mark immediately instead of waiting
-   * out the remainder of the tick. Do not "simplify" either one away.
+   * Before this existed the app had NO manual fetch anywhere, so a repo whose
+   * background fetch kept failing left the user with no in-app way to move the
+   * behind count — the field bug's user resorted to typing `git fetch` in the
+   * terminal. Peer convention is that the sync indicator IS the action
+   * (VS Code's status bar item, Sublime Merge's clickable ahead/behind).
    */
-  const syncFreshnessNow = useMemo(
-    () => Date.now(),
-    [syncFreshnessTick, mirrorSnapshots]
-  )
+  const handleBranchSync = useCallback(async (repoRoot: string | null, cwd: string | null) => {
+    if (!repoRoot) return
+    if (syncingRepoRoots.has(repoRoot)) return
+    perfTraceDiagnostic(PERF_TRACE_EVENT.RENDERER_GIT_SYNC_FETCH_CLICKED, { cwd: cwd ?? null })
+    setSyncingRepoRoots((prev) => {
+      const next = new Set(prev)
+      next.add(repoRoot)
+      return next
+    })
+    try {
+      await window.electronAPI?.git?.fetchNow?.(repoRoot)
+    } catch {
+      // Outcome detail lives in the trace; the badge only reflects done-ness.
+    } finally {
+      setSyncingRepoRoots((prev) => {
+        const next = new Set(prev)
+        next.delete(repoRoot)
+        return next
+      })
+      // Re-date the tooltip so a success reads "just now" immediately.
+      setBranchTooltipNow(Date.now())
+    }
+  }, [syncingRepoRoots])
 
   const formatCompactPath = useCallback((cwd: string): string => {
     const trimmed = cwd.trim()
@@ -1451,6 +1448,7 @@ export const TerminalGrid = memo(function TerminalGrid({
       document.removeEventListener('keydown', handleKeyDown)
     }
   }, [termCtxMenu, closeTermCtxMenu])
+
 
   // Autotest-only sticky overrides so tests can pin branch / repoName without
   // being clobbered by the main-process git watcher poll cycle.
@@ -3247,21 +3245,26 @@ export const TerminalGrid = memo(function TerminalGrid({
             // from the mirror snapshot only (legacy RPC path has none).
             const sync = resolveGitSyncDisplay({ status, ahead: gitState.ahead, behind: gitState.behind })
             // BUG-0005 R3: `behind` is only as fresh as the last SUCCESSFUL
-            // background fetch. When fetching has been failing the badge would
-            // otherwise keep rendering a confident count (often `↓0`) that really
-            // means "we have not been able to ask in hours".
+            // background fetch. When fetching has NEVER worked for this repo the
+            // badge would otherwise keep rendering a confident count (often `↓0`)
+            // that really means "we have never been able to ask".
             const syncFreshness = resolveGitSyncFreshness({
               lastFetchOkAt: gitState.lastFetchOkAt,
               lastFetchAttemptAt: gitState.lastFetchAttemptAt,
-              now: syncFreshnessNow,
+              remoteUnreachable: gitState.remoteUnreachable,
+              now: branchTooltipNow,
               hasUpstream: gitState.ahead !== null || gitState.behind !== null
             })
+            const branchRepoRoot = gitState.mirror?.repoRoot ?? null
+            const branchCanSync = Boolean(branchRepoRoot)
+            const branchSyncing = branchRepoRoot ? syncingRepoRoots.has(branchRepoRoot) : false
             const branchStatusClass = sync.dotState !== 'clean'
               ? `terminal-grid-branch--${sync.dotState}`
               : ''
             const branchClassName = branchStatusClass
               ? `terminal-grid-branch ${branchStatusClass}`
               : 'terminal-grid-branch'
+            const branchBadgeClassName = branchClassName
             const branchBaseTitle = sync.showAhead || sync.showBehind
               ? t('terminalGrid.branchSyncTitle', {
                   branch: branch ?? '',
@@ -3269,19 +3272,52 @@ export const TerminalGrid = memo(function TerminalGrid({
                   behind: sync.behind
                 })
               : t('terminalGrid.branchTitle', { branch: branch ?? '' })
-            // Second tooltip line, only when the count cannot be trusted. Kept
-            // to the tooltip + a de-emphasised arrow rather than a warning icon:
-            // a badge that shouts on every offline stretch becomes noise.
-            const branchStaleNote = !syncFreshness.stale
-              ? null
-              : syncFreshness.neverSynced
-                ? t('terminalGrid.syncNeverSynced')
-                : t('terminalGrid.syncStaleTitle', {
-                    minutes: Math.max(1, Math.round((syncFreshness.ageMs ?? 0) / 60000))
-                  })
-            const branchSyncTitle = branchStaleNote
-              ? `${branchBaseTitle}\n${branchStaleNote}`
-              : branchBaseTitle
+            // Freshness is an ALWAYS-PRESENT second line, not an exception-only
+            // one. Peer research (7 products) found nobody marks staleness on the
+            // count itself; the count is left alone and a separate line carries
+            // "how current is this" — GitHub Desktop's "Last fetched X ago" is the
+            // canonical form. `behind` is only as fresh as the last successful
+            // fetch, so without this the badge cannot distinguish "up to date"
+            // from "never been able to ask".
+            const branchFreshnessLine = (() => {
+              switch (syncFreshness.kind) {
+                case 'no-upstream':
+                  return null
+                case 'never-attempted':
+                  // Cold launch before the first tick — saying anything here is noise.
+                  return null
+                case 'never-succeeded':
+                  return t('terminalGrid.syncNeverSynced')
+                case 'synced':
+                default: {
+                  if (syncFreshness.useAbsoluteDate) {
+                    // Past a day a relative time carries less than a date — the
+                    // treatment GitHub Desktop and GitLens both converged on.
+                    const at = gitState.lastFetchOkAt
+                    return t('terminalGrid.syncLastAtDate', {
+                      date: at ? new Date(at).toLocaleDateString() : ''
+                    })
+                  }
+                  const bucket = bucketSyncAge(syncFreshness.ageMs ?? 0)
+                  if (bucket.unit === 'just-now') return t('terminalGrid.syncLastJustNow')
+                  if (bucket.unit === 'minutes') {
+                    return t('terminalGrid.syncLastMinutes', { minutes: bucket.value })
+                  }
+                  return t('terminalGrid.syncLastHours', { hours: bucket.value })
+                }
+              }
+            })()
+            // The ONLY failure detail surfaced. Auth walls / missing remotes /
+            // bare timeouts are not actionable from a tooltip and their full
+            // classification already reaches us through the perf trace.
+            const branchUnreachableLine = syncFreshness.remoteUnreachable
+              ? t('terminalGrid.syncRemoteUnreachable')
+              : null
+            const branchSyncTitle = [
+              branchBaseTitle,
+              branchFreshnessLine,
+              branchUnreachableLine
+            ].filter(Boolean).join('\n')
 
             // Custom mode lays each Task on a stored rectangle inside the
             // 4col x 2row atomic mesh. Preset modes leave grid-area unset
@@ -3443,40 +3479,65 @@ export const TerminalGrid = memo(function TerminalGrid({
 
                     {branch && (
                       <span
-                        className={`${branchClassName} terminal-grid-copyable`}
+                        className={branchBadgeClassName}
                         title={branchSyncTitle}
-                        onDoubleClick={(e) => {
-                          void handleCopyText(e, termInfo.id, t('terminalGrid.copyLabel.branch'), branch)
-                        }}
+                        // Recompute "now" only when the user is about to read the
+                        // tooltip. Freshness itself is event-driven; a timer that
+                        // ticks purely so a hover-only string stays honest is a
+                        // timer we do not need.
+                        onMouseEnter={() => { setBranchTooltipNow(Date.now()) }}
                       >
-                        <span className="terminal-grid-branch-name">{branch}</span>
+                        {/*
+                          Double-click to copy, matching the repo-name and cwd
+                          chips beside it. An earlier revision moved this to a
+                          right-click menu to free the click slot for syncing —
+                          that broke muscle memory AND made the badge the only
+                          header chip without the house convention. The sync
+                          action lives on its own button below instead.
+                        */}
+                        <span
+                          className="terminal-grid-branch-name terminal-grid-copyable"
+                          onDoubleClick={(e) => {
+                            void handleCopyText(e, termInfo.id, t('terminalGrid.copyLabel.branch'), branch)
+                          }}
+                        >
+                          {branch}
+                        </span>
                         {sync.showAhead && (
                           <span className="terminal-grid-branch-ahead" aria-label={t('terminalGrid.aheadAria', { ahead: sync.ahead })}>
                             {`↑${sync.ahead}`}
                           </span>
                         )}
-                        {(sync.showBehind || syncFreshness.stale) && (
-                          <span
-                            className={
-                              syncFreshness.stale
-                                ? 'terminal-grid-branch-behind terminal-grid-branch-behind--stale'
-                                : 'terminal-grid-branch-behind'
-                            }
-                            aria-label={
-                              syncFreshness.stale && !sync.showBehind
-                                ? t('terminalGrid.behindUnknownAria')
-                                : t('terminalGrid.behindAria', { behind: sync.behind })
-                            }
-                          >
-                            {/*
-                              A stale count with behind === 0 renders `↓?` rather
-                              than disappearing. "No arrow" reads as "you are up
-                              to date", which is precisely the false statement
-                              this fix exists to stop making — the field report
-                              was a user trusting exactly that.
-                            */}
-                            {sync.showBehind ? `↓${sync.behind}` : '↓?'}
+                        {sync.showBehind && (
+                          <span className="terminal-grid-branch-behind" aria-label={t('terminalGrid.behindAria', { behind: sync.behind })}>
+                            {`↓${sync.behind}`}
                           </span>
+                        )}
+                        {/*
+                          The sync affordance, ALWAYS visible when the cwd is a
+                          repo — this is the discoverability half of the fix.
+                          Modelled on VS Code's status bar, whose $(sync) icon is
+                          permanent and becomes $(sync~spin) mid-fetch: the same
+                          glyph is both "you can click here" and the progress
+                          indicator, so no cursor trickery is needed.
+                        */}
+                        {branchCanSync && (
+                          <button
+                            type="button"
+                            className="terminal-grid-branch-sync"
+                            title={branchSyncing ? t('terminalGrid.syncInProgress') : t('terminalGrid.syncClickHint')}
+                            aria-label={t('terminalGrid.syncAria')}
+                            aria-busy={branchSyncing || undefined}
+                            disabled={branchSyncing}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleBranchSync(branchRepoRoot, gitState.normalizedCwd)
+                            }}
+                          >
+                            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                              <path d="M8 3a5 5 0 1 0 4.546 2.914.75.75 0 0 1 1.364-.628A6.5 6.5 0 1 1 8 1.5V.31a.4.4 0 0 1 .637-.322l2.36 1.69a.4.4 0 0 1 0 .644l-2.36 1.69A.4.4 0 0 1 8 3.69V3z" />
+                            </svg>
+                          </button>
                         )}
                       </span>
                     )}

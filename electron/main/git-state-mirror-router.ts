@@ -1032,13 +1032,19 @@ class GitStateMirrorRouter {
     if (!repoRoot) return 0
     const prev = this.fetchFreshness.get(repoRoot)
     const next: GitFetchFreshness = {
+      // `??` so a failure keeps the last known SUCCESS timestamp rather than
+      // erasing it — "succeeded 4 min ago, failing since" is the true state.
       lastFetchOkAt: freshness.lastFetchOkAt ?? prev?.lastFetchOkAt,
-      lastFetchAttemptAt: freshness.lastFetchAttemptAt ?? prev?.lastFetchAttemptAt
+      lastFetchAttemptAt: freshness.lastFetchAttemptAt ?? prev?.lastFetchAttemptAt,
+      // Reachability describes the LATEST attempt only, so it is replaced, not
+      // merged — a success must clear a previous unreachable.
+      remoteUnreachable: freshness.remoteUnreachable ?? prev?.remoteUnreachable
     }
     if (
       prev &&
       prev.lastFetchOkAt === next.lastFetchOkAt &&
-      prev.lastFetchAttemptAt === next.lastFetchAttemptAt
+      prev.lastFetchAttemptAt === next.lastFetchAttemptAt &&
+      prev.remoteUnreachable === next.remoteUnreachable
     ) {
       return 0
     }
@@ -1062,6 +1068,7 @@ class GitStateMirrorRouter {
     if (!fresh) return
     state.lastFetchOkAt = fresh.lastFetchOkAt
     state.lastFetchAttemptAt = fresh.lastFetchAttemptAt
+    state.remoteUnreachable = fresh.remoteUnreachable
   }
 
   /**

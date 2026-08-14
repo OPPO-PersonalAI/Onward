@@ -473,6 +473,13 @@ export interface GitStateMirrorSnapshot {
   lastFetchOkAt?: number
   /** `Date.now()` of the last background fetch ATTEMPT, successful or not. */
   lastFetchAttemptAt?: number
+  /**
+   * True when the most recent fetch attempt could not reach the remote; cleared
+   * on success. A boolean rather than the classified reason on purpose: auth /
+   * no-remote / generic-timeout text is not actionable from a tooltip, and the
+   * full classification stays in the perf trace for diagnosis.
+   */
+  remoteUnreachable?: boolean
   status: TerminalGitStatus | null
   files: GitFileStatus[]
   repos?: GitRepoContext[]
@@ -789,6 +796,13 @@ export interface GitAPI {
   notifyTerminalFocus: (terminalId: string) => Promise<{ success: true }>
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
   notifyTerminalGitCommand: (payload: { terminalId: string; subcommand: string; createsRepo: boolean }) => Promise<{ success: boolean }>
+  /**
+   * User-initiated `git fetch` for one repo — what the Task branch badge's
+   * click calls. Unlike {@link revalidateMirror} (local recompute only) this
+   * contacts the remote, so it is the only renderer-reachable way to move the
+   * behind count. `busy` means a fetch for this repo was already running.
+   */
+  fetchNow: (repoRoot: string) => Promise<{ ok: boolean; busy?: boolean }>
   revalidateMirror: (cwd: string) => Promise<{ success: boolean }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void

@@ -180,6 +180,13 @@ export const IPC = {
   // recompute + bumps mirror generation so the renderer's DiffEditor
   // key changes and the full chain re-mounts cleanly.
   GIT_STATE_MIRROR_FORCE_REFRESH: 'git-state-mirror:force-refresh',
+  /**
+   * User-initiated `git fetch` for one repo (BUG-0005 follow-up). Distinct from
+   * FORCE_REFRESH, which only re-runs the LOCAL status recompute and therefore
+   * can never move the behind count. This is the recovery path the badge click
+   * drives; before it existed the app had no manual fetch affordance at all.
+   */
+  GIT_FETCH_NOW: 'git:fetch-now',
 
   // project
   PROJECT_BUILD_FILE_INDEX: 'project:build-file-index',

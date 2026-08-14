@@ -33,11 +33,23 @@
  *                         renderer-visible snapshot (the badge's staleness input)
  *   AB-10 fresh failure → a failed fetch stamps lastFetchAttemptAt but leaves
  *                         lastFetchOkAt unset — the precise state the pure
- *                         resolveGitSyncFreshness table renders as stale
+ *                         resolveGitSyncFreshness table calls 'never-succeeded'
  *
- * The stale RENDERING itself (muted `↓`, `↓?` placeholder, tooltip) is a pure
- * function of those two timestamps and is locked by git-sync-display's unit
- * test; these cases lock the plumbing that supplies them.
+ * Recovery + failure-surfacing (2026-08-07, after peer research):
+ *
+ *   AB-11 manual fetch  → the PRODUCTION `git.fetchNow` IPC that the badge click
+ *                         uses. AB-06 only proved the autotest-only force hook;
+ *                         until this landed the app had no manual fetch at all
+ *   AB-12 quiet failure → a missing-remote failure must NOT be reported to the
+ *                         UI as unreachable
+ *   AB-13 loud failure  → a refused connection classifies as `network` and DOES
+ *                         reach the badge. AB-12 + AB-13 pin the mapping in both
+ *                         directions: a false positive cries wolf, a false
+ *                         negative hides a real outage
+ *
+ * The RENDERING itself (tooltip wording, age bucketing, which kind shows what)
+ * is a pure function of these snapshot fields and is locked by git-sync-display's
+ * unit test; these cases lock the plumbing that supplies them.
  *
  * AB-01..05 prove the parse → worker → IPC → renderer-snapshot pipeline (the
  * `# branch.ab` values reach the snapshot the badge renders from). The
@@ -61,6 +73,7 @@ interface Manifest {
   fetchBehind: string
   failFetch: string
   timeoutFetch: string
+  unreachable: string
   noUpstream: string
   neutralCwd: string
 }
@@ -72,6 +85,7 @@ interface MirrorSnapshot {
   behind?: number
   lastFetchOkAt?: number
   lastFetchAttemptAt?: number
+  remoteUnreachable?: boolean
 }
 
 const CONVERGE_TIMEOUT_MS = 20_000
@@ -285,6 +299,53 @@ export async function testGitAutofetchAheadBehind(ctx: AutotestContext): Promise
       classified: fetchRes.classified ?? null,
       durationMs: fetchRes.durationMs ?? null,
       stderrTailLength: (fetchRes.stderrTail ?? '').length
+    })
+  }
+
+  // ── AB-11: the PRODUCTION user-initiated fetch IPC works end-to-end. ──
+  // AB-06 proved the autotest-only force hook; this proves the path the badge
+  // click actually uses. Before it existed the app had no manual fetch at all,
+  // so the user's only recovery was typing `git fetch` in the terminal.
+  if (!cancelled()) {
+    const snap = await getSnapshot(manifest.fetchBehind)
+    const repoRoot = snap?.repoRoot ?? manifest.fetchBehind
+    const res = await window.electronAPI.git.fetchNow(repoRoot)
+    _assert('AB-11-user-fetch-ipc-succeeds', res?.ok === true, {
+      description: 'git.fetchNow reaches the manager and completes for a healthy repo',
+      ok: res?.ok ?? null,
+      busy: res?.busy ?? null
+    })
+  }
+
+  // ── AB-12 / AB-13: only UNREACHABLE surfaces; other failures stay quiet. ──
+  // The mapping the UI depends on (2026-08-07 decision): auth / no-remote /
+  // bare-timeout are not shown to the user, so remoteUnreachable must stay
+  // false for them. Getting this wrong in either direction is a user-visible
+  // bug — a false positive cries wolf, a false negative hides a real outage.
+  if (!cancelled()) {
+    const snap = await getSnapshot(manifest.failFetch)
+    const repoRoot = snap?.repoRoot ?? manifest.failFetch
+    await window.electronAPI.git.fetchNow(repoRoot)
+    const after = await pollSnapshot(
+      sleep,
+      manifest.failFetch,
+      (x) => typeof x?.lastFetchAttemptAt === 'number'
+    )
+    _assert('AB-12-no-remote-does-not-claim-unreachable', after.last?.remoteUnreachable !== true, {
+      description: 'A missing-remote failure must NOT be reported to the UI as unreachable',
+      observedRemoteUnreachable: after.last?.remoteUnreachable ?? null
+    })
+  }
+
+  if (!cancelled()) {
+    track(manifest.unreachable)
+    const before = await subscribeClassified(sleep, manifest.unreachable)
+    const repoRoot = before?.repoRoot ?? manifest.unreachable
+    await window.electronAPI.git.fetchNow(repoRoot)
+    const after = await pollSnapshot(sleep, manifest.unreachable, (x) => x?.remoteUnreachable === true)
+    _assert('AB-13-connection-refused-reports-unreachable', after.ok, {
+      description: 'A refused connection classifies as network and DOES reach the badge',
+      observedRemoteUnreachable: after.last?.remoteUnreachable ?? null
     })
   }
 

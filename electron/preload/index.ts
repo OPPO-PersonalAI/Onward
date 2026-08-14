@@ -815,6 +815,10 @@ export interface GitAPI {
   // watcher dropped the `.git` write. The raw command line NEVER crosses IPC;
   // the renderer classifies it and sends only the subcommand keyword + flags.
   notifyTerminalGitCommand: (payload: { terminalId: string; subcommand: string; createsRepo: boolean }) => Promise<{ success: boolean }>
+  // User-initiated `git fetch` for one repo — the Task badge's click. Unlike
+  // revalidateMirror below it actually contacts the remote, so it is the only
+  // renderer-reachable way to move the behind count. `busy` = already in flight.
+  fetchNow: (repoRoot: string) => Promise<{ ok: boolean; busy?: boolean }>
   // Git Diff revalidate-on-open: re-check the cwd's mirror state (no generation
   // bump) so a watcher-missed commit/edit self-heals when the panel opens.
   revalidateMirror: (cwd: string) => Promise<{ success: boolean }>
@@ -1875,6 +1879,9 @@ const gitAPI: GitAPI = {
     return ipcRenderer.invoke(IPC.GIT_NOTIFY_TERMINAL_GIT_COMMAND, payload)
   },
 
+  fetchNow: (repoRoot: string) => {
+    return ipcRenderer.invoke(IPC.GIT_FETCH_NOW, { repoRoot }) as Promise<{ ok: boolean; busy?: boolean }>
+  },
   revalidateMirror: (cwd: string) => {
     return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_REVALIDATE, cwd)
   },

@@ -40,6 +40,8 @@ export interface TerminalGitDisplayState {
    */
   lastFetchOkAt: number | null
   lastFetchAttemptAt: number | null
+  /** Last attempt could not reach the remote. See MirrorState.remoteUnreachable. */
+  remoteUnreachable: boolean
 }
 
 function collapsePathSegments(value: string): string {
@@ -184,6 +186,7 @@ export function resolveTerminalGitDisplayState(input: {
     ahead: mirror?.ahead ?? null,
     behind: mirror?.behind ?? null,
     lastFetchOkAt: mirror?.lastFetchOkAt ?? null,
-    lastFetchAttemptAt: mirror?.lastFetchAttemptAt ?? null
+    lastFetchAttemptAt: mirror?.lastFetchAttemptAt ?? null,
+    remoteUnreachable: mirror?.remoteUnreachable === true
   }
 }

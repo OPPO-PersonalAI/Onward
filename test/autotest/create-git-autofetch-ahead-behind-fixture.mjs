@@ -20,6 +20,8 @@
 //   timeout-fetch/ origin uses git's ext:: transport running `sleep` → the fetch
 //                 hangs and is killed by the 20 s ceiling, reproducing the field
 //                 failure mode whose stderr used to be discarded
+//   unreachable/  origin points at a dead local port → connection REFUSED, which
+//                 classifies as 'network' — the only failure the UI surfaces
 //   neutral/      the app's terminal cwd (not a git repo, never auto-subscribed)
 //
 // Materialised OUTSIDE the Onward repo tree (runner passes ONWARD_AB_FIXTURE_DIR,
@@ -145,6 +147,14 @@ const timeoutFetch = cloneFrom('timeout-fetch')
 git(timeoutFetch, ['config', 'protocol.ext.allow', 'always'])
 git(timeoutFetch, ['config', 'remote.origin.url', 'ext::sleep 60'])
 
+// unreachable: origin points at a port nothing listens on, so the connection is
+// REFUSED instantly (no waiting). git prints "Connection refused", which
+// classifyFetchFailure buckets as 'network' — the one failure class the UI is
+// allowed to surface. Distinct from fail-fetch above (a missing local path,
+// classified 'no-remote'), which must NOT surface.
+const unreachable = cloneFrom('unreachable')
+git(unreachable, ['config', 'remote.origin.url', 'git://127.0.0.1:1/nope.git'])
+
 // no-upstream: a standalone repo with a commit but no remote.
 const noUpstream = join(runtimeRoot, 'no-upstream')
 mkdirSync(noUpstream, { recursive: true })
@@ -167,6 +177,7 @@ const manifest = {
   fetchBehind,
   failFetch,
   timeoutFetch,
+  unreachable,
   noUpstream,
   neutralCwd
 }

@@ -747,6 +747,13 @@ export const PERF_TRACE_EVENT = {
    * this catches an ahead/behind-only move. Emitted on change.
    */
   RENDERER_TERMINAL_TITLE_SYNC_RENDERED: 'renderer:terminal-title.sync-rendered',
+  /**
+   * The user clicked the branch badge to sync. Paired with the main-side
+   * `git-fetch.user-requested`: if this fires and that one does not, the click
+   * reached the renderer but never crossed IPC. Diagnostic tier (default-on) —
+   * a recovery path nobody can prove was taken is not a recovery path.
+   */
+  RENDERER_GIT_SYNC_FETCH_CLICKED: 'renderer:git-sync.fetch-clicked',
   WORKER_GIT_STATE_MIRROR_WATCHER_FIRE: 'worker:git-state-mirror.watcher-fire',
   WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
   WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED: 'worker:git-state-mirror.watcher-skipped',
@@ -869,6 +876,13 @@ export const PERF_TRACE_EVENT = {
    * failures accrued while paused stop pinning the user at the 1 h ceiling.
    */
   MAIN_GIT_AUTOFETCH_STREAK_HALVED: 'main:git-autofetch.streak-halved',
+  /**
+   * The user asked for a fetch by clicking the Task branch badge. Distinguishes
+   * user-driven from scheduled fetches in the outcome events that follow, and
+   * proves the recovery path was reachable at all — before this existed the app
+   * had no manual fetch affordance.
+   */
+  MAIN_GIT_FETCH_USER_REQUESTED: 'main:git-fetch.user-requested',
   RENDERER_TERMINAL_TITLE_BRANCH_RENDERED: 'renderer:terminal-title.branch-rendered',
   RENDERER_TERMINAL_TITLE_COLOR_RENDERED: 'renderer:terminal-title.color-rendered',
   RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',

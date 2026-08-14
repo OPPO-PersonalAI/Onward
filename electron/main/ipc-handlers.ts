@@ -1275,6 +1275,31 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       return { ok: false, error: String(error) }
     }
   })
+  /**
+   * User-initiated fetch (BUG-0005 follow-up). The Task badge's click lands
+   * here. Distinct from GIT_STATE_MIRROR_FORCE_REFRESH, which only re-runs the
+   * LOCAL status recompute and therefore can never move the behind count.
+   *
+   * Returns `{ ok, busy }`: `busy` means a fetch for this repo was already in
+   * flight, so the renderer should keep showing its spinner rather than treat
+   * it as a failure. Failure DETAIL is deliberately not returned — it goes to
+   * the perf trace; the UI only needs "did it work".
+   */
+  ipcMain.handle(IPC.GIT_FETCH_NOW, async (
+    _event,
+    payload?: { repoRoot?: unknown }
+  ): Promise<{ ok: boolean; busy?: boolean }> => {
+    const repoRoot = typeof payload?.repoRoot === 'string' ? payload.repoRoot : ''
+    if (!repoRoot) return { ok: false }
+    try {
+      const result = await gitAutofetchManager.fetchNow(repoRoot)
+      if (result === null) return { ok: false, busy: true }
+      return { ok: result.ok }
+    } catch {
+      return { ok: false }
+    }
+  })
+
   // Autotest-only: deterministically drive ONE background auto-fetch for a repo
   // (bypassing the due-timer) so the fetch→revalidate→behind path can be asserted
   // without racing the scheduler's interval. Gated on ONWARD_AUTOTEST=1.
@@ -3324,6 +3349,7 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_FOCUS)
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE)
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_COMMAND)
+  ipcMain.removeHandler(IPC.GIT_FETCH_NOW)
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_REVALIDATE)
   ipcMain.removeHandler(IPC.GIT_GET_SUBMODULES)
   ipcMain.removeHandler(IPC.GIT_WARM_DIFF_CACHE)

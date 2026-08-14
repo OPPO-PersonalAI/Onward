@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Git 同步新鲜度的呈现与恢复 · 竞品调研与方案决策</title>
+<style>
+  :root{
+    --bg:#0d1117;--bg2:#161b22;--bg3:#1c2128;--border:#30363d;--border2:#3d444d;
+    --fg:#e6edf3;--fg2:#adbac7;--fg3:#768390;
+    --accent:#58a6ff;--accent2:#79c0ff;--ok:#3fb950;--warn:#d29922;--danger:#f85149;
+    --purple:#bc8cff;--cyan:#39c5cf;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:auto!important}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:15px;line-height:1.75}
+  #toc{position:fixed;top:0;left:0;width:290px;height:100vh;overflow-y:auto;
+    background:var(--bg2);border-right:1px solid var(--border);padding:22px 0 40px}
+  #toc .brand{padding:0 20px 14px;border-bottom:1px solid var(--border);margin-bottom:12px}
+  #toc .brand h2{margin:0 0 4px;font-size:14px;color:var(--accent);letter-spacing:.5px}
+  #toc .brand p{margin:0;font-size:11px;color:var(--fg3);font-family:var(--mono)}
+  #toc a{display:block;padding:7px 20px;color:var(--fg2);text-decoration:none;font-size:13px;
+    border-left:3px solid transparent;transition:background .12s,color .12s}
+  #toc a:hover{background:var(--bg3);color:var(--fg)}
+  #toc a.active{color:var(--accent2);border-left-color:var(--accent);background:#1f2a3a;font-weight:600}
+  #toc a.sub{padding-left:36px;font-size:12px;color:var(--fg3)}
+  main{margin-left:290px;padding:44px 52px 120px;max-width:1180px}
+  h1{font-size:29px;margin:0 0 6px}
+  .sub{color:var(--fg3);font-size:14px;margin:0 0 30px;font-family:var(--mono)}
+  h2{font-size:23px;margin:54px 0 18px;padding-bottom:10px;border-bottom:1px solid var(--border);scroll-margin-top:20px}
+  h2:first-of-type{margin-top:22px}
+  h3{font-size:17px;margin:30px 0 12px;color:var(--accent2)}
+  code{font-family:var(--mono);font-size:.875em;background:var(--bg3);padding:2px 6px;
+    border-radius:4px;border:1px solid var(--border);color:var(--cyan)}
+  pre{background:#010409;border:1px solid var(--border);border-radius:8px;padding:15px 17px;
+    overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6}
+  pre code{background:none;border:none;padding:0;color:var(--fg2)}
+  .c-com{color:var(--fg3);font-style:italic}.c-key{color:var(--purple)}
+  .c-bad{color:var(--danger)}.c-good{color:var(--ok)}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--bg3);font-weight:600}
+  tr:nth-child(even) td{background:#12171e}
+  td.mono,th.mono{font-family:var(--mono);font-size:12px}
+  a{color:var(--accent)}
+  .badge{display:inline-block;padding:2px 9px;border-radius:11px;font-size:11.5px;
+    font-weight:600;font-family:var(--mono);white-space:nowrap}
+  .b-ok{background:rgba(63,185,80,.16);color:var(--ok);border:1px solid rgba(63,185,80,.4)}
+  .b-warn{background:rgba(210,153,34,.16);color:var(--warn);border:1px solid rgba(210,153,34,.4)}
+  .b-danger{background:rgba(248,81,73,.16);color:var(--danger);border:1px solid rgba(248,81,73,.4)}
+  .b-info{background:rgba(88,166,255,.16);color:var(--accent);border:1px solid rgba(88,166,255,.4)}
+  .b-grey{background:rgba(118,131,144,.16);color:var(--fg3);border:1px solid rgba(118,131,144,.4)}
+  .callout{border-left:4px solid;border-radius:0 8px 8px 0;padding:13px 17px;margin:17px 0;background:var(--bg2)}
+  .callout .ct{font-weight:700;margin-bottom:5px;font-size:14px}
+  .callout p:last-child{margin-bottom:0}
+  .co-info{border-color:var(--accent)}.co-info .ct{color:var(--accent)}
+  .co-warn{border-color:var(--warn);background:rgba(210,153,34,.06)}.co-warn .ct{color:var(--warn)}
+  .co-danger{border-color:var(--danger);background:rgba(248,81,73,.07)}.co-danger .ct{color:var(--danger)}
+  .co-ok{border-color:var(--ok);background:rgba(63,185,80,.06)}.co-ok .ct{color:var(--ok)}
+  .co-purple{border-color:var(--purple);background:rgba(188,140,255,.06)}.co-purple .ct{color:var(--purple)}
+  .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px;margin:18px 0}
+  .opt{border:1px solid var(--border);border-radius:10px;background:var(--bg2);overflow:hidden}
+  .opt h5{margin:0;padding:11px 15px;font-size:13.5px;border-bottom:1px solid var(--border);
+    display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .opt .body{padding:13px 15px;font-size:13px}
+  .opt .body p{margin:7px 0}
+  .opt.rec{border-color:rgba(63,185,80,.55);box-shadow:0 0 0 1px rgba(63,185,80,.14)}
+  .opt.rec h5{background:rgba(63,185,80,.12);color:var(--ok)}
+  .opt.alt h5{background:var(--bg3);color:var(--fg2)}
+  .opt.bad h5{background:rgba(248,81,73,.1);color:var(--danger)}
+  .pro{color:var(--ok)}.con{color:var(--danger)}
+  .pro::before{content:"＋ ";font-weight:700}
+  .con::before{content:"－ ";font-weight:700}
+  .mock{background:#010409;border:1px solid var(--border2);border-radius:8px;padding:16px 18px;margin:14px 0}
+  .mock .lbl{font-size:11px;color:var(--fg3);margin-bottom:10px;font-family:var(--mono);letter-spacing:.4px}
+  .pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;
+    border:1px solid rgba(16,185,129,.35);background:rgba(16,185,129,.16);color:#adbac7;
+    font-size:11px;font-family:var(--mono)}
+  .pill::before{content:'';width:6px;height:6px;border-radius:50%;background:rgba(16,185,129,.9)}
+  .pill .dn{color:rgba(56,189,248,.95)}
+  .pill .dn-stale{color:rgba(148,163,184,.7)}
+  .pill.act{cursor:pointer;border-color:rgba(88,166,255,.5);background:rgba(88,166,255,.12)}
+  .tip{margin-top:9px;display:inline-block;background:#1c2128;border:1px solid var(--border2);
+    border-radius:6px;padding:7px 11px;font-size:11.5px;color:var(--fg2);white-space:pre-line;line-height:1.55}
+  .src-ref{font-family:var(--mono);font-size:11.5px;color:var(--fg3);background:var(--bg3);
+    padding:2px 7px;border-radius:4px;border:1px solid var(--border);white-space:nowrap}
+  .footer{margin-top:66px;padding-top:24px;border-top:2px solid var(--border);font-size:13px;color:var(--fg3)}
+  ul,ol{padding-left:23px}li{margin:5px 0}
+</style>
+</head>
+<body>
+<nav id="toc">
+  <div class="brand"><h2>方案决策文档</h2><p>git sync staleness UX<br>BUG-0005 后续 · v1.1</p></div>
+  <a href="#s0">0 · 结论摘要</a>
+  <a href="#s1">1 · 用户反馈说中了什么</a>
+  <a href="#s2">2 · 竞品横向对照</a>
+  <a href="#s2a" class="sub">三条跨来源共识</a>
+  <a href="#s2b" class="sub">VS Code 是反面教材</a>
+  <a href="#s3">3 · 我们的真实缺口</a>
+  <a href="#s4">4 · 当前 vs 提议</a>
+  <a href="#s5">5 · 方案选项</a>
+  <a href="#s6">6 · 交互位冲突</a>
+  <a href="#s7">7 · 决策清单</a>
+  <a href="#meta">文档元数据</a>
+</nav>
+<main>
+
+<h1>Git 同步新鲜度的呈现与恢复</h1>
+<p class="sub">BUG-0005 的 R3 返工 · 竞品调研与方案决策 · 2026-08-07</p>
+
+<h2 id="s0">0 · 结论摘要</h2>
+<div class="callout co-danger">
+  <div class="ct">调研结论:<code>↓?</code> 是所有做法里唯一没有先例的那一条</div>
+  <p>我把「未知」塞进了计数原本的位置(同一个槽位换个字符)。查遍 git 本体、git-prompt.sh、posh-git、
+  GitHub Desktop、GitLens、VS Code、JetBrains,<b>没有任何一个工具这么做</b>。它们无一例外地
+  <b>换一个类别的表达</b>:换成空字符串、换一个专用符号、换整个控件、或者换成一句话。</p>
+  <p>更要命的是:<b><code>?</code> 在 git 的语境里已经被占用了。</b>
+  <code>git status</code> 里 <code>??</code> = 未跟踪文件,子模块的 <code>?</code> = 含未跟踪文件,
+  <code>git-prompt.sh</code> 里 <code>?</code> = sparse checkout。你说的「概念困惑」不是错觉,
+  是这个符号在这个领域里真的另有所指。</p>
+</div>
+<div class="callout co-ok">
+  <div class="ct">正确的形状</div>
+  <p>调研 7 个产品后,最硬的一条共识不是「该用什么符号」,而是:
+  <b>没有任何一个产品把陈旧标记放在 ahead/behind 计数本身上</b>。
+  有信号的两家都放在<u>别处</u>——GitKraken 放在 REMOTES 分区标题,Fork 放在 Activity Manager。
+  另有两家(GitHub Desktop、GitLens)用一条<b>独立的时间戳</b>承载新鲜度。
+  而「怎么恢复」的普遍答案是:<b>指示器本身就是动作</b>——Sublime Merge 的 ahead/behind 指示器可直接点击 push/pull,
+  VS Code 状态栏点击即同步,GitHub Desktop 的主按钮就是 Fetch/Pull/Push。
+  <b>我们既没有独立信号位,也没有任何动作,却在计数位上放了一个符号。</b></p>
+</div>
+
+<h2 id="s1">1 · 用户反馈说中了什么</h2>
+<table>
+  <thead><tr><th style="width:26%">你的反馈</th><th style="width:36%">调研查到的对应证据</th><th>来源</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>「概念困惑」</b></td>
+      <td><code>?</code> 在 git 输出里已有确定含义:<code>??</code>=未跟踪路径(<code>man git-status</code>);
+          子模块 <code>?</code>=含未跟踪文件;<code>git-prompt.sh</code> 里 <code>?</code>=压缩的 sparse-checkout 状态。
+          在 git 状态行里放 <code>?</code> 属于符号冲突,不是「问号泛泛地不好懂」</td>
+      <td><a href="https://github.com/git/git/blob/master/contrib/completion/git-prompt.sh">git-prompt.sh</a></td>
+    </tr>
+    <tr>
+      <td><b>「不知道恢复方法」</b></td>
+      <td>竞品的指示器<b>本身就是动作</b>:VS Code 状态栏同步项点击即 <code>git.sync</code>;
+          GitHub Desktop 的主按钮就是 Fetch/Pull/Push。我们的徽章是惰性的,
+          而且<b>全应用没有任何手动 fetch 入口</b></td>
+      <td><a href="https://github.com/microsoft/vscode/blob/main/extensions/git/src/repository.ts">vscode repository.ts</a> ·
+          <a href="https://github.com/desktop/desktop/blob/development/app/src/ui/toolbar/push-pull-button.tsx">push-pull-button.tsx</a></td>
+    </tr>
+    <tr>
+      <td><b>「不太健壮」</b></td>
+      <td>单字符记号在无障碍层面本就是弱表达:实测 NVDA <b>完全不读</b>短横 <code>–</code>,
+          JAWS 把 <code>n/a</code> 读成「En slash Uh」。文字短语才稳</td>
+      <td><a href="https://chaxtc.com/articles/how-to-handle-blank-data-cells-in-accessible-tables/">Chax 无障碍实测</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="s2">2 · 竞品横向对照</h2>
+<p>7 个产品 + git 本体 + 一份统计记号规范。<b>「陈旧信号放在哪」这一列是重点。</b></p>
+<table>
+  <thead><tr>
+    <th style="width:13%">产品</th><th style="width:19%">ahead/behind 怎么显示</th>
+    <th style="width:17%">手动同步入口</th><th style="width:23%">自动 fetch 失败时</th><th>陈旧信号放在哪</th>
+  </tr></thead>
+  <tbody>
+    <tr>
+      <td><b>git 本体</b></td>
+      <td><code>&gt;</code>/<code>&lt;</code>/<code>&lt;&gt;</code>,<b>真零是 <code>=</code></b>(专用符号,不是 0)</td>
+      <td>—</td><td>—</td>
+      <td>未知 = 空字符串 / <code>[gone]</code>。<b>与真零用不同记号</b></td>
+    </tr>
+    <tr>
+      <td><b>GitHub Desktop</b></td>
+      <td>只在 <code>&gt;0</code> 时渲染;<b>0 完全不渲染</b></td>
+      <td>主按钮 Fetch/Pull/Push,常驻</td>
+      <td class="b-warn" style="background:rgba(210,153,34,.06)">静默(仅 <code>log.error</code>)。按钮不变</td>
+      <td class="b-ok" style="background:rgba(63,185,80,.07)"><b>独立副标题</b>:<code>Last fetched X ago</code> / <code>Never fetched</code>。
+          失败时 <code>lastFetched</code> 不推进,时钟自己越走越大</td>
+    </tr>
+    <tr>
+      <td><b>GitLens</b></td>
+      <td>五态枚举,真零渲染成文字 <code>up to date with X</code></td>
+      <td>视图内 Fetch</td><td>未查证</td>
+      <td class="b-ok" style="background:rgba(63,185,80,.07)"><b>独立文字</b> <code>Last fetched ...</code>(24h 内相对时间,超出切绝对日期)</td>
+    </tr>
+    <tr>
+      <td><b>GitKraken</b></td>
+      <td>左侧面板分支名旁的计数</td>
+      <td>Push/Pull 按钮;Fetch 在 Pull 下拉里</td>
+      <td class="b-ok" style="background:rgba(63,185,80,.07)"><b>10.6.0(2024-12)起:REMOTES 分区标题显示警告图标</b>。
+          发布说明原文就叫「auto-fetch fails <b>silently</b>」</td>
+      <td><b>分区标题上的警告图标</b>——不在计数上。无时间戳</td>
+    </tr>
+    <tr>
+      <td><b>Fork</b></td>
+      <td>侧边栏 + 2.62 起也标在 pull/push 按钮上</td>
+      <td>Fetch / Pull / Push 三个常驻按钮</td>
+      <td class="b-warn" style="background:rgba(210,153,34,.06)">被动无提示,<b>要点开 Activity Manager 才看得到</b></td>
+      <td>Activity Manager 里(需主动打开)。无时间戳</td>
+    </tr>
+    <tr>
+      <td><b>Sublime Merge</b></td>
+      <td>位置栏的 ahead/behind 计数器,<b>可直接点击执行 push/pull</b></td>
+      <td>Push/Pull 按钮;<b>无独立 Fetch 按钮</b>(需求仍开着)</td>
+      <td>默认只在命令失败时弹命令状态;历史面板里可<b>重跑失败命令</b></td>
+      <td class="b-grey" style="background:transparent">未发现。整份 changelog 无相关条目</td>
+    </tr>
+    <tr>
+      <td><b>Tower</b></td>
+      <td>侧边栏分支旁的徽章 + tooltip</td>
+      <td><b>Fetch / Pull / Push 三个常驻按钮</b></td>
+      <td class="b-grey" style="background:transparent">文档完全未提及</td>
+      <td class="b-grey" style="background:transparent">未发现。但其教材明说
+          「远端数据是快照,只和你上次请求时一样新」——<b>当成用户教育,而非 UI 职责</b></td>
+    </tr>
+    <tr style="background:rgba(248,81,73,.07)">
+      <td><b>VS Code</b></td>
+      <td>状态栏 <code>{behind}↓ {ahead}↑</code>;两者为 0 时只剩 <code>$(sync)</code> 图标</td>
+      <td>点状态栏 = <code>git.sync</code>(pull+push)</td>
+      <td class="b-danger" style="background:transparent"><b>最静默的一个</b>:认证失败 → 内存里 <code>disable()</code>,
+          不通知、不写配置;其他错误直接吞掉。<br><span style="font-size:11.5px">注:其 <code>git.autofetch</code>
+          <b>默认是关的</b>(我们默认开)</span></td>
+      <td class="b-danger" style="background:transparent"><b>没有。</b>过期计数当作事实一直显示</td>
+    </tr>
+    <tr>
+      <td><b>JetBrains</b></td>
+      <td>蓝色↓/绿色↑ 箭头 + 计数(需开「检查远端传入变更」)</td>
+      <td>Git｜Fetch(无快捷键);Git｜Update Project(⌘T)</td>
+      <td class="b-warn" style="background:rgba(210,153,34,.06)">后台 fetch 无通知(YouTrack 上有开着的需求单)</td>
+      <td class="b-danger" style="background:transparent"><b>没有。</b>过期箭头持续显示</td>
+    </tr>
+    <tr>
+      <td><b>Eurostat</b><br><span style="font-size:11px;color:var(--fg3)">(统计记号硬规范,跨领域参照)</span></td>
+      <td><code>:</code>=不可得,<code>0</code>=真零</td><td>—</td><td>—</td>
+      <td>另有 <code>p</code>临时值 / <code>u</code>低可信度——
+          <b>「值在但打折扣」是保留数值 + 附加限定符,不是替换成占位符</b></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="s2a">三条跨来源共识(按证据强度排序)</h3>
+<div class="opts">
+  <div class="opt rec">
+    <h5>① 陈旧信号<u>绝不</u>放在计数上<span class="badge b-ok">最强</span></h5>
+    <div class="body">
+      <p>7 个产品,<b>零个</b>把陈旧标记做进 ahead/behind 计数里。
+      有信号的两家都放在别处:GitKraken 在 REMOTES 分区标题,Fork 在 Activity Manager。</p>
+      <p><b>这条直接否定 <code>↓?</code></b>——我做的正是所有人都没做的那件事。</p>
+    </div>
+  </div>
+  <div class="opt alt">
+    <h5>② 没人渲染 <code>0</code></h5>
+    <div class="body">
+      <p>git 用 <code>=</code>,posh-git 用 <code>≡</code>,GitHub Desktop / VS Code 不渲染,GitLens 用一句话。</p>
+      <p><b>我们已经符合</b>(<code>showBehind = behind &gt; 0</code>)。</p>
+    </div>
+  </div>
+  <div class="opt alt">
+    <h5>③ 恢复 = 指示器本身可点<span class="badge b-info">最一致</span></h5>
+    <div class="body">
+      <p>Sublime Merge 的 ahead/behind 指示器<b>点击即 push/pull</b>;VS Code 点状态栏即同步;
+      GitHub Desktop 的主按钮就是 Fetch/Pull/Push;Fork / Tower 有常驻 Fetch 按钮。</p>
+      <p><b>9 个产品里,只有我们一个连手动 fetch 都没有。</b></p>
+    </div>
+  </div>
+</div>
+<div class="callout co-warn">
+  <div class="ct">一条我第一版说过头、现已更正的结论</div>
+  <p>我原本写「竞品<b>普遍</b>用独立常驻时间戳」。实际是 <b>7 个里只有 2 个</b>
+  (GitHub Desktop、GitLens);Fork、Sublime Merge、GitKraken、Tower 全都没有任何「上次同步于」显示。
+  时间戳仍是<u>最好</u>的解法之一,但称不上行业惯例——真正的惯例是上面第 ① 条。</p>
+</div>
+<div class="callout co-info">
+  <div class="ct">唯一一条「解释 + 重试同处一个界面」的明确先例</div>
+  <p>来自 AWS Cloudscape 设计体系(不是 git 工具):刷新部分或完全失败时,
+  「use a warning status indicator to inform users. Include in the popover additional information
+  to explain the failure and provide actions to support users, such as <b>retry</b>」。
+  这正好是我们需要的形状——<b>一个既说明原因、又能就地重试的悬浮层</b>。</p>
+</div>
+
+<h3 id="s2b">VS Code 是反面教材,不是范本</h3>
+<div class="callout co-danger">
+  <div class="ct">它和我们得的是同一个病</div>
+  <pre><code><span class="c-com">// vscode extensions/git/src/autofetch.ts</span>
+} <span class="c-key">catch</span> (err) {
+    <span class="c-key">if</span> (err.gitErrorCode === GitErrorCodes.AuthenticationFailed) {
+        <span class="c-bad">this.disable();   // 静默关闭自动 fetch,不通知用户任何事</span>
+    }
+}</code></pre>
+  <p>后果是用户开 issue 问「为什么有些远端仓库会自动更新、有些每次都要手动 fetch」
+  (<a href="https://github.com/microsoft/vscode/issues/257423">#257423</a>、
+  <a href="https://github.com/microsoft/vscode/issues/197480">#197480</a>)——
+  界面没告诉他。<b>它比我们多了一个「点击即同步」的入口,但在「告知数据已过期」这件事上和我们一样是空白。</b>
+  所以对我们而言:它的<u>同步按钮</u>值得学,它的<u>失败处理</u>要反着做。</p>
+</div>
+
+<h2 id="s3">3 · 我们的真实缺口</h2>
+<div class="callout co-warn">
+  <div class="ct">先纠正我自己之前的一个表述</div>
+  <p>我一直把问题说成「<code>↓0</code> 是撒谎」。但代码事实是:<b>我们从来没渲染过 <code>↓0</code></b>
+  (<span class="src-ref">gitSyncDisplay.ts:66</span> <code>showBehind = behind &gt; 0</code>)。
+  真正的歧义在<b>箭头的缺席</b>上——「没有 ↓」既可能是「真的没落后」,也可能是「压根没查过」。
+  竞品消除这个歧义的办法是<b>加一条常驻的时间戳</b>,而不是给空位补一个符号。我补符号补错了方向。</p>
+</div>
+
+<table>
+  <thead><tr><th style="width:26%">缺口</th><th style="width:30%">竞品的解法</th><th>我们现在</th></tr></thead>
+  <tbody>
+    <tr><td><b>数据有多新,不可见</b></td>
+        <td>常驻 <code>Last fetched X ago</code> / <code>Never fetched</code></td>
+        <td>只有 stale 时 tooltip 才多一行,且不含时间</td></tr>
+    <tr><td><b>没有恢复入口</b></td>
+        <td>指示器本身可点击 = 立即同步</td>
+        <td class="b-danger" style="background:rgba(248,81,73,.06)"><b>全应用零个手动 fetch 入口</b>,
+            用户只能切到终端敲命令(诊断包里那位用户正是这么做的)</td></tr>
+    <tr><td><b>失败原因不可见</b></td>
+        <td>GitHub Desktop 会把失败状态显示出来</td>
+        <td class="b-ok" style="background:rgba(63,185,80,.06)">主进程<b>已经有</b> <code>classified</code> /
+            <code>stderrTail</code> / <code>remoteScheme</code>(BUG-0005 R4 刚加的),但<b>没有送到界面</b></td></tr>
+  </tbody>
+</table>
+
+<h2 id="s4">4 · 当前 vs 提议</h2>
+
+<div class="mock">
+  <div class="lbl">现状 — behind 为 0 且从未成功同步</div>
+  <span class="pill">main <span class="dn-stale">↓?</span></span>
+  <div class="tip">Git 分支: main
+尚未与远端同步成功 —— 落后数未知</div>
+  <p style="font-size:12.5px;color:var(--fg3);margin-top:12px">
+    问题:<code>?</code> 与 git 既有语义冲突 · 没有时间信息 · <b>没有任何可点的东西</b></p>
+</div>
+
+<div class="mock">
+  <div class="lbl">提议 — 同一场景</div>
+  <span class="pill act">main</span>
+  <div class="tip">Git 分支: main
+上次同步:从未成功 · 上次尝试 2 分钟前失败(认证)
+点击立即同步</div>
+  <p style="font-size:12.5px;color:var(--fg3);margin-top:12px">
+    计数位<b>保持原样</b>(没落后就不显示箭头,和竞品一致) ·
+    新鲜度与失败原因进 tooltip · <b>徽章本身可点击触发 fetch</b></p>
+</div>
+
+<div class="mock">
+  <div class="lbl">提议 — 正常情况(有落后 / 同步正常)</div>
+  <span class="pill act">main <span class="dn">↓3</span></span>
+  <div class="tip">Git 分支: main · 领先 0、落后 3
+上次同步:4 分钟前
+点击立即同步</div>
+  <p style="font-size:12.5px;color:var(--fg3);margin-top:12px">
+    <b>时间戳常驻</b>,不再只在异常时出现 —— 这是 GitHub Desktop / GitLens 的共同做法</p>
+</div>
+
+<h2 id="s5">5 · 方案选项</h2>
+<div class="opts">
+  <div class="opt rec">
+    <h5>A · 徽章可点击 + 常驻新鲜度<span class="badge b-ok">推荐</span></h5>
+    <div class="body">
+      <p><b>删掉 <code>↓?</code></b>。计数位回到「没落后就不显示」。
+      tooltip 常驻一行「上次同步:X 前 / 从未成功」,失败时追加已经采集到的原因。
+      <b>单击徽章 = 立即 fetch</b>,带进行中状态。</p>
+      <p class="pro">三条竞品共识全部命中</p>
+      <p class="pro">一次性补齐「不知道多旧」和「不知道怎么办」两个缺口</p>
+      <p class="pro">复用已有的 <code>classified</code> / <code>stderrTail</code>,不用新采数据</p>
+      <p class="con">要新开一条用户可触发的 fetch IPC(主进程侧很小,渲染层要做进行中/结果反馈)</p>
+      <p class="con">单击与现有「双击复制分支名」冲突,需先解(见 § 6)</p>
+    </div>
+  </div>
+  <div class="opt alt">
+    <h5>B · A 的基础上加持久失败标记</h5>
+    <div class="body">
+      <p>在 A 之上,连续失败时给徽章一个低调的持久标记(整体去饱和,或加一个断连图标)。</p>
+      <p class="pro">离线/长期失败在不悬停时也能看见</p>
+      <p class="con"><b>有反面证据</b>:OneDrive 的灰化图标被用户误读为「出问题了」,
+      微软社区里有以此为标题的求助帖。灰化在界面里同时还表示「禁用/次要/非活跃」</p>
+      <p class="con">徽章只有 11px,再叠图标会挤</p>
+    </div>
+  </div>
+  <div class="opt alt">
+    <h5>C · 只做「诚实」,不做「可操作」</h5>
+    <div class="body">
+      <p>删掉 <code>↓?</code>,tooltip 加常驻时间戳,<b>不加点击</b>。</p>
+      <p class="pro">改动最小,不碰 IPC,无交互冲突</p>
+      <p class="con"><b>你提的第二个问题原样保留</b>——用户看到「从未同步成功」,
+      仍然只能自己切终端敲 <code>git fetch</code></p>
+      <p class="con">等于把 VS Code 的坑抄了一半</p>
+    </div>
+  </div>
+  <div class="opt bad">
+    <h5>D · 维持现状</h5>
+    <div class="body">
+      <p>保留 <code>↓?</code>。</p>
+      <p class="con">已知与 git 符号体系冲突</p>
+      <p class="con">无先例支持</p>
+      <p class="con">你已经反馈它令人困惑</p>
+    </div>
+  </div>
+</div>
+
+<h2 id="s6">6 · 需要一并决定:交互位冲突</h2>
+<div class="callout co-warn">
+  <div class="ct">徽章的双击位已经被占了</div>
+  <p>当前 <span class="src-ref">TerminalGrid.tsx:3401</span> 上挂着
+  <code>onDoubleClick</code> = 复制分支名。如果再加单击,
+  <b>双击的第一下会先触发单击</b>,导致「想复制,结果先发了一次 fetch」。必须二选一。</p>
+</div>
+<div class="opts">
+  <div class="opt rec">
+    <h5>i · 单击=同步,复制移到右键菜单<span class="badge b-ok">推荐</span></h5>
+    <div class="body">
+      <p class="pro">与 VS Code 状态栏同步项、GitHub Desktop 主按钮一致——最主要的动作占最易触达的位</p>
+      <p class="pro">仓库已有右键菜单实现与规范(SVG 图标 + span + 统一 CSS),挂「复制分支名」很自然</p>
+      <p class="con">改变了一个已存在的用户习惯(双击复制)</p>
+    </div>
+  </div>
+  <div class="opt alt">
+    <h5>ii · 保留双击复制,同步进右键菜单</h5>
+    <div class="body">
+      <p class="pro">不动任何既有习惯,零冲突</p>
+      <p class="con">恢复动作藏在右键里,<b>发现性差</b>——而「用户不知道怎么恢复」正是这次要解决的问题</p>
+    </div>
+  </div>
+  <div class="opt alt">
+    <h5>iii · 两个都进右键菜单,单击不绑定</h5>
+    <div class="body">
+      <p class="pro">语义最干净,徽章回归纯指示器</p>
+      <p class="con">同样发现性差;且徽章看起来可点却不可点,反而更困惑</p>
+    </div>
+  </div>
+</div>
+
+<h2 id="s7">7 · 决策清单</h2>
+<div class="callout co-purple">
+  <div class="ct">请就这两项给出选择</div>
+  <table style="margin-top:10px">
+    <thead><tr><th style="width:8%">项</th><th style="width:30%">问题</th><th style="width:24%">我的推荐</th><th>不选推荐时的主要代价</th></tr></thead>
+    <tbody>
+      <tr><td><b>UX</b></td><td>怎么表达「同步状态未知」并提供恢复</td>
+          <td><span class="badge b-ok">A</span> 徽章可点击 + 常驻新鲜度</td>
+          <td>选 C 则恢复路径仍然缺失;选 B 需承担灰化被误读的风险;选 D 保留已知冲突</td></tr>
+      <tr><td><b>交互</b></td><td>单击位给谁</td>
+          <td><span class="badge b-ok">i</span> 单击=同步,复制移到右键</td>
+          <td>选 ii/iii 则恢复动作藏在右键,发现性差,与本次目标相悖</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="callout co-info">
+  <div class="ct">若选 A + i,实施范围预估</div>
+  <p><b>主进程</b>:新增一条用户触发的 fetch IPC(可直接复用 <code>forceFetchForAutotest</code> 的实现,
+  去掉 autotest 门控)+ 把 <code>classified</code> / <code>lastFetchOkAt</code> 送进快照(<b>后者已完成</b>)。
+  <b>渲染层</b>:徽章单击处理 + 进行中态 + tooltip 组装 + 右键菜单项 + 双语文案。
+  <b>删除</b>:<code>↓?</code> 分支、<code>behindUnknownAria</code> 文案、
+  <code>--stale</code> 样式(若选 A 而非 B)。
+  <b>测试</b>:纯逻辑(tooltip 组装 / 相对时间档位)进单测;点击→fetch→徽章更新进 autotest。</p>
+</div>
+
+<div class="footer" id="meta">
+  <h2 style="border:none;margin-bottom:12px">文档元数据</h2>
+  <table>
+    <tbody>
+      <tr><td style="width:20%">分支</td><td class="mono">master</td></tr>
+      <tr><td>代码基线</td><td class="mono">c53d60c + 未提交的 R3 收窄改动</td></tr>
+      <tr><td>关联</td><td class="mono">BUG-0005 · docs/html/git-autofetch-recovery-strategy-options.html</td></tr>
+      <tr><td>调研方式</td><td>WebSearch / WebFetch 读官方文档与源码,每条主张附 URL;未能证实的已在正文标注</td></tr>
+      <tr><td>状态</td><td><span class="badge b-warn">待决策</span> —— 决策落定前不写任何实现代码</td></tr>
+    </tbody>
+  </table>
+  <h3 style="color:var(--fg2)">更新历史(仅追加)</h3>
+  <table>
+    <thead><tr><th style="width:9%">版本</th><th style="width:13%">日期</th><th style="width:11%">分支</th><th>摘要</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">v1.0</td><td class="mono">2026-08-07</td><td class="mono">master</td>
+          <td>首版。起因是用户反馈 <code>↓?</code> 概念困惑且不提供恢复路径。竞品调研确认
+              <code>↓?</code>(同槽位换字符)是唯一无先例的做法,且 <code>?</code> 与 git 既有符号语义冲突;
+              竞品普遍用「独立常驻时间戳 + 指示器本身可点击」解决同一问题。
+              同时纠正了此前文档中「我们在渲染 <code>↓0</code>」的错误表述——实际从未渲染,
+              歧义在箭头缺席上。列出 A/B/C/D 四个 UX 方案与 i/ii/iii 三个交互位方案待决策。</td></tr>
+      <tr><td class="mono">v1.1</td><td class="mono">2026-08-07</td><td class="mono">master</td>
+          <td>补齐 Fork / Sublime Merge / GitKraken / Tower / JetBrains 的调研,并<b>更正 v1.0 的一处过头结论</b>:
+              「竞品普遍用独立常驻时间戳」实为 7 个里只有 2 个(GitHub Desktop、GitLens)。
+              浮出一条证据更强的共识替代之:<b>7 个产品零个把陈旧标记放在 ahead/behind 计数上</b>。
+              新增三条正面先例:GitKraken 10.6.0 的 REMOTES 分区标题警告图标(唯一明确针对
+              「自动 fetch 静默失败」发布的修复)、Sublime Merge 可点击的 ahead/behind 指示器、
+              以及 Cloudscape 的「警告指示器 + popover 内解释并提供 retry」。
+              另更正:VS Code 的 <code>git.autofetch</code> 默认为 <b>false</b>(我们默认开)。
+              方案 A/B/C/D 与 i/ii/iii 不变。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+</main>
+<script>
+(function(){
+  var links=[].slice.call(document.querySelectorAll('#toc a'));
+  var targets=links.map(function(a){return document.getElementById(a.getAttribute('href').slice(1))});
+  links.forEach(function(a){
+    a.addEventListener('click',function(e){
+      e.preventDefault();
+      var el=document.getElementById(a.getAttribute('href').slice(1));
+      if(!el)return;
+      window.scrollTo(0, el.getBoundingClientRect().top+window.pageYOffset-12);
+      history.replaceState(null,'',a.getAttribute('href'));
+      links.forEach(function(l){l.classList.remove('active')});
+      a.classList.add('active');
+    });
+  });
+  var t=false;
+  window.addEventListener('scroll',function(){
+    if(t)return; t=true;
+    window.requestAnimationFrame(function(){
+      var y=window.pageYOffset+90,idx=0;
+      for(var i=0;i<targets.length;i++){ if(targets[i]&&targets[i].offsetTop<=y) idx=i }
+      links.forEach(function(l){l.classList.remove('active')});
+      if(links[idx])links[idx].classList.add('active');
+      t=false;
+    });
+  },{passive:true});
+})();
+</script>
+</body>
+</html>

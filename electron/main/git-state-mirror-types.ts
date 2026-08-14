@@ -91,6 +91,18 @@ export interface MirrorState {
   lastFetchOkAt?: number
   /** `Date.now()` of the last background fetch ATTEMPT, successful or not. */
   lastFetchAttemptAt?: number
+  /**
+   * True when the most recent fetch attempt failed because the remote could not
+   * be reached. Cleared on success.
+   *
+   * Deliberately a BOOLEAN, not the classified reason string (2026-08-07 user
+   * decision). Auth failures, missing remotes and generic timeouts are things
+   * the user cannot act on from a tooltip — surfacing that text is noise, and
+   * the full classification already lives in the perf trace where we actually
+   * diagnose it. Unreachability is the one class worth saying out loud, because
+   * it is outside the app's control and the user can recognise it instantly.
+   */
+  remoteUnreachable?: boolean
   /** Status colour bucket — drives the terminal-grid-branch--{status} className. */
   status: TerminalGitStatus | null
   /** File list (unstaged + staged + untracked). Empty array when clean. */
@@ -163,6 +175,7 @@ export interface MirrorFileBody {
 export interface GitFetchFreshness {
   lastFetchOkAt?: number
   lastFetchAttemptAt?: number
+  remoteUnreachable?: boolean
 }
 
 export type MirrorDelta = Partial<Omit<MirrorState, 'cwd' | 'capturedAt'>> & {

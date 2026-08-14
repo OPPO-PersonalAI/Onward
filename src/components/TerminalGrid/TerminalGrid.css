@@ -282,16 +282,69 @@
 }
 
 /*
- * Stale sync (BUG-0005 R3): the background `git fetch` behind this count has not
- * succeeded recently, so `↓M` describes the remote as it was, not as it is. Drop
- * the confident sky-blue accent to a muted neutral and thin the glyph — the
- * count stops asserting itself without shouting. Deliberately NOT a warning
- * colour or an icon: a long offline stretch is normal, and an alarm the user
- * learns to ignore is worse than no signal. The tooltip carries the detail.
+ * The sync affordance. ALWAYS rendered when the cwd is a repo — that permanence
+ * is the point: an earlier revision bound syncing to a click on the whole badge,
+ * which left nothing on screen to suggest the badge did anything, so the recovery
+ * path was undiscoverable. Modelled on VS Code's status bar $(sync), which is
+ * permanent and spins in place mid-fetch.
+ *
+ * Muted by default so it reads as available-not-urgent; full strength on hover.
  */
-.terminal-grid-branch-behind--stale {
-  color: rgba(148, 163, 184, 0.7);
-  font-weight: 400;
+.terminal-grid-branch-sync {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin-left: 1px;
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+  line-height: 0;
+  transition: opacity 0.12s ease;
+}
+
+.terminal-grid-branch-sync:hover {
+  opacity: 1;
+}
+
+.terminal-grid-branch-sync:focus-visible {
+  outline: 1px solid var(--accent, rgba(88, 166, 255, 0.9));
+  outline-offset: 1px;
+  border-radius: 2px;
+  opacity: 1;
+}
+
+/*
+ * In-flight: the glyph itself spins. This replaces a `cursor: progress` on the
+ * badge — a spinning MOUSE POINTER reads as "the app is busy/hung", which is the
+ * wrong message for a background network call, and it vanishes the moment the
+ * pointer moves away. An in-place spinner stays put and is scoped to the thing
+ * that is actually working.
+ */
+.terminal-grid-branch-sync:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.terminal-grid-branch-sync[aria-busy='true'] svg {
+  animation: terminal-grid-branch-sync-spin 0.9s linear infinite;
+}
+
+@keyframes terminal-grid-branch-sync-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-grid-branch-sync[aria-busy='true'] svg {
+    animation: none;
+  }
+  /* Motion is the only in-flight cue, so substitute a static one. */
+  .terminal-grid-branch-sync[aria-busy='true'] {
+    opacity: 0.4;
+  }
 }
 
 .terminal-grid-branch--modified {

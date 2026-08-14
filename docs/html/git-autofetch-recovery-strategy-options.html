@@ -436,6 +436,14 @@ SPDX-License-Identifier: Apache-2.0
   <table>
     <thead><tr><th style="width:9%">版本</th><th style="width:13%">日期</th><th style="width:11%">分支</th><th>摘要</th></tr></thead>
     <tbody>
+      <tr><td class="mono">v1.1</td><td class="mono">2026-08-05</td><td class="mono">master</td>
+          <td>R3 的落地范围在实现后收窄:原方案 A 有两个陈旧触发条件——(a) 尝试过但从未成功、(b) 距上次成功超过 20 分钟。
+              经用户决定<b>去掉 (b)</b>,只保留 (a)。原因:(b) 会让所有有 upstream 的仓库在断网后约 30 秒内齐齐显示 <code>↓?</code>,
+              也会在任何超过阈值的睡眠后重新触发,使得"看到 <code>↓?</code>"的最常见含义变成"用户离线"而非"这个仓库坏了"。
+              <b>已接受的代价</b>:某仓库成功过一次后即使连续失败整个会话也不再提示;要覆盖该场景需要快照携带连续失败计数,
+              而不是把阈值加回来。连带简化:陈旧判定变为纯事件驱动,渲染层的 60 秒重估计时器、tick 状态、
+              <code>syncFreshnessNow</code> memo、<code>now</code> 参数与 <code>GIT_SYNC_STALE_AFTER_MS</code> 常量全部删除。
+              本文档 § 4 中描述的方案 A 保留原样作为决策当时的记录。</td></tr>
       <tr><td class="mono">v1.0</td><td class="mono">2026-08-03</td><td class="mono">master</td>
           <td>首版。列出 BUG-0005 修复中三项需用户拍板的策略问题（R1 退避重置口子 / R2 超时预算 / R3 陈旧提示），
               每项给出候选方案、代价与推荐，并附以真实诊断数据为输入的时间轴推演。

@@ -86,37 +86,60 @@ function normalizeCount(value: number | null | undefined): number {
 }
 
 /**
- * How long after the last SUCCESSFUL background fetch the `↓M` count stops being
- * presented as authoritative. Two fetch periods (2 × 10 min): one missed cycle is
- * ordinary jitter — a laptop lid, a tick that landed while hidden — but two means
- * the fetch loop is genuinely not keeping up.
+ * Beyond this age the "last synced" line switches from a relative time
+ * ("4 minutes ago") to an absolute date. Both GitHub Desktop and GitLens
+ * independently converged on this treatment — a relative time only carries
+ * meaning inside a short window; past that it is noise ("synced 23 days ago"
+ * tells you less than a date). GitLens uses 24 h; we match it, which is also
+ * ~144 fetch periods, far past any plausible "just a hiccup".
  */
-export const GIT_SYNC_STALE_AFTER_MS = 1_200_000
+export const SYNC_RELATIVE_WINDOW_MS = 86_400_000
+
+/**
+ * Which sentence the badge tooltip should carry about sync freshness.
+ *
+ * Deliberately a KIND rather than a boolean `stale`. Peer research (2026-08-07,
+ * 7 products) found that no tool marks staleness on the ahead/behind count
+ * itself; the count is left alone and the freshness lives in a separate,
+ * always-present line. Modelling this as an enum keeps the component from
+ * re-inventing a boolean and re-attaching it to the count.
+ */
+export type SyncFreshnessKind =
+  /** No upstream — there is no remote to be in sync with. Say nothing. */
+  | 'no-upstream'
+  /** The fetch loop has not run yet (cold launch). Say nothing; not a problem. */
+  | 'never-attempted'
+  /** Attempted, never succeeded. The count cannot be trusted. */
+  | 'never-succeeded'
+  /** At least one success; `ageMs` says how long ago. */
+  | 'synced'
 
 export interface GitSyncFreshness {
-  /** True when `↓M` should be de-emphasised because its input is old. */
-  stale: boolean
-  /** ms since the last successful fetch; null when none has ever succeeded. */
+  kind: SyncFreshnessKind
+  /** ms since the last successful fetch. Non-null only when kind === 'synced'. */
   ageMs: number | null
-  /** True when no successful fetch has EVER been observed for this repo. */
-  neverSynced: boolean
+  /** True when `ageMs` should render as an absolute date instead of "X ago". */
+  useAbsoluteDate: boolean
+  /**
+   * True when the last attempt failed because the remote was unreachable.
+   *
+   * This is the ONLY failure detail the UI surfaces (2026-08-07 decision): auth
+   * walls, missing remotes and bare timeouts are not actionable from a tooltip,
+   * and their classification already reaches us through the perf trace.
+   * Unreachability is different — it is outside the app's control and the user
+   * can confirm it themselves in a second.
+   */
+  remoteUnreachable: boolean
 }
 
 /**
- * Decide whether the badge's behind count is still trustworthy.
+ * Describe how fresh the badge's behind count is, for the tooltip.
  *
  * `behind` is computed against the LOCAL remote-tracking ref, so it is only as
- * fresh as the last successful `git fetch`. When fetching has been failing, the
- * badge keeps rendering a confident `↓0` that actually means "we have not been
- * able to ask in hours" — the exact confusion behind BUG-0005, where a repo went
- * 98.8 h with zero successful fetches and the UI never hinted at it.
- *
- * The three-way distinction matters, which is why `lastFetchAttemptAt` is an
- * input and not just `lastFetchOkAt`:
- *   - never attempted (fresh launch, the first tick has not fired) → NOT stale.
- *     Flagging every cold start would be pure noise.
- *   - attempted but never succeeded → STALE. This is a known, ongoing failure.
- *   - succeeded once, but too long ago → STALE once past `staleAfterMs`.
+ * fresh as the last successful `git fetch`. Without this line the badge cannot
+ * distinguish "you are up to date" from "we have never been able to ask" — the
+ * exact confusion behind BUG-0005, where a repo went 98.8 h with zero
+ * successful fetches and the UI never hinted at it.
  *
  * Pure so the decision table is locked by `test/unittest/git-sync-display.test.mts`
  * without a React render or a running fetch loop.
@@ -124,28 +147,61 @@ export interface GitSyncFreshness {
 export function resolveGitSyncFreshness(input: {
   lastFetchOkAt: number | null | undefined
   lastFetchAttemptAt: number | null | undefined
+  remoteUnreachable: boolean | null | undefined
   now: number
-  /** No upstream → there is no behind count to be stale about. */
+  /** No upstream → there is no remote to be in sync with. */
   hasUpstream: boolean
-  staleAfterMs?: number
 }): GitSyncFreshness {
-  const staleAfterMs = input.staleAfterMs ?? GIT_SYNC_STALE_AFTER_MS
-  if (!input.hasUpstream) return { stale: false, ageMs: null, neverSynced: false }
+  const unreachable = input.remoteUnreachable === true
+
+  if (!input.hasUpstream) {
+    return { kind: 'no-upstream', ageMs: null, useAbsoluteDate: false, remoteUnreachable: false }
+  }
 
   const okAt = toFiniteTimestamp(input.lastFetchOkAt)
   if (okAt === null) {
-    const attemptedAt = toFiniteTimestamp(input.lastFetchAttemptAt)
-    // Attempted and never succeeded → a real, current failure. Never attempted →
-    // the loop simply has not run yet; stay quiet.
-    return { stale: attemptedAt !== null, ageMs: null, neverSynced: true }
+    const attempted = toFiniteTimestamp(input.lastFetchAttemptAt) !== null
+    return {
+      kind: attempted ? 'never-succeeded' : 'never-attempted',
+      ageMs: null,
+      useAbsoluteDate: false,
+      // Only meaningful once something has actually been attempted.
+      remoteUnreachable: attempted && unreachable
+    }
   }
 
   // Clamp a negative age (clock adjustment / skew) to 0 rather than letting it
-  // read as "synced in the future" and flip the comparison.
+  // read as "synced in the future".
   const ageMs = Math.max(0, input.now - okAt)
-  return { stale: ageMs > staleAfterMs, ageMs, neverSynced: false }
+  return {
+    kind: 'synced',
+    ageMs,
+    useAbsoluteDate: ageMs > SYNC_RELATIVE_WINDOW_MS,
+    remoteUnreachable: unreachable
+  }
 }
 
 function toFiniteTimestamp(value: number | null | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+}
+
+/**
+ * Coarse bucket for "how long ago was the last successful sync", so the
+ * component can pick an i18n key without doing arithmetic in JSX.
+ *
+ * Buckets rather than a formatted string because the wording is per-locale and
+ * belongs in the dictionary; the arithmetic is what deserves a unit test.
+ * Anything past {@link SYNC_RELATIVE_WINDOW_MS} never reaches here — the
+ * caller renders an absolute date instead.
+ */
+export type SyncAgeBucket =
+  | { unit: 'just-now' }
+  | { unit: 'minutes'; value: number }
+  | { unit: 'hours'; value: number }
+
+export function bucketSyncAge(ageMs: number): SyncAgeBucket {
+  const safe = Number.isFinite(ageMs) && ageMs > 0 ? ageMs : 0
+  if (safe < 60_000) return { unit: 'just-now' }
+  if (safe < 3_600_000) return { unit: 'minutes', value: Math.floor(safe / 60_000) }
+  return { unit: 'hours', value: Math.floor(safe / 3_600_000) }
 }

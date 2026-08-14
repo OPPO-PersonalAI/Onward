@@ -307,6 +307,37 @@ class GitAutofetchManager {
   }
 
   /**
+   * User-initiated fetch for one repo — the recovery path behind the Task
+   * badge's click (BUG-0005 follow-up).
+   *
+   * Deliberately bypasses the due-timer and the failure backoff: the backoff
+   * exists to stop an UNATTENDED dead repo from burning resources, and a user
+   * who just clicked is by definition attending. It still routes through the
+   * scheduler's start/done hooks so a success RESETS the failure streak — the
+   * manual fetch fixing the repo must also un-stick the background loop.
+   *
+   * Returns `null` when a fetch for this repo is already in flight, so the
+   * caller can keep its button idempotent instead of stacking spawns.
+   */
+  async fetchNow(repoRoot: string): Promise<AutofetchResult | null> {
+    if (this.disposed || !repoRoot) return null
+    const inFlight = this.scheduler.inspect().repos.find((r) => r.repoKey === repoRoot)?.inFlight
+    if (inFlight) return null
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_FETCH_USER_REQUESTED, { repoRoot })
+    this.scheduler.onFetchStart(repoRoot)
+    this.activeFetches += 1
+    let result: AutofetchResult
+    try {
+      result = await this.executeFetch(repoRoot)
+    } finally {
+      this.activeFetches -= 1
+    }
+    this.scheduler.onFetchDone(repoRoot, Date.now(), result.ok)
+    this.reportResult(repoRoot, result, 'manual')
+    return result
+  }
+
+  /**
    * Autotest-only deterministic driver: fetch one repo NOW (bypassing due
    * timing), revalidate on success, and return the result. Gated by the caller
    * (`ONWARD_AUTOTEST=1`), never wired in production.
@@ -323,12 +354,19 @@ class GitAutofetchManager {
     // whose backing fetch has been failing can be RENDERED as stale instead of
     // silently presenting a days-old number as current (BUG-0005 R3).
     const settledAt = Date.now()
+    // Only ONE failure class reaches the UI: the remote could not be reached.
+    // Auth walls, missing remotes and bare timeouts are not actionable from a
+    // badge tooltip, and their full classification already travels to us in the
+    // perf trace. Note a 20 s kill with no stderr classifies as 'other', not
+    // 'network' — we genuinely do not know why it hung, so we do not claim to.
+    const remoteUnreachable = !result.ok && result.classified === 'network'
     // freshnessFanoutCount closes a diagnostic gap: without it, "published to
     // nobody because no cwd matched" and "published, but the renderer never
     // applied it" look identical in a bundle. Folded into the outcome events
     // below rather than getting an event of its own.
     const freshnessFanoutCount = gitStateMirrorRouter.setFetchFreshness(repoRoot, {
       lastFetchAttemptAt: settledAt,
+      remoteUnreachable,
       ...(result.ok ? { lastFetchOkAt: settledAt } : {})
     })
     if (result.ok) {
