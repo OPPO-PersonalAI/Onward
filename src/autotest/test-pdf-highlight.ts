@@ -531,6 +531,113 @@ export async function testPdfHighlight(ctx: AutotestContext): Promise<TestResult
     }
   }
 
+  // ---------- annotation panel toggle lives in the reader toolbar ----------
+  // Previously a floating overlay icon on the page: easy to miss and visually
+  // detached from the controls it belongs with.
+
+  {
+    const iframe = document.querySelector('.project-editor-pdf-reader-iframe') as HTMLIFrameElement | null
+    const frameDoc = iframe?.contentDocument ?? null
+    const toggle = frameDoc?.getElementById('annotationsToggleBtn') as HTMLButtonElement | null
+    const inToolbar = Boolean(toggle && frameDoc?.getElementById('toolbar')?.contains(toggle))
+    const countBadge = frameDoc?.getElementById('annotationsToggleCount') as HTMLElement | null
+    record('pdf-highlight-toolbar-toggle-present', inToolbar && toggle?.hidden === false, {
+      found: Boolean(toggle),
+      inToolbar,
+      hidden: toggle?.hidden,
+      label: toggle?.textContent?.trim().slice(0, 40)
+    })
+
+    // The toolbar must stay ONE row and never clip a control out of reach.
+    // Adding this button pushed an already-tight toolbar past its width: the
+    // button AND the colour toggle were clipped (123 px of overflow in the
+    // default layout), and labels wrapped vertically. Screenshots caught it;
+    // the DOM assertions above did not, so measure the geometry explicitly.
+    const toolbarGeometry = (() => {
+      const tb = frameDoc?.getElementById('toolbar')
+      const color = frameDoc?.getElementById('colorToggleBtn')
+      if (!tb) return null
+      const tbRect = tb.getBoundingClientRect()
+      const rightOf = (el: Element | null | undefined) =>
+        el ? Math.round(el.getBoundingClientRect().right) : -1
+      return {
+        overflowPx: tb.scrollWidth - tb.clientWidth,
+        heightPx: Math.round(tbRect.height),
+        toolbarLeft: Math.round(tbRect.left),
+        toolbarRight: Math.round(tbRect.right),
+        toggleLeft: toggle ? Math.round(toggle.getBoundingClientRect().left) : -1,
+        toggleRight: rightOf(toggle),
+        colorRight: rightOf(color),
+        // What the USER sees in the strip from the toggle's left edge to the
+        // toolbar's right edge. Geometry alone cannot answer this: controls
+        // scrolled out of view still have layout rects out there, and the
+        // pinned group paints over anything beneath it. Hit-testing asks the
+        // only question that matters — "what is on top here?" — which is
+        // exactly what the previous assertions could not express, and why a
+        // control bleeding through a 10 px gutter shipped twice.
+        topmostInPinnedStrip: (() => {
+          if (!toggle) return ['no-toggle']
+          const tr = toggle.getBoundingClientRect()
+          const y = Math.round(tbRect.top + tbRect.height / 2)
+          const xs = [
+            Math.round(tr.left + tr.width / 2),
+            Math.round(tr.right + 2),
+            Math.round(tbRect.right - 3)
+          ]
+          return xs.map((x) => {
+            const el = frameDoc?.elementFromPoint(x, y) as HTMLElement | null
+            if (!el) return 'none'
+            return el.closest('.toolbar-group.pinned') ? 'pinned' : (el.id || el.tagName.toLowerCase())
+          })
+        })()
+      }
+    })()
+    // The real contract, learned the hard way: at ~350 px (both side panels
+    // open) NOTHING makes 800 px of controls fit, so "zero overflow" is the
+    // wrong bar. What must hold is (a) the toolbar stays ONE row — it used to
+    // wrap into two, with "/ 3" split across lines — and (b) the annotation
+    // toggle is on screen rather than scrolled out of sight, which is the
+    // whole point of moving it into the toolbar.
+    record(
+      'pdf-highlight-toolbar-single-row-toggle-visible',
+      Boolean(
+        toolbarGeometry &&
+        toolbarGeometry.heightPx <= 52 &&
+        toolbarGeometry.toggleRight > 0 &&
+        toolbarGeometry.toggleRight <= toolbarGeometry.toolbarRight + 1 &&
+        toolbarGeometry.toggleLeft >= toolbarGeometry.toolbarLeft - 1 &&
+        toolbarGeometry.topmostInPinnedStrip.every((hit) => hit === 'pinned')
+      ),
+      toolbarGeometry ?? { reason: 'no toolbar' }
+    )
+
+    // The badge mirrors the live record count, and the pressed state mirrors
+    // the host-owned panel visibility — both pushed from the host, so this
+    // also proves the state round trip.
+    const viewerApi = getViewerApi()
+    const liveCount = viewerApi?.annotationCount() ?? -1
+    record(
+      'pdf-highlight-toolbar-toggle-shows-count',
+      liveCount > 0 && countBadge?.hidden === false && countBadge?.textContent === String(liveCount),
+      { liveCount, badgeText: countBadge?.textContent, badgeHidden: countBadge?.hidden }
+    )
+
+    // Clicking it closes the panel (host reacts), clicking again reopens.
+    const panelVisible = () => Boolean(document.querySelector('.pdf-annotation-panel'))
+    const wasVisible = panelVisible()
+    toggle?.click()
+    await sleep(500)
+    const afterFirst = panelVisible()
+    toggle?.click()
+    await sleep(500)
+    const afterSecond = panelVisible()
+    record(
+      'pdf-highlight-toolbar-toggle-controls-panel',
+      wasVisible && !afterFirst && afterSecond && toggle?.getAttribute('aria-pressed') === 'true',
+      { wasVisible, afterFirst, afterSecond, ariaPressed: toggle?.getAttribute('aria-pressed') }
+    )
+  }
+
   // ---------- label management (rename / recolor / delete custom labels) ----------
   // Pure logic locked by PAL-U-27..32; this proves the dialog wiring: the
   // manage button opens it, built-ins are read-only, and a custom label
@@ -563,6 +670,36 @@ export async function testPdfHighlight(ctx: AutotestContext): Promise<TestResult
     manageBtn?.click()
     await sleep(300)
     const dialog = () => document.querySelector('.pdf-annotation-manage-dialog')
+
+    // The dialog shipped fully TRANSPARENT because it referenced
+    // `--panel-elevated`, a variable nothing ever defined — an unresolvable
+    // var() voids the whole declaration. Nothing in the pipeline reads CSS,
+    // so assert on the COMPUTED background here: the styles resolving is the
+    // user-visible contract, not the class names being present.
+    {
+      const dialogEl = dialog() as HTMLElement | null
+      const backdropEl = document.querySelector('.pdf-annotation-dialog-backdrop') as HTMLElement | null
+      const dialogStyle = dialogEl ? getComputedStyle(dialogEl) : null
+      const backdropStyle = backdropEl ? getComputedStyle(backdropEl) : null
+      const isOpaque = (color: string | undefined) => {
+        if (!color) return false
+        if (color === 'transparent' || color === 'rgba(0, 0, 0, 0)') return false
+        const alpha = /rgba\([^)]*,\s*([\d.]+)\)$/.exec(color)
+        return alpha ? Number(alpha[1]) > 0.9 : true
+      }
+      record(
+        'pdf-highlight-manage-dialog-styles-resolve',
+        isOpaque(dialogStyle?.backgroundColor)
+          && dialogStyle?.borderTopWidth === '1px'
+          && isOpaque(backdropStyle?.backgroundColor) === false
+          && (backdropStyle?.backgroundColor ?? '') !== 'rgba(0, 0, 0, 0)',
+        {
+          dialogBackground: dialogStyle?.backgroundColor,
+          dialogBorderWidth: dialogStyle?.borderTopWidth,
+          backdropBackground: backdropStyle?.backgroundColor
+        }
+      )
+    }
     const builtinRows = dialog()?.querySelectorAll('.pdf-annotation-manage-row.is-builtin').length ?? 0
     const customRow = () =>
       dialog()?.querySelector('.pdf-annotation-manage-row[data-label-id^="hl-custom-"]') as HTMLElement | null

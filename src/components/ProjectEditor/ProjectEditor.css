@@ -2758,36 +2758,3 @@ body.project-editor-modal-resizing * {
  * reader's top-right rather than taking a permanent toolbar slot: with the
  * panel closed the user is reading, and a persistent button would be one more
  * thing competing with the page. */
-.project-editor-annotation-reopen {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  z-index: 12;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 9px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
-  color: var(--muted);
-  cursor: pointer;
-  box-shadow: var(--shadow-1);
-  opacity: 0.85;
-}
-
-.project-editor-annotation-reopen:hover {
-  opacity: 1;
-  color: var(--text);
-  border-color: var(--accent);
-}
-
-.project-editor-annotation-reopen-count {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  color: var(--text);
-}

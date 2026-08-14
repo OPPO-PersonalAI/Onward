@@ -71,6 +71,24 @@
         <div class="toolbar-group">
           <button id="colorToggleBtn" type="button" title="" data-i18n-title-on="colorToggleTitleOn" data-i18n-title-off="colorToggleTitleOff" data-i18n-on="colorToggleOn" data-i18n-off="colorToggleOff">Temporarily disable dark</button>
         </div>
+
+        <!-- Annotation panel toggle. Lives in the toolbar rather than as a
+             floating overlay button: the panel is a primary surface of this
+             reader, and an icon hovering over the page was both easy to miss
+             and visually detached from the controls it belongs with.
+             `pinned` sticks it to the toolbar's right edge so it stays
+             reachable when the rest of the toolbar has to scroll — the reader
+             is routinely only ~350 px wide with the side panels open, and a
+             toggle you have to scroll to find is the problem this replaced. -->
+        <div class="toolbar-group pinned" id="annotationsToggleGroup" hidden>
+          <button id="annotationsToggleBtn" type="button" aria-pressed="false" data-i18n-title="annotationsToggle" hidden>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M2 3h12v2H2V3zm0 4h9v2H2V7zm0 4h12v2H2v-2z" />
+            </svg>
+            <span id="annotationsToggleLabel" data-i18n="annotationsToggle">Annotations</span>
+            <span id="annotationsToggleCount" hidden>0</span>
+          </button>
+        </div>
       </header>
 
       <div id="errorBanner" hidden>

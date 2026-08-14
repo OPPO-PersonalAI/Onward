@@ -17,6 +17,7 @@ const MAX_SCALE = 5;
 const SCALE_STEP = 1.1;
 
 const I18N_DEFAULTS = {
+  annotationsToggle: "Annotations",
   prevPage: "Previous page",
   nextPage: "Next page",
   zoomOut: "Zoom out",
@@ -62,6 +63,9 @@ const els = {
   searchNextBtn: document.getElementById("searchNextBtn"),
   searchResult: document.getElementById("searchResult"),
   colorToggleBtn: document.getElementById("colorToggleBtn"),
+  annotationsToggleBtn: document.getElementById("annotationsToggleBtn"),
+  annotationsToggleGroup: document.getElementById("annotationsToggleGroup"),
+  annotationsToggleCount: document.getElementById("annotationsToggleCount"),
   viewerSection: document.getElementById("viewerSection"),
   viewerContainer: document.getElementById("viewerContainer"),
   viewer: document.getElementById("viewer"),
@@ -263,6 +267,8 @@ function bindHostMessages() {
       highlight.setNotePopupSize(data.width, data.height);
     } else if (data.type === "onward:pdf:goToAnnotation") {
       highlight.scrollToAnnotation(String(data.annotationId || ""));
+    } else if (data.type === "onward:pdf:annotationPanelState") {
+      applyAnnotationPanelState(Boolean(data.visible), Number(data.count) || 0);
     } else if (data.type === "onward:pdf:emphasizeAnnotations") {
       highlight.setEmphasizedAnnotations(Array.isArray(data.ids) ? data.ids : []);
     } else if (data.type === "onward:pdf:deleteAnnotation") {
@@ -322,6 +328,32 @@ function applyThemeFromHost(vars) {
     // Only accept keys that look like CSS custom properties.
     if (!/^--[\w-]+$/.test(name)) continue;
     root.style.setProperty(name, value);
+  }
+}
+
+/**
+ * Reflect the host-owned annotation panel state onto the toolbar button:
+ * pressed state (panel open) and the record count badge.
+ *
+ * Receiving this message is also what REVEALS the button. Only a host that
+ * actually owns an annotation panel sends it; the git-compare panes embed the
+ * same viewer but have no panel, and a button that does nothing when clicked
+ * is worse than no button.
+ */
+function applyAnnotationPanelState(visible, count) {
+  const button = els.annotationsToggleBtn;
+  if (!button) return;
+  button.hidden = false;
+  if (els.annotationsToggleGroup) els.annotationsToggleGroup.hidden = false;
+  button.setAttribute("aria-pressed", visible ? "true" : "false");
+  button.classList.toggle("active", visible);
+  const badge = els.annotationsToggleCount;
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = String(count);
+    badge.hidden = false;
+  } else {
+    badge.hidden = true;
   }
 }
 
@@ -420,6 +452,15 @@ function bindUiEvents() {
     colorEnhancementEnabled = !colorEnhancementEnabled;
     applyColorEnhancementState();
   });
+
+  // The panel itself lives on the host side, so the toolbar button only
+  // reports intent; the host answers with the new state via
+  // `onward:pdf:annotationPanelState`, keeping one source of truth.
+  if (els.annotationsToggleBtn) {
+    els.annotationsToggleBtn.addEventListener("click", () => {
+      postToHost({ type: "onward:pdf:toggleAnnotationPanel" });
+    });
+  }
 
   els.errorCloseBtn.addEventListener("click", () => clearError());
 

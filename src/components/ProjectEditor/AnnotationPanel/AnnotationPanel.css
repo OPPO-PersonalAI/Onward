@@ -368,10 +368,13 @@
 
 /* ---------- add-label dialog ---------- */
 
+/* Mirrors the app's canonical modal (.project-editor-dialog-overlay /
+ * .project-editor-dialog) so the label dialogs read as the same surface as
+ * every other dialog in the app rather than as a bolted-on panel. */
 .pdf-annotation-dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background-color: rgba(0, 0, 0, 0.6);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -380,9 +383,9 @@
 
 .pdf-annotation-dialog {
   width: min(400px, calc(100vw - 40px));
-  background: var(--panel-elevated);
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-1);
   padding: 16px;
   display: flex;

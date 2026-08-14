@@ -12,14 +12,20 @@
  *
  * Both PDFs carry the SAME three pages of text — the two versions differ in
  * ANNOTATIONS ONLY, which is exactly the agent-annotated-my-paper scenario
- * the panel exists for. One instance of each diff class, spread across pages
- * so the jump assertion is falsifiable (page 3 is off-screen at open):
+ * the panel exists for.
  *
- *   annotated-base.pdf       A-keep p1 · A-edit p1 (note/color v1) · A-drop p3
- *   annotated-modified.pdf   A-keep p1 · A-edit p1 (note/color v2) · A-fresh p3
+ * Layout is load-bearing for falsifiability: page 1 holds the one UNCHANGED
+ * annotation and every DIFFERENCE lives on page 3. A viewer that does not
+ * auto-jump sits on page 1, so "the comparison opened on the first
+ * difference" is only provable when the differences are somewhere page 1 is
+ * not. An earlier revision put the changed record on page 1 and the
+ * assertion could not fail.
+ *
+ *   annotated-base.pdf       A-keep p1 · A-edit p3 (note/color v1) · A-drop p3
+ *   annotated-modified.pdf   A-keep p1 · A-edit p3 (note/color v2) · A-fresh p3
  *
  *   → diff: added 1 (fresh, p3) · removed 1 (drop, p3) · changed 1 (edit,
- *     fields color+note) · unchanged 1 (keep)
+ *     fields color+note) · unchanged 1 (keep, p1)
  *
  * Annotation encoding mirrors resources/pdfjs/app/annotation-file.js:
  * /Highlight dicts carrying the private /CYY_MARK marker and a
@@ -52,15 +58,15 @@ const T0 = 1753900000000
 /** Same text on every version; the versions differ in annotations only. */
 const PAGE_LINES = [
   [
-    { y: 440, text: 'KEEPME this line stays highlighted unchanged' },
-    { y: 400, text: 'EDITME this line has its note and color edited' }
+    { y: 440, text: 'KEEPME this line stays highlighted unchanged' }
   ],
   [
-    { y: 440, text: 'Filler page so the interesting annotations sit off-screen' }
+    { y: 440, text: 'Filler page so the differences sit well off-screen' }
   ],
   [
-    { y: 440, text: 'DROPME this highlight vanishes in the new version' },
-    { y: 400, text: 'FRESHME this highlight only exists in the new version' }
+    { y: 440, text: 'EDITME this line has its note and color edited' },
+    { y: 400, text: 'DROPME this highlight vanishes in the new version' },
+    { y: 360, text: 'FRESHME this highlight only exists in the new version' }
   ]
 ]
 
@@ -91,17 +97,17 @@ function record(id, page, line, overrides = {}) {
 export const FIXTURE_ANNOTATIONS = {
   base: [
     record('anndiff-keep', 1, PAGE_LINES[0][0]),
-    record('anndiff-edit', 1, PAGE_LINES[0][1], { note: 'first thoughts', color: '#f2c14e' }),
-    record('anndiff-drop', 3, PAGE_LINES[2][0])
+    record('anndiff-edit', 3, PAGE_LINES[2][0], { note: 'first thoughts', color: '#f2c14e' }),
+    record('anndiff-drop', 3, PAGE_LINES[2][1], { createdAt: T0 + 4000, updatedAt: T0 + 4000 })
   ],
   modified: [
     record('anndiff-keep', 1, PAGE_LINES[0][0]),
-    record('anndiff-edit', 1, PAGE_LINES[0][1], {
+    record('anndiff-edit', 3, PAGE_LINES[2][0], {
       note: 'revised thoughts',
       color: '#5aa9e6',
       updatedAt: T0 + 9000
     }),
-    record('anndiff-fresh', 3, PAGE_LINES[2][1], { createdAt: T0 + 8000, updatedAt: T0 + 8000 })
+    record('anndiff-fresh', 3, PAGE_LINES[2][2], { createdAt: T0 + 8000, updatedAt: T0 + 8000 })
   ]
 }
 

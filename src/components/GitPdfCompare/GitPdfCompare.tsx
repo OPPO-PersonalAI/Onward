@@ -239,6 +239,39 @@ export function GitPdfCompare({
     )
   }
 
+  // Land on the first difference instead of page 1. Opening a comparison to
+  // the top of a 40-page paper hides the very thing the view exists to show —
+  // the reader would have to hunt for it. Both panes are aimed: the entry's
+  // own pane at the record, and the opposite pane at its nearest counterpart
+  // so the two sides stay roughly aligned for eyeball comparison.
+  const autoJumpedKeyRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!annotationDiff || annotationDiff.entries.length === 0) return
+    // One auto-jump per loaded document pair; re-jumping on every re-render
+    // would fight the reader's own scrolling.
+    const key = `${originalSrc ?? ''}|${modifiedSrc ?? ''}`
+    if (autoJumpedKeyRef.current === key) return
+    autoJumpedKeyRef.current = key
+
+    const first = annotationDiff.entries[0]
+    handleDiffJump(first)
+
+    // Aim the opposite pane at the nearest record it actually has: a
+    // 'changed' entry exists on both sides, otherwise fall back to the first
+    // entry that lives on that side.
+    const oppositePane = first.jumpPane === 'original' ? 'modified' : 'original'
+    const counterpart = first.kind === 'changed'
+      ? first
+      : annotationDiff.entries.find((entry) => entry.jumpPane === oppositePane)
+    if (counterpart) {
+      const frame = oppositePane === 'original' ? originalFrameRef.current : modifiedFrameRef.current
+      frame?.contentWindow?.postMessage(
+        { type: 'onward:pdf:goToAnnotation', annotationId: counterpart.annotation.id },
+        '*'
+      )
+    }
+  }, [annotationDiff, originalSrc, modifiedSrc])
+
   return (
     <div className="git-pdf-compare">
       <div className="git-pdf-compare-header">

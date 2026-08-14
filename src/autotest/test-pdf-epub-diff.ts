@@ -372,6 +372,25 @@ export async function testPdfEpubDiff(ctx: AutotestContext): Promise<TestResult[
     ) as HTMLIFrameElement | null
     const frameDoc = modifiedFrame?.contentDocument ?? null
 
+    // Opening a comparison to page 1 hides the very thing it exists to show.
+    // Falsifiable by fixture construction: EVERY difference lives on page 3
+    // and page 1 carries only the unchanged annotation, so a viewer that
+    // failed to auto-jump would still be sitting on page 1.
+    {
+      const pageInput = frameDoc?.getElementById('pageNumberInput') as HTMLInputElement | null
+      const landedPage = await waitFor(
+        'git-diff-pdf-annotation-autojump',
+        () => Number(pageInput?.value) >= 3,
+        10000,
+        200
+      )
+      record('git-diff-pdf-annotation-autojump-to-first-diff', landedPage, {
+        page: pageInput?.value,
+        expectedPage: 3,
+        defaultWithoutJump: 1
+      })
+    }
+
     // The panel's emphasis message paints a dashed outline on the listed
     // records; page 1 holds the changed record, so at least one emphasized
     // rect is on-screen without scrolling.
@@ -385,9 +404,46 @@ export async function testPdfEpubDiff(ctx: AutotestContext): Promise<TestResult[
       emphasizedRects: frameDoc?.querySelectorAll('.highlightAnnotRect-emphasized').length ?? -1
     })
 
-    // Jump: the added record lives on page 3, off-screen at open. Clicking
-    // its row must scroll the MODIFIED pane (added/changed target that side).
+    // The compare panes embed the same viewer but own no annotation panel, so
+    // the panel toggle must NOT appear there — it shipped visible and dead,
+    // clicking it did nothing. It also has to stay one row like the reader's.
+    {
+      const paneToolbar = (side: 'original' | 'modified') => {
+        const doc = (document.querySelector(
+          `.git-pdf-compare-pane[data-side="${side}"] iframe.git-pdf-compare-frame`
+        ) as HTMLIFrameElement | null)?.contentDocument
+        const tb = doc?.getElementById('toolbar')
+        const toggle = doc?.getElementById('annotationsToggleBtn') as HTMLButtonElement | null
+        return {
+          toggleVisible: Boolean(toggle && !toggle.hidden),
+          overflowPx: tb ? tb.scrollWidth - tb.clientWidth : -1,
+          heightPx: tb ? Math.round(tb.getBoundingClientRect().height) : -1
+        }
+      }
+      const original = paneToolbar('original')
+      const modified = paneToolbar('modified')
+      // Overflow is EXPECTED here — a half-width pane cannot hold ~800 px of
+      // controls, and the toolbar scrolls rather than clipping them out of
+      // reach. What must hold is that the toggle is absent (no dead control)
+      // and the toolbar stays one row.
+      record(
+        'git-diff-pdf-pane-toolbar-clean',
+        !original.toggleVisible && !modified.toggleVisible
+          && original.heightPx > 0 && original.heightPx <= 52
+          && modified.heightPx > 0 && modified.heightPx <= 52,
+        { original, modified }
+      )
+    }
+
+    // Jump: clicking a row must scroll the MODIFIED pane (added/changed
+    // target that side). Reset to the top first so this measures the click,
+    // not whatever the auto-jump above already did — otherwise the pane may
+    // already be at the target and the assertion proves nothing.
     const container = frameDoc?.getElementById('viewerContainer') as HTMLElement | null
+    if (container) {
+      container.scrollTop = 0
+      await sleep(400)
+    }
     const scrollBefore = container?.scrollTop ?? -1
     const row = document.querySelector(
       '.git-pdf-annotation-diff-row[data-annotation-id="anndiff-fresh"]'

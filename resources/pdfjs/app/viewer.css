@@ -39,14 +39,70 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
+  /* No right padding: the pinned group owns that strip instead (see below),
+   * otherwise scrolled controls show through the 10 px gap beside it. */
+  padding: 8px 0 8px 10px;
   border-bottom: 1px solid var(--onward-pdf-line);
   background: var(--onward-pdf-panel);
   z-index: 10;
+  /* The reader is routinely narrow — the annotation panel and the outline
+   * panel both eat width, and the git-compare panes are half-width by
+   * construction. Without these three rules the toolbar silently CLIPS its
+   * trailing controls (they stay in the DOM, just unreachable) and its labels
+   * wrap vertically, doubling the toolbar height. Keep it one row, let it
+   * scroll when it genuinely cannot fit, and never wrap. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  /* Enables the container queries below: controls shed their text labels
+   * before the toolbar has to scroll. */
+  container-type: inline-size;
+  container-name: pdftoolbar;
 }
 
-.toolbar-group { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.toolbar-group.grow { flex: 1; }
+#toolbar::-webkit-scrollbar { height: 6px; }
+#toolbar::-webkit-scrollbar-thumb {
+  background: var(--onward-pdf-line);
+  border-radius: 3px;
+}
+
+/* Groups keep their intrinsic width; only the search group gives way. */
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.toolbar-group.grow { flex: 1 1 120px; min-width: 60px; }
+
+/* Sticks to the toolbar's right edge inside the scroll container, so the
+ * annotation toggle stays on screen no matter how narrow the reader gets.
+ * The backdrop + fade keep scrolled controls from appearing to collide with
+ * it. */
+.toolbar-group.pinned {
+  position: sticky;
+  right: 0;
+  margin-left: auto;
+  padding-left: 10px;
+  /* Owns the toolbar's right gutter. A negative margin does NOT work here:
+   * sticky aligns the BORDER box to the container's padding edge, so the
+   * gutter stayed uncovered and scrolled controls bled through it. */
+  padding-right: 10px;
+  /* Sticky alone does not guarantee paint order over earlier siblings. */
+  z-index: 1;
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    var(--onward-pdf-panel) 10px,
+    var(--onward-pdf-panel) 100%
+  );
+}
+
+#toolbar button,
+#toolbar select,
+#toolbar span { white-space: nowrap; }
 
 button,
 select,
@@ -68,6 +124,62 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 select,
 input[type="search"],
 input[type="number"] { padding: 0 8px; }
+
+/* Annotation panel toggle: inherits the toolbar control look, adds the icon +
+ * label layout and a count badge. `.active` marks the panel as open.
+ *
+ * Hidden until the host announces it owns an annotation panel (see
+ * `onward:pdf:annotationPanelState`). The git-compare panes never send that
+ * message, so the button does not appear there — it would be a control that
+ * does nothing when clicked. */
+#annotationsToggleBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#annotationsToggleBtn[hidden] { display: none; }
+/* Hosts without an annotation panel (the git-compare panes) never reveal the
+ * group, so its gutter must not paint either. */
+.toolbar-group.pinned[hidden] { display: none; }
+
+/* Staged narrowing. Shed the least valuable pixels first so the controls that
+ * matter for reading survive longest; the pinned annotation toggle never
+ * scrolls away regardless. */
+
+/* The Project Editor already shows this file's full path directly above the
+ * reader, so the toolbar copy is pure duplication once space is tight. */
+@container pdftoolbar (max-width: 900px) {
+  #fileName { display: none; }
+}
+
+@container pdftoolbar (max-width: 820px) {
+  #annotationsToggleLabel { display: none; }
+  #annotationsToggleBtn { padding: 0 8px; }
+}
+
+/* Free-form zoom is a power-user affordance; the preset select still covers
+ * every common case. */
+@container pdftoolbar (max-width: 760px) {
+  #customZoomInput { display: none; }
+}
+
+#annotationsToggleBtn.active {
+  border-color: var(--onward-pdf-accent);
+  color: var(--onward-pdf-text);
+  background: color-mix(in srgb, var(--onward-pdf-accent) 22%, var(--onward-pdf-panel-elevated));
+}
+
+#annotationsToggleCount {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  text-align: center;
+  background: color-mix(in srgb, var(--onward-pdf-accent) 30%, transparent);
+}
 
 #pageNumberInput { width: 54px; }
 #zoomSelect { min-width: 104px; }

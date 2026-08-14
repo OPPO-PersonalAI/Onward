@@ -11292,6 +11292,13 @@ export function ProjectEditor({
                           }}
                           onDirtyChange={handlePdfAnnotationsDirtyChange}
                           fileMeta={pdfFileMeta ?? undefined}
+                          annotationPanelVisible={pdfAnnotationPanelVisible}
+                          onToggleAnnotationPanel={() => {
+                            const next = !pdfAnnotationPanelVisible
+                            pdfPanelUserChoiceRef.current = next
+                            setPdfAnnotationPanelVisible(next)
+                            updateUIPreferences({ projectEditorPdfAnnotationPanelVisible: next })
+                          }}
                           onExternalReload={(info) => {
                             if (!info.ok || !info.merge) return
                             const kept = info.merge.localAdds + info.merge.localMods + info.merge.localDels
@@ -11361,28 +11368,11 @@ export function ProjectEditor({
                           onClose={() => setShowManageLabelsDialog(false)}
                         />
                       )}
-                      {!pdfAnnotationPanelVisible && (
-                        <button
-                          type="button"
-                          className="project-editor-annotation-reopen"
-                          title={t('projectEditor.pdfReader.annotations.toggle')}
-                          aria-label={t('projectEditor.pdfReader.annotations.toggle')}
-                          onClick={() => {
-                            pdfPanelUserChoiceRef.current = true
-                            setPdfAnnotationPanelVisible(true)
-                            updateUIPreferences({ projectEditorPdfAnnotationPanelVisible: true })
-                          }}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                            <path d="M2 3h12v2H2V3zm0 4h9v2H2V7zm0 4h12v2H2v-2z" />
-                          </svg>
-                          {pdfAnnotations.length > 0 && (
-                            <span className="project-editor-annotation-reopen-count">
-                              {pdfAnnotations.length}
-                            </span>
-                          )}
-                        </button>
-                      )}
+                      {/* The panel toggle lives in the reader's own toolbar
+                          (viewer.html #annotationsToggleBtn) rather than as a
+                          floating overlay button: an icon hovering over the
+                          page was easy to miss and detached from the controls
+                          it belongs with. */}
                       {pdfAnnotationPanelVisible && (
                         <>
                           <div

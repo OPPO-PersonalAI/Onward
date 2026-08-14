@@ -1408,7 +1408,7 @@ const en = {
   'projectEditor.pdfReader.annotations.labelNamePlaceholder': 'e.g. Counter-example',
   'projectEditor.pdfReader.annotations.labelColor': 'Colour',
   'projectEditor.pdfReader.annotations.labelDuplicate': 'A label with this name already exists.',
-  'projectEditor.pdfReader.annotations.toggle': 'Annotation list',
+  'projectEditor.pdfReader.annotations.toggle': 'Annotations',
   // Outline auto-follow.
   'projectEditor.pdfReader.outline.locate': 'Jump to the section being read',
   'projectEditor.epubReader.toc': 'Outline',
@@ -2951,7 +2951,7 @@ const zhCN: LocaleTranslations = {
   'projectEditor.pdfReader.annotations.labelNamePlaceholder': '例如：反例',
   'projectEditor.pdfReader.annotations.labelColor': '颜色',
   'projectEditor.pdfReader.annotations.labelDuplicate': '已经有同名标签了。',
-  'projectEditor.pdfReader.annotations.toggle': '标注列表',
+  'projectEditor.pdfReader.annotations.toggle': '标注',
   'projectEditor.pdfReader.outline.locate': '跳到正在阅读的章节',
   'projectEditor.epubReader.toc': '目录',
   'projectEditor.epubReader.noToc': '此书没有目录。',

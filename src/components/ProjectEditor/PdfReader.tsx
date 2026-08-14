@@ -77,6 +77,11 @@ interface PdfReaderProps {
   onPageChange?: (page: number) => void
   /** Disk identity of the PDF at open time — seed for the save-gate pre-image. */
   fileMeta?: { size: number; mtimeMs: number }
+  /** Whether the host's annotation panel is open. Drives the toolbar button's
+   *  pressed state; the panel itself stays owned by the host. */
+  annotationPanelVisible?: boolean
+  /** Fires when the reader's toolbar button asks to toggle the panel. */
+  onToggleAnnotationPanel?: () => void
   /** Fires when an external-change reload round trip completes. `merge`
    *  carries rebase stats when local unsaved edits were replayed, else null. */
   onExternalReload?: (info: {
@@ -187,7 +192,9 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
     notePopupSize,
     onNotePopupSizeChange,
     fileMeta,
-    onExternalReload
+    onExternalReload,
+    annotationPanelVisible,
+    onToggleAnnotationPanel
   },
   ref
 ) {
@@ -232,6 +239,11 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
   useEffect(() => { filePathRef.current = filePath }, [filePath])
   const onExternalReloadRef = useRef(onExternalReload)
   useEffect(() => { onExternalReloadRef.current = onExternalReload }, [onExternalReload])
+  const onToggleAnnotationPanelRef = useRef(onToggleAnnotationPanel)
+  useEffect(() => { onToggleAnnotationPanelRef.current = onToggleAnnotationPanel }, [onToggleAnnotationPanel])
+  // Mirrors what the toolbar button should display. Kept in a ref as well so
+  // the ready handshake can re-push it without re-binding the message handler.
+  const annotationCountRef = useRef(0)
   const viewerUrlRef = useRef(viewerUrl)
   useEffect(() => { viewerUrlRef.current = viewerUrl }, [viewerUrl])
 
@@ -340,6 +352,7 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
       searchPlaceholder: t('projectEditor.pdfReader.searchPlaceholder'),
       prevMatch: t('projectEditor.pdfReader.prevMatch'),
       nextMatch: t('projectEditor.pdfReader.nextMatch'),
+      annotationsToggle: t('projectEditor.pdfReader.annotations.toggle'),
       colorToggleOn: t('projectEditor.pdfReader.colorToggleOn'),
       colorToggleOff: t('projectEditor.pdfReader.colorToggleOff'),
       colorToggleTitleOn: t('projectEditor.pdfReader.colorToggleTitleOn'),
@@ -435,9 +448,12 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
         // The viewer cannot reach IPC, so the actual write happens here.
         void handleAnnotationSave(data)
       } else if (data.type === 'onward:pdf:annotations') {
-        onAnnotationsChangeRef.current?.(
-          Array.isArray(data.items) ? (data.items as PdfAnnotationSummary[]) : []
-        )
+        const items = Array.isArray(data.items) ? (data.items as PdfAnnotationSummary[]) : []
+        annotationCountRef.current = items.length
+        postAnnotationPanelState()
+        onAnnotationsChangeRef.current?.(items)
+      } else if (data.type === 'onward:pdf:toggleAnnotationPanel') {
+        onToggleAnnotationPanelRef.current?.()
       } else if (data.type === 'onward:pdf:outlineActive') {
         const order = typeof data.order === 'number' ? data.order : null
         onOutlineActiveChangeRef.current?.(order)
@@ -512,6 +528,14 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
       }
     }
 
+    const postAnnotationPanelState = () => {
+      iframeRef.current?.contentWindow?.postMessage({
+        type: 'onward:pdf:annotationPanelState',
+        visible: Boolean(annotationPanelVisible),
+        count: annotationCountRef.current
+      }, '*')
+    }
+
     const postThemeAndI18n = () => {
       const target = iframeRef.current?.contentWindow
       if (!target) return
@@ -526,12 +550,13 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
           height: notePopupSize.height
         }, '*')
       }
+      postAnnotationPanelState()
     }
     window.addEventListener('message', handleMessage)
     if (readyRef.current) postThemeAndI18n()
     requestReady()
     return () => window.removeEventListener('message', handleMessage)
-  }, [filePath, highlightI18n, highlightLabels, i18nStrings, notePopupSize, requestReady])
+  }, [annotationPanelVisible, filePath, highlightI18n, highlightLabels, i18nStrings, notePopupSize, requestReady])
 
   useEffect(() => {
     if (typeof MutationObserver === 'undefined') return

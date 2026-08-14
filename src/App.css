@@ -36,6 +36,32 @@
   --radius-sm: 4px;
   --radius-md: 6px;
   --shadow-1: 0 6px 18px rgba(0, 0, 0, 0.4);
+  /* Semantic aliases over the themeable palette above.
+   *
+   * These names were already in use across component stylesheets (--line,
+   * --muted, --text, --background, --panel-elevated) but had never been
+   * defined anywhere — an unresolvable var() makes the WHOLE declaration
+   * invalid at computed-value time, so those rules silently lost their
+   * background, border and colour. That is what made the annotation panel
+   * and its dialogs render transparent.
+   *
+   * Defined as var() references, not literals, so they keep tracking the
+   * live theme: theme-applier.ts writes the 12 base variables onto
+   * documentElement and every alias re-resolves with them. */
+  --background: var(--bg-0);
+  --line: var(--border);
+  --text: var(--text-1);
+  --muted: var(--text-3);
+  /* Inset surface for rows sitting ON a --panel surface (list items, cards).
+   * Floating dialogs use --panel itself, matching .project-editor-dialog. */
+  --panel-elevated: var(--bg-2);
+  /* Same defect class, found by the CSS-variable contract guard in
+   * pre-existing stylesheets: referenced but never defined anywhere. */
+  --text-secondary: var(--text-2);
+  --text-tertiary: var(--text-3);
+  /* One step dimmer than --text-3, for de-emphasised outline metadata. */
+  --text-4: color-mix(in srgb, var(--text-3) 72%, transparent);
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
   --font-xs: 11px;
   --font-sm: 12px;
   --font-md: 13px;
