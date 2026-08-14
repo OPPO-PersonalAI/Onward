@@ -33,6 +33,9 @@ import {
 } from './git-repository-snapshot-service'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { startWorkerMemorySampler } from './worker-memory-sampler'
+
+startWorkerMemorySampler('git-ipc')
 
 type GitIpcWorkerMethod =
   | 'checkInstalled'

@@ -82,6 +82,7 @@ import { testModalDismiss } from './test-modal-dismiss'
 import { testFeedback } from './test-feedback'
 import { testFeedbackUi } from './test-feedback-ui'
 import { testFeedbackPersistenceSeed, testFeedbackPersistenceVerify } from './test-feedback-persistence'
+import { testMemoryWatch } from './test-memory-watch'
 import { testTerminalRenameRestartSurvivalSeed, testTerminalRenameRestartSurvivalVerify } from './test-terminal-rename-restart-survival'
 import { testTelemetry } from './test-telemetry'
 import { testInfraWatchdog } from './test-infra-watchdog'
@@ -271,6 +272,15 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
         collectSuiteResults('FeedbackUI', uiResults)
         await sleep(200)
       }
+    }
+
+    // Explicit-only: needs the fast-interval / zero-uptime env its runner
+    // (run-memory-watch-autotest.sh) provides; drives dialogs + bundle export.
+    if (!ctx.cancelled() && suiteFilter === 'memory-watch') {
+      log('phase0.15b:begin')
+      const results = await testMemoryWatch(ctx)
+      collectSuiteResults('MemoryWatch', results)
+      await sleep(200)
     }
 
     if (!ctx.cancelled() && suiteFilter === 'feedback-persistence-seed') {

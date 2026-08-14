@@ -12,6 +12,9 @@ import {
   readProjectSqliteTableRows,
   updateProjectSqliteRow
 } from './project-editor-utils'
+import { startWorkerMemorySampler } from './worker-memory-sampler'
+
+startWorkerMemorySampler('sqlite')
 
 type SqliteWorkerMethod =
   | 'getSchema'

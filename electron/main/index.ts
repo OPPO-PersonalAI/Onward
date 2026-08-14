@@ -57,6 +57,7 @@ import { broadcastGpuProcessGone } from './gpu-crash-recovery'
 import { startThreadpoolWatchdog, stopThreadpoolWatchdog } from './threadpool-watchdog'
 import { raceQuitSequenceAgainstFloor } from './quit-hard-floor'
 import { startVisibilityWatchdog, stopVisibilityWatchdog } from './visibility-watchdog'
+import { memoryWatcher } from './memory-watcher'
 import { performanceTrace } from './performance-trace'
 import { traceStore, runRotationStressForAutotest } from './trace-store'
 import { runBoundedDebugQuit } from './debug-quit-lifecycle'
@@ -1120,6 +1121,11 @@ app.whenReady().then(async () => {
   // Neither failure is observable by the existing event-loop monitor.
   startThreadpoolWatchdog()
   startVisibilityWatchdog(() => mainWindow)
+
+  // Memory diagnostics closed loop: Tier-1 sampler + Tier-2 pressure
+  // detector (docs/html/memory-diagnostics-closed-loop-design.html).
+  // Default-on; ONWARD_MEM_WATCH=0 disables. Stops itself on before-quit.
+  memoryWatcher.start(() => mainWindow)
 
   // Initialize system tray
   if (mainWindow) {

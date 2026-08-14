@@ -1176,7 +1176,68 @@ export const PERF_TRACE_EVENT = {
   // terminal). Payload: { terminalId, droppedBytes, capBytes, outputActive }.
   // Today the drop is fully silent in production bundles; this closes the
   // last unobservable hop of the renderer data path.
-  RENDERER_TERMINAL_PENDING_DATA_TRIMMED: 'renderer:terminal.pending-data-trimmed'
+  RENDERER_TERMINAL_PENDING_DATA_TRIMMED: 'renderer:terminal.pending-data-trimmed',
+
+  // ───────── 2026-08-07 Memory diagnostics closed loop (MemoryWatcher) ─────────
+  // Design: docs/html/memory-diagnostics-closed-loop-design.html. Tier-1
+  // low-frequency sampling (default 30 s, ONWARD_MEM_WATCH=0 to disable)
+  // rides the default-on diagnostic channel so every user bundle carries a
+  // memory time series. All numeric payload fields carry an explicit unit
+  // suffix (Kb / Mb / Ms / Pct) — the VS Code `code --status` double-
+  // conversion defect is the cautionary precedent for omitting units.
+  //
+  // Main: one sample per tick (ph=i). Payload: { schema, processes:
+  // [{ type, pid, workingSetKb, peakWorkingSetKb, cpuPercent }],
+  // mainHeapUsedKb, mainHeapLimitKb, mainRssKb, mainExternalKb,
+  // mainDetachedContexts, rendererPid }.
+  MAIN_MEM_WATCH_SAMPLE: 'main:mem-watch.sample',
+  // Main: compact counter series (ph=C) so Perfetto renders a memory curve
+  // without SQL. Payload: numeric MB per tracked process + main/renderer
+  // JS heap used.
+  MAIN_MEM_WATCH_COUNTERS: 'main:mem-watch.counters',
+  // Worker (each of the 7 Node worker threads self-reports — they share the
+  // main pid and are invisible to app.getAppMetrics). Payload: { worker,
+  // heapUsedKb, heapTotalKb, heapLimitKb, mallocedKb, externalKb,
+  // detachedContexts }. (ph=i, forwarded over the standard trace envelope.)
+  WORKER_MEM_WATCH_SAMPLE: 'worker:mem-watch.sample',
+  // Renderer: preload-side self-report (ph=i, forwarded via the dedicated
+  // memory:renderer-sample IPC so main can also feed the pressure
+  // detector). Payload: { heapUsedKb, heapTotalKb, heapLimitKb,
+  // blinkAllocatedKb, blinkTotalKb, resourceCacheKb, resourceCacheLiveKb,
+  // resourceImageKb, resourceScriptKb, resourceCssKb, resourceFontKb } —
+  // webFrame.getResourceUsage() splits "Blink resource cache grew" from
+  // "JS heap grew", the classic misattributed-renderer-RSS case.
+  RENDERER_MEM_WATCH_SAMPLE: 'renderer:mem-watch.sample',
+  // Main: the pure detector crossed into warn/critical (edge-triggered on
+  // level transitions, ph=i). Payload: { level, reason, footprintKb,
+  // heapRatioPct, windowSamples }.
+  MAIN_MEM_WATCH_PRESSURE_DETECTED: 'main:mem-watch.pressure-detected',
+  // Main: lightweight memory-report JSONL written into the trace dir (ships
+  // with the next diagnostic bundle automatically). Payload: { trigger,
+  // reportBytes, sampleCount } — the path stays out of the payload (path =
+  // sensitive key class); the report file itself is the evidence.
+  MAIN_MEM_WATCH_REPORT_WRITTEN: 'main:mem-watch.report-written',
+  // Main: a consent-gated heap snapshot finished writing (ph=i). Payload:
+  // { target: 'renderer' | 'main', snapshotBytes, elapsedMs }.
+  MAIN_MEM_WATCH_DUMP_WRITTEN: 'main:mem-watch.dump-written',
+  // Main: a heap-snapshot request was refused by the OOM-spiral guards
+  // (ph=i). Payload: { target, reason: 'in-flight' | 'insufficient-headroom'
+  // | 'disabled' | 'no-window' | 'write-failed' }. The skip breadcrumb is
+  // as diagnostic as the dump itself — "why is there no snapshot in this
+  // bundle" must be answerable from the trace.
+  MAIN_MEM_WATCH_DUMP_SKIPPED: 'main:mem-watch.dump-skipped',
+  // Main: pressure is present but a Discord-style guard refused the user
+  // prompt (edge-triggered on skip-reason changes, ph=i). Payload:
+  // { reason: 'uptime' | 'session-cap' | 'cooldown', level }. Answers "the
+  // user reports memory issues but says they never saw the notification"
+  // directly from a bundle.
+  MAIN_MEM_WATCH_PROMPT_SKIPPED: 'main:mem-watch.prompt-skipped',
+  // Renderer: pressure notification lifecycle (ph=i). Payload: { action:
+  // 'shown' | 'open-feedback' | 'dismiss', level }.
+  RENDERER_MEM_WATCH_NOTIFICATION: 'renderer:mem-watch.notification-action',
+  // Main: heap snapshot(s) copied next to an exported diagnostic bundle
+  // after explicit user opt-in (ph=i). Payload: { count, totalBytes }.
+  MAIN_DIAGNOSTIC_BUNDLE_HEAP_ATTACHED: 'main:diagnostic-bundle.heap-snapshot-attached'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

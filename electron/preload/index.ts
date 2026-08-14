@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webFrame } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import type {
@@ -1497,6 +1497,8 @@ export interface FeedbackDiagnosticBundleResult {
     missingFiles: string[]
   }
   verification?: FeedbackDiagnosticBundleVerification
+  heapSnapshots?: Array<{ target: string; path: string; bytes: number }>
+  heapSnapshotSkipped?: string[]
 }
 
 /**
@@ -1508,6 +1510,25 @@ export interface FeedbackDiagnosticBundleResult {
 export interface FeedbackDiagnosticBundleInvokeOptions {
   forceOutputPath?: string
   expectedMarker?: { uuid: string; label?: string }
+  includeHeapSnapshot?: boolean
+}
+
+export interface MemoryPressureAlert {
+  level: 'warn' | 'critical'
+  reason: string
+  footprintMb: number | null
+  heapRatioPct: number | null
+}
+
+export interface MemoryAPI {
+  onPressureAlert: (callback: (alert: MemoryPressureAlert) => void) => () => void
+  getWatchState: () => Promise<Record<string, unknown>>
+  /** Autotest-only (main side rejects without ONWARD_AUTOTEST=1): feed the pressure detector a synthetic sample. */
+  injectSampleForAutotest: (sample: {
+    workingSetKb?: number
+    heapUsedKb?: number
+    heapLimitKb?: number
+  }) => Promise<{ success: boolean; accepted?: boolean; error?: string }>
 }
 
 export interface FeedbackAPI {
@@ -1519,7 +1540,8 @@ export interface FeedbackAPI {
   removeRecord: (recordId: string) => Promise<FeedbackState>
   exportDiagnosticBundle: (
     forceOutputPath?: string,
-    expectedMarker?: { uuid: string; label?: string }
+    expectedMarker?: { uuid: string; label?: string },
+    options?: { includeHeapSnapshot?: boolean }
   ) => Promise<FeedbackDiagnosticBundleResult>
 }
 
@@ -1540,6 +1562,7 @@ export interface ElectronAPI {
   browser: BrowserAPI
   htmlPreview: HtmlPreviewAPI
   feedback: FeedbackAPI
+  memory: MemoryAPI
   codingAgentConfig: CodingAgentConfigAPI
   codingAgent: CodingAgentAPI
   debug: DebugAPI
@@ -2657,11 +2680,13 @@ const feedbackAPI: FeedbackAPI = {
   },
   exportDiagnosticBundle: (
     forceOutputPath?: string,
-    expectedMarker?: { uuid: string; label?: string }
+    expectedMarker?: { uuid: string; label?: string },
+    options?: { includeHeapSnapshot?: boolean }
   ) => {
     return ipcRenderer.invoke(IPC.FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE, {
       forceOutputPath,
-      expectedMarker
+      expectedMarker,
+      includeHeapSnapshot: options?.includeHeapSnapshot === true
     })
   }
 }
@@ -2676,6 +2701,70 @@ const codingAgentConfigAPI: CodingAgentConfigAPI = {
 const codingAgentAPI: CodingAgentAPI = {
   prepare: (command: string, executablePath?: string) => ipcRenderer.invoke(IPC.CODING_AGENT_PREPARE, command, executablePath),
   launch: (payload: CodingAgentLaunchInput) => ipcRenderer.invoke(IPC.CODING_AGENT_LAUNCH, payload)
+}
+
+// ---------- Memory diagnostics closed loop (renderer side) ----------
+// Preload self-reports renderer memory every ONWARD_MEM_WATCH_INTERVAL_SEC
+// (default 30 s, ONWARD_MEM_WATCH=0 disables — same knobs as main).
+// process.getHeapStatistics / getBlinkMemoryInfo report KB;
+// webFrame.getResourceUsage reports bytes — normalized to KB here so every
+// field crossing IPC carries one unit (Kb suffix).
+const memWatchEnabled = process.env.ONWARD_MEM_WATCH !== '0'
+const memWatchIntervalMs = (() => {
+  const raw = Number(process.env.ONWARD_MEM_WATCH_INTERVAL_SEC)
+  return Math.round((Number.isFinite(raw) && raw >= 1 ? raw : 30) * 1000)
+})()
+
+function sendRendererMemorySample(): void {
+  try {
+    const heap = process.getHeapStatistics()
+    const blink = (() => {
+      try {
+        return process.getBlinkMemoryInfo()
+      } catch {
+        return null
+      }
+    })()
+    const usage = webFrame.getResourceUsage()
+    const toKb = (bytes: number): number => (Number.isFinite(bytes) ? Math.round(bytes / 1024) : 0)
+    const categories = [usage.images, usage.scripts, usage.cssStyleSheets, usage.xslStyleSheets, usage.fonts, usage.other]
+    ipcRenderer.send(IPC.MEMORY_RENDERER_SAMPLE, {
+      heapUsedKb: heap.usedHeapSize,
+      heapTotalKb: heap.totalHeapSize,
+      heapLimitKb: heap.heapSizeLimit,
+      blinkAllocatedKb: blink?.allocated ?? null,
+      blinkTotalKb: blink?.total ?? null,
+      resourceCacheKb: toKb(categories.reduce((sum, c) => sum + (c?.size ?? 0), 0)),
+      resourceCacheLiveKb: toKb(categories.reduce((sum, c) => sum + (c?.liveSize ?? 0), 0)),
+      resourceImageKb: toKb(usage.images?.size ?? 0),
+      resourceScriptKb: toKb(usage.scripts?.size ?? 0),
+      resourceCssKb: toKb(usage.cssStyleSheets?.size ?? 0),
+      resourceFontKb: toKb(usage.fonts?.size ?? 0)
+    })
+  } catch {
+    // Never let sampling break the preload; skip the tick.
+  }
+}
+
+if (memWatchEnabled) {
+  setInterval(sendRendererMemorySample, memWatchIntervalMs)
+  // Early first sample so short-lived sessions still carry one datapoint.
+  setTimeout(sendRendererMemorySample, 5000)
+}
+
+const memoryAPI: MemoryAPI = {
+  onPressureAlert: (callback: (alert: MemoryPressureAlert) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, alert: MemoryPressureAlert) => {
+      callback(alert)
+    }
+    ipcRenderer.on(IPC.MEMORY_PRESSURE_ALERT, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.MEMORY_PRESSURE_ALERT, listener)
+    }
+  },
+  getWatchState: () => ipcRenderer.invoke(IPC.MEMORY_GET_WATCH_STATE),
+  injectSampleForAutotest: (sample: { workingSetKb?: number; heapUsedKb?: number; heapLimitKb?: number }) =>
+    ipcRenderer.invoke(IPC.DEBUG_MEMORY_INJECT_SAMPLE, sample)
 }
 
 const telemetryAPI = {
@@ -2838,6 +2927,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   browser: browserAPI,
   htmlPreview: htmlPreviewAPI,
   feedback: feedbackAPI,
+  memory: memoryAPI,
   codingAgentConfig: codingAgentConfigAPI,
   codingAgent: codingAgentAPI,
   telemetry: telemetryAPI,

@@ -1,0 +1,377 @@
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Onward 内存诊断闭环 — 基线报告与方案设计</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --panel: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #9198a1;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #39c5cf;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 15px; line-height: 1.7;
+  }
+  code, pre { font-family: "SF Mono", "Cascadia Code", Consolas, monospace; }
+
+  /* ===== TOC ===== */
+  #toc {
+    position: fixed; top: 0; left: 0; width: 260px; height: 100vh;
+    background: var(--bg2); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 20px 0; z-index: 10;
+  }
+  #toc .toc-title { font-size: 13px; font-weight: 700; color: var(--text-dim); padding: 0 20px 10px; letter-spacing: 1px; }
+  #toc a {
+    display: block; padding: 6px 20px; color: var(--text-dim); text-decoration: none;
+    font-size: 13.5px; border-left: 3px solid transparent;
+  }
+  #toc a:hover { color: var(--text); background: rgba(88,166,255,0.08); }
+  #toc a.active { color: var(--accent); border-left-color: var(--accent); background: rgba(88,166,255,0.1); font-weight: 600; }
+  #toc a.sub { padding-left: 36px; font-size: 12.5px; }
+
+  main { margin-left: 260px; padding: 40px 48px 80px; max-width: 1080px; }
+  @media (max-width: 900px) { #toc { display: none; } main { margin-left: 0; } }
+
+  h1 { font-size: 26px; margin-bottom: 6px; }
+  h2 { font-size: 21px; margin: 48px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 16.5px; margin: 26px 0 10px; color: var(--accent); }
+  p { margin: 10px 0; }
+  .subtitle { color: var(--text-dim); margin-bottom: 24px; }
+  ul, ol { margin: 10px 0 10px 24px; }
+  li { margin: 4px 0; }
+  a { color: var(--accent); }
+  strong { color: #fff; }
+
+  /* components */
+  .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 12px; font-weight: 600; vertical-align: middle; }
+  .b-green { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.4); }
+  .b-red { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.4); }
+  .b-yellow { background: rgba(210,153,34,0.15); color: var(--yellow); border: 1px solid rgba(210,153,34,0.4); }
+  .b-blue { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.4); }
+  .b-purple { background: rgba(188,140,255,0.15); color: var(--purple); border: 1px solid rgba(188,140,255,0.4); }
+
+  .callout { border-radius: 8px; padding: 14px 18px; margin: 14px 0; border: 1px solid; }
+  .c-info { background: rgba(88,166,255,0.07); border-color: rgba(88,166,255,0.35); }
+  .c-warn { background: rgba(210,153,34,0.07); border-color: rgba(210,153,34,0.35); }
+  .c-danger { background: rgba(248,81,73,0.07); border-color: rgba(248,81,73,0.35); }
+  .c-ok { background: rgba(63,185,80,0.07); border-color: rgba(63,185,80,0.35); }
+  .callout .ct { font-weight: 700; margin-bottom: 4px; }
+
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--bg2); color: var(--text); }
+  td { background: var(--panel); }
+  tr:hover td { background: #22272e; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin: 16px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .stat .num { font-size: 26px; font-weight: 700; }
+  .stat .lbl { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+
+  pre.code { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.6; margin: 12px 0; }
+  .k { color: var(--purple); } .s { color: #a5d6ff; } .cm { color: var(--text-dim); } .fn { color: #d2a8ff; }
+
+  /* memory bars */
+  .membar { margin: 8px 0; }
+  .membar .row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .membar .name { width: 190px; font-size: 13px; color: var(--text-dim); text-align: right; flex-shrink: 0; }
+  .membar .track { flex: 1; height: 22px; background: var(--bg2); border-radius: 5px; overflow: hidden; display: flex; }
+  .membar .seg { height: 100%; display: flex; align-items: center; padding-left: 8px; font-size: 11.5px; color: rgba(255,255,255,0.9); white-space: nowrap; overflow: hidden; }
+  .membar .val { width: 90px; font-size: 13px; font-weight: 600; flex-shrink: 0; }
+
+  /* flow diagram */
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 18px 0; }
+  .fbox { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; }
+  .fbox .ft { font-weight: 700; margin-bottom: 4px; }
+  .fbox .fd { font-size: 13px; color: var(--text-dim); }
+  .farrow { text-align: center; color: var(--text-dim); font-size: 18px; padding: 2px 0; }
+  .l1 { border-left: 4px solid var(--green); }
+  .l2 { border-left: 4px solid var(--yellow); }
+  .l3 { border-left: 4px solid var(--red); }
+  .l4 { border-left: 4px solid var(--purple); }
+  .l5 { border-left: 4px solid var(--cyan); }
+
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 16px 0; }
+  @media (max-width: 800px) { .ba { grid-template-columns: 1fr; } }
+  .ba .col { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .ba .col h4 { margin-bottom: 10px; font-size: 14.5px; }
+  .ba .before h4 { color: var(--red); } .ba .after h4 { color: var(--green); }
+  .ba ul { margin-left: 18px; font-size: 13.5px; }
+
+  .qcard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 22px; margin: 18px 0; }
+  .qcard .qt { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+  .opt { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
+  .opt.rec { border-color: rgba(63,185,80,0.5); background: rgba(63,185,80,0.05); }
+  .opt .ot { font-weight: 600; }
+  .opt .od { font-size: 13px; color: var(--text-dim); margin-top: 3px; }
+
+  .meta-table td, .meta-table th { font-size: 12.5px; }
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+</style>
+</head>
+<body>
+
+<nav id="toc">
+  <div class="toc-title">目录</div>
+  <a href="#overview">0 · 总览</a>
+  <a href="#baseline">1 · 基线测量</a>
+  <a href="#baseline-live" class="sub">1.1 活实例剖析</a>
+  <a href="#baseline-idle" class="sub">1.2 空闲期采样</a>
+  <a href="#baseline-code" class="sub">1.3 代码现状:零</a>
+  <a href="#assets">2 · 可复用的既有资产</a>
+  <a href="#peers">3 · 同类产品调研</a>
+  <a href="#peers-six" class="sub">3.1 六种防 OOM 手法</a>
+  <a href="#architecture">4 · 目标架构:三层闭环</a>
+  <a href="#compare">5 · 现状 vs 目标</a>
+  <a href="#decisions">6 · 待拍板的 4 个决策</a>
+  <a href="#phases">7 · 实施分期与测试</a>
+  <a href="#privacy">8 · 隐私设计</a>
+  <a href="#meta">9 · 文档元数据</a>
+</nav>
+
+<main>
+<h1>Onward 内存诊断闭环 — 基线报告与方案设计</h1>
+<p class="subtitle">渲染进程内存可超 1 GB · 建立「开发期 + 线上用户期」都能定位内存泄露的闭环 · 2026-08-07</p>
+
+<!-- ============ 0 总览 ============ -->
+<h2 id="overview">0 · 总览</h2>
+<p>目标:当内存出问题时,<strong>不需要用户复现、不需要开发者猜</strong>,诊断数据已经在用户的反馈包里。方案分三层:①便宜的常驻内存采样(进主流程的 perf-trace,随诊断包自动带出);②纯函数阈值检测器(可单测);③分级抓取 + 用户知情同意的反馈通道。</p>
+<div class="cards">
+  <div class="stat"><div class="num" style="color:var(--red)">≈990 MB</div><div class="lbl">当前活实例全应用 footprint(4 进程合计,静置状态)</div></div>
+  <div class="stat"><div class="num" style="color:var(--yellow)">364 MB</div><div class="lbl">渲染进程 footprint(本会话峰值 464 MB;用户报告可超 1 GB)</div></div>
+  <div class="stat"><div class="num" style="color:var(--accent)">0 处</div><div class="lbl">代码中现有的内存监控(grep 核实,详见 1.3)</div></div>
+  <div class="stat"><div class="num" style="color:var(--green)">368 个</div><div class="lbl">已注册 perf-trace 事件——采样层可直接复用这套管线</div></div>
+</div>
+<div class="callout c-info"><div class="ct">为什么是「闭环」而不是「工具」</div>
+本仓库没有远程日志(无 ELK / Sentry),用户反馈的诊断包就是唯一的现场证据。所以内存数据必须<strong>默认进入诊断包</strong>,而不是等出了问题再让用户装工具、开开关、复现一遍。</div>
+
+<!-- ============ 1 基线 ============ -->
+<h2 id="baseline">1 · 基线测量(2026-08-07)</h2>
+<h3 id="baseline-live">1.1 活实例剖析:正式版 Onward 2.1.0-daily.20260731.1,运行 2 天 19 小时</h3>
+<p>用 macOS <code>footprint</code> / <code>vmmap</code> 对正在运行的正式版实例采样(<code>ps</code> 的 RSS 列因换页噪声严重失真,以 footprint 为准):</p>
+<div class="membar">
+  <div class="row"><div class="name">GPU 进程 (Helper)</div><div class="track">
+    <div class="seg" style="width:44%;background:#8957e5">IOSurface 180</div>
+    <div class="seg" style="width:26%;background:#6e40c9">图形 106</div>
+    <div class="seg" style="width:19%;background:#553098">IOAccel 78</div>
+    <div class="seg" style="width:11%;background:#3d2373">其它</div>
+  </div><div class="val">406 MB</div></div>
+  <div class="row"><div class="name">渲染进程 (Renderer)</div><div class="track" style="max-width:89.7%">
+    <div class="seg" style="width:56%;background:#1f6feb">V8/JS ≈204</div>
+    <div class="seg" style="width:41%;background:#388bfd">Blink/PartitionAlloc ≈150</div>
+  </div><div class="val">364 MB</div></div>
+  <div class="row"><div class="name">主进程 (Main)</div><div class="track" style="max-width:45%">
+    <div class="seg" style="width:56%;background:#238636">V8/JS 102</div>
+    <div class="seg" style="width:32%;background:#2ea043">PartitionAlloc 58</div>
+    <div class="seg" style="width:12%;background:#46954a">其它</div>
+  </div><div class="val">183 MB</div></div>
+  <div class="row"><div class="name">网络进程 (Helper)</div><div class="track" style="max-width:10%">
+    <div class="seg" style="width:100%;background:#57606a">≈40</div>
+  </div><div class="val">≈40 MB</div></div>
+</div>
+<div class="callout c-warn"><div class="ct">发现 ① — <code>ps</code> 的 RSS 严重低估 GPU 进程</div>
+GPU 进程 RSS 只显示 82 MB,实际 footprint 是 <strong>406 MB</strong>(IOSurface 纹理与图形内存不计入 RSS)。这意味着采样层必须用 <code>app.getAppMetrics()</code>(取 workingSetSize)配合分类采集,不能依赖 <code>ps</code> 一类的数字;跨平台语义差异(macOS 无 residentSet)也要在字段上写清单位与含义——VS Code 就因两处各换算一次单位,让 <code>code --status</code> 的内存列错了十个数量级、存活约两年。</div>
+<div class="callout c-info"><div class="ct">发现 ② — 渲染进程的大头是 V8/JS 堆</div>
+V8 相关(含被换出部分)≈204 MB,大于 Blink/PartitionAlloc 的 ≈150 MB。用户报告的「超 1 GB」若成立,以比例推断主要是 JS 堆增长——指向监听器、缓存、终端回滚缓冲、大 diff 字符串等 JS 层驻留。这类问题恰好是 heap snapshot / retainer 分析能回答的。</div>
+
+<h3 id="baseline-idle">1.2 空闲期采样:6 分钟无单调增长</h3>
+<p>对活实例以 20 秒间隔连续采样 18 次:渲染进程 RSS 在 122–287 MB 间波动(换页噪声),footprint 仅 364 → 374 MB。<strong>结论:短期空闲不泄露;超 1 GB 是使用行为驱动的累积</strong>(长会话、大文件 diff、多任务终端输出等),必须靠<strong>长时间序列</strong>才能定位增长拐点——这正是当前完全缺失的能力。</p>
+
+<h3 id="baseline-code">1.3 代码现状:内存监控为零(grep 核实)</h3>
+<table>
+  <tr><th>API / 能力</th><th>产品代码中出现次数</th></tr>
+  <tr><td><code>process.memoryUsage</code> / <code>v8.getHeapStatistics</code> / <code>getProcessMemoryInfo</code> / <code>performance.memory</code></td><td><span class="badge b-red">0</span></td></tr>
+  <tr><td><code>writeHeapSnapshot</code> / <code>takeHeapSnapshot</code>(任何堆转储)</td><td><span class="badge b-red">0</span></td></tr>
+  <tr><td><code>webFrame.getResourceUsage</code>(Blink 资源缓存归因)</td><td><span class="badge b-red">0</span></td></tr>
+  <tr><td><code>app.getAppMetrics()</code></td><td><span class="badge b-yellow">3 处</span>,但全部只用 CPU 字段或做 GPU 进程选择,<strong>内存字段被丢弃</strong>(如 <code>ProjectEditor.tsx:9475</code>)</td></tr>
+  <tr><td>渲染侧性能采样器 <code>perf-monitor.ts</code> 的 17 个字段</td><td>FPS / 掉帧 / 输入延迟等,<span class="badge b-red">无一个内存字段</span></td></tr>
+</table>
+<p>另:7 个 Node worker 线程(git-ipc、git-state-mirror、sqlite、ripgrep、app-state、project-fs、git-status)与主进程共享 pid,<strong>对 <code>app.getAppMetrics()</code> 完全不可见</strong>,必须走自报告通道。<code>docs/performance-optimization-master-plan.md</code> § 5 已有一份 2026-06 的「内存看门狗」纸面设计(未实现),本方案在其骨架上按本次调研修订并落地。</p>
+
+<!-- ============ 2 资产 ============ -->
+<h2 id="assets">2 · 可复用的既有资产</h2>
+<table>
+  <tr><th>资产</th><th>现状</th><th>在闭环中的角色</th></tr>
+  <tr><td><strong>perf-trace 管线</strong><br><code>perf-trace-names.ts</code>(368 事件)→ NDJSON → Perfetto</td><td>成熟;单写入者;8 MB/块、64 MB 总量、限速</td><td>采样层的事件通道。内存样本以计数器事件进入,<strong>在 Perfetto 里直接看到内存曲线与其它事件的时间对齐</strong></td></tr>
+  <tr><td><strong>diagnostic 通道</strong><br><code>perfTraceDiagnostic()</code></td><td>用户正式版<strong>默认开启</strong>(可用 <code>=0</code> 关)</td><td>关键枢纽:采样走这条通道 → 每个用户反馈包<strong>天然自带内存时间序列</strong>,闭环第一环免费打通</td></tr>
+  <tr><td><strong>诊断包导出</strong><br><code>diagnostic-bundle.ts</code> + FeedbackModal</td><td>成熟;含全部 perf-*.jsonl;zip / sync-directory 双模式</td><td>「送回开发者」的通道。注意:打包时整块读入内存,<strong>大快照必须走旁路</strong>,不能塞进 zip 流程</td></tr>
+  <tr><td><strong>通知条组件</strong><br><code>ScheduleNotification.tsx</code> 样式</td><td>成熟(图标+文案+操作按钮+关闭)</td><td>「检测到内存异常」的非阻断提示载体</td></tr>
+  <tr><td><strong>Electron 43 自带 OOM 栈</strong><br>PR #50043</td><td>43 天然携带</td><td>renderer 真 OOM 时 crash key 里已有 JS 栈 + 堆统计,白拿的兜层信号(不依赖我们的代码)</td></tr>
+</table>
+
+<!-- ============ 3 调研 ============ -->
+<h2 id="peers">3 · 同类产品调研(要点)</h2>
+<div class="callout c-warn"><div class="ct">核心结论:没有任何成熟 Electron 产品做完了这个闭环</div>
+这既说明难点真实存在(抓取时机、二次 OOM、隐私),也说明按下面的护栏做完,就是超出同类产品水平的能力。</div>
+<table>
+  <tr><th>产品</th><th>做法</th><th>对我们的启示</th></tr>
+  <tr><td><strong>VS Code</strong></td><td>Process Explorer(每进程 CPU+内存)+ 本地手动抓快照;<strong>生产环境不自动抓堆</strong>;内存遥测只在启动时采一次。真正好用的是两个轻量泄漏探测器:事件监听器<strong>按创建栈直方图</strong>报「最高频泄漏栈」;<code>FinalizationRegistry</code> 抓「被 GC 但从未 dispose」的对象</td><td>轻量结构化探测器值得移植(能把「有泄漏」直接定位到「哪一行」);连续采样默认关的姿态我们<strong>不照抄</strong>——他们有海量遥测,我们只有反馈包</td></tr>
+  <tr><td><strong>Chromium</strong></td><td>对<strong>小比例用户做泊松采样堆剖析</strong>并匿名上传;从不对所有人抓完整快照</td><td>生产环境的答案是「采样 + 有界产物」,完整快照只留给知情同意的场景</td></tr>
+  <tr><td><strong>Discord</strong></td><td>内存超 4 GB 触发的是<strong>自动重启</strong>,且有五重护栏:阈值 + 运行≥1h + 用户空闲≈30min + 不在通话中 + 24h 最多一次</td><td>凡是自动触发的用户可见动作,<strong>光看内存数字不够</strong>,要叠加用户状态与频次上限</td></tr>
+  <tr><td><strong>Sentry .NET</strong></td><td>唯一的阈值触发抓堆先例:<code>EnableHeapDumps(90%, Debouncer.PerDay(3))</code>,默认<strong>每次应用生命周期只抓 1 次</strong>(JS/Electron SDK 均无对应物)</td><td>去抖参数的直接范本;上传通道尺寸上限(压缩 40 MB)说明「自动上传完整快照」这条路本来就不通</td></tr>
+  <tr><td><strong>Slack</strong></td><td>对 10% 用户做生产遥测,报 p10/p50/p90/p99 分布(基线 130 MB – 960 MB/workspace),无快照</td><td>时间序列分布本身已能支撑大多数决策</td></tr>
+</table>
+
+<h3 id="peers-six">3.1 「抓取不能把进程搞死」的六种手法(全部纳入本方案)</h3>
+<ol>
+  <li><strong>能用采样就不用快照</strong> — 泊松分配采样开销极小(Chromium 线上做法);</li>
+  <li><strong>能用有界产物就不抓堆</strong> — 堆统计 + 栈写入定长字段(Electron 43 OOM 栈的做法);</li>
+  <li><strong>抓之前检查余量</strong> — 完整快照需<strong>约 2 倍当前堆</strong>的内存(Node 官方警告),余量不足直接放弃并记录 <code>dump-skipped</code>;</li>
+  <li><strong>推迟到安全点</strong> — 不在濒死回调里抓(V8 <code>RequestInterrupt</code> 模式);</li>
+  <li><strong>阈值设在危险区之前</strong> — 接近堆上限时抓取<strong>无法可靠完成</strong>(Node 文档承认 + 0 字节文件实证),所以要早触发;</li>
+  <li><strong>让健康进程干重活</strong> — renderer 快照由主进程经 <code>webContents.takeHeapSnapshot()</code> 发起,解析在进程外。</li>
+</ol>
+
+<!-- ============ 4 架构 ============ -->
+<h2 id="architecture">4 · 目标架构:三层闭环</h2>
+<div class="flow">
+  <div class="fbox l1"><div class="ft">第 1 层 · 常驻低频采样 <span class="badge b-green">便宜 · 常开(待拍板)</span></div>
+  <div class="fd">主进程 <code>MemoryWatcher</code> 定时(默认 30 s)采集:<code>app.getAppMetrics()</code>(main / renderer / GPU / 网络)+ 主进程 <code>v8.getHeapStatistics()</code>(含 <code>number_of_detached_contexts</code> 泄漏信号)+ <strong>7 个 worker 自报告</strong>(新增一条控制消息:<code>process.memoryUsage()</code> + 堆统计)+ 渲染进程报告(<code>process.getHeapStatistics()</code> + <code>webFrame.getResourceUsage()</code>,把「Blink 资源缓存涨」和「JS 堆涨」区分开)。全部以 perf-trace 计数器事件落盘 → Perfetto 可视 → <strong>随诊断包自动带出</strong>。</div></div>
+  <div class="farrow">↓ 样本进入环形缓冲(近 N 分钟)</div>
+  <div class="fbox l2"><div class="ft">第 2 层 · 阈值检测器 <span class="badge b-yellow">纯函数 · 可单测</span></div>
+  <div class="fd"><code>(样本时间序列, 配置) → { pressure: none | warn | critical, reason }</code>。滑动窗口 + 双口径(footprint 绝对值 / V8 used÷limit 比例)+ 连续上升斜率条件;叠加 Discord 式护栏:运行时长下限、每会话触发上限、冷却期。所有参数可用 <code>ONWARD_*</code> 环境变量覆盖,先按初始值上线,<strong>等第 1 层收集到真实曲线后再校准</strong>。</div></div>
+  <div class="farrow">↓ warn / critical 触发</div>
+  <div class="fbox l3"><div class="ft">第 3 层 · 分级抓取 + 用户提示 <span class="badge b-red">重型 · 三重防护</span></div>
+  <div class="fd"><strong>A 级(自动,安全)</strong>:生成轻量「内存报告」JSON(KB 级:指标历史、各进程/线程堆统计、资源缓存、detached contexts 计数)→ 落到 traces 目录 → 通知条提示用户。<br>
+  <strong>B 级(仅用户同意后)</strong>:完整 <code>.heapsnapshot</code>——单飞锁 + 每会话 1 次 + 余量检查(空闲内存 &gt; 当前堆)+ 冷却期;renderer 由主进程发起,main/worker 各自 <code>v8.writeHeapSnapshot()</code>。<br>
+  面包屑事件:<code>main:mem-watch.pressure-detected</code> / <code>dump-written</code> / <code>dump-skipped(reason)</code>。</div></div>
+  <div class="farrow">↓ 用户点击「打开反馈」</div>
+  <div class="fbox l4"><div class="ft">反馈通道 · 诊断包整合 <span class="badge b-purple">知情同意</span></div>
+  <div class="fd">内存报告 JSON 自动纳入诊断包(小,无堆内容)。<code>.heapsnapshot</code> <strong>永不自动打包</strong>:反馈弹窗中单独勾选,并用大白话提示(Chrome 模式):「快照包含打开文件的全文、终端记录,可能包含密钥」。大文件走 sync-directory 旁路,避开 zip 全量读入内存的路径。</div></div>
+  <div class="farrow">↓ 用户发给开发者</div>
+  <div class="fbox l5"><div class="ft">开发端分析 · 回到起点</div>
+  <div class="fd">诊断包里的内存时间序列直接用现有 <code>open_trace.sh</code> 在 Perfetto 看曲线;<code>.heapsnapshot</code> 用 Chrome DevTools / VS Code 的 v8-heap-parser 看 retainer。开发期同一套设施:<code>ONWARD_MEM_WATCH</code> 调频、调阈值、手动触发 dump(debug IPC),配自动化压力测试建立增长基线。</div></div>
+</div>
+
+<!-- ============ 5 对比 ============ -->
+<h2 id="compare">5 · 现状 vs 目标</h2>
+<div class="ba">
+  <div class="col before"><h4>现状(用户报「内存超 1 GB」时)</h4><ul>
+    <li>反馈包里<strong>没有任何内存数据</strong>——只能请用户描述、截图活动监视器</li>
+    <li>无法区分 JS 堆 / Blink 缓存 / GPU 纹理,只能猜</li>
+    <li>worker 线程内存完全不可见(与主进程共 pid)</li>
+    <li>不知道内存从何时开始涨、伴随什么操作</li>
+    <li>开发期也没有任何内存基线,回归无从谈起</li>
+  </ul></div>
+  <div class="col after"><h4>目标(本方案落地后)</h4><ul>
+    <li>反馈包<strong>自带每 30 s 一个点的内存时间序列</strong>,Perfetto 里与用户操作事件对齐</li>
+    <li>逐进程、逐 worker、JS 堆 / Blink 缓存 / detached contexts 分类归因</li>
+    <li>阈值触发自动生成轻量内存报告 + 通知用户一键进反馈</li>
+    <li>用户同意后才有完整快照,retainer 级定位泄漏持有者</li>
+    <li>同一套设施支撑开发期压测基线与回归门禁</li>
+  </ul></div>
+</div>
+
+<!-- ============ 6 决策 ============ -->
+<h2 id="decisions">6 · 待拍板的 4 个决策</h2>
+<p>以下每项都会同时以选择题形式请你确认;推荐项已标出,理由与代价写在卡片里。</p>
+
+<div class="qcard"><div class="qt">决策 1 · 第 1 层采样器在用户正式版的默认状态</div>
+  <div class="opt rec"><div class="ot">A · 默认开启,30 s 低频,走 diagnostic 通道 <span class="badge b-green">推荐</span></div>
+  <div class="od">代价:每天约 3000 个小事件(&lt;1 MB/天,64 MB 预算内自动轮转);收益:<strong>每个用户反馈包天然带内存曲线,闭环第一环免费</strong>。VS Code 默认关是因为他们另有海量遥测;我们没有,反馈包是唯一现场。</div></div>
+  <div class="opt"><div class="ot">B · 默认关闭(VS Code 姿态),<code>ONWARD_MEM_WATCH=1</code> 才开</div>
+  <div class="od">最保守;但用户报内存问题时包里依旧无数据,回到「请用户复现」的老路,闭环断在第一环。</div></div>
+  <div class="opt"><div class="ot">C · 默认开启但 60 s 更低频</div>
+  <div class="od">成本减半,曲线分辨率也减半;30 s 的成本本已可忽略,再降意义不大。</div></div>
+</div>
+
+<div class="qcard"><div class="qt">决策 2 · 阈值触发时自动抓什么</div>
+  <div class="opt rec"><div class="ot">A · 分级:自动只生成轻量内存报告;完整快照仅在用户点击同意后抓 <span class="badge b-green">推荐</span></div>
+  <div class="od">自动路径零冻结、零隐私风险;重型路径有人类确认兜住。符合 Chromium「线上不抓全量快照」与 Chrome 同意模型。</div></div>
+  <div class="opt"><div class="ot">B · 自动直接抓完整 .heapsnapshot</div>
+  <div class="od">信息最全,但同步冻结该进程数秒以上、需约 2 倍堆内存(1 GB 堆 → 峰值再 +1~2 GB,可能直接压死进程)、产物含全部明文字符串——自动抓等于未经同意做明文内存转储。</div></div>
+  <div class="opt"><div class="ot">C · 只做轻量报告,完整快照只留开发者手动通道(env / debug IPC)</div>
+  <div class="od">最安全,但线上疑难泄漏(需要 retainer 图才能定位)就拿不到关键证据,闭环断在最后一环。</div></div>
+</div>
+
+<div class="qcard"><div class="qt">决策 3 · 触发阈值口径(初始值,待真实曲线校准)</div>
+  <div class="opt rec"><div class="ot">A · 双口径任一:渲染进程 footprint 持续 &gt; 1.5 GB(约 2 分钟窗口),或 V8 used÷limit &gt; 60% <span class="badge b-green">推荐</span></div>
+  <div class="od">故意设在危险区之前(V8 堆上限约 4 GB,60% ≈ 2.4 GB 时抓取仍有余量可行);footprint 口径覆盖「Blink/GPU 涨而 JS 不涨」的情形。</div></div>
+  <div class="opt"><div class="ot">B · 更早预警:&gt; 1 GB 即触发</div>
+  <div class="od">对齐你报告的水位,但大项目重度使用可能正常达到 1 GB,误报会让通知失去可信度(Discord 的教训:阈值远高于正常使用)。</div></div>
+  <div class="opt"><div class="ot">C · 接近上限才触发(used÷limit &gt; 85%)</div>
+  <div class="od">最少误报,但此时抓快照大概率失败(2 倍内存开销),只剩轻量报告可用。</div></div>
+</div>
+
+<div class="qcard"><div class="qt">决策 4 · 触发后的用户交互形态</div>
+  <div class="opt rec"><div class="ot">A · 非阻断常驻通知条(复用 ScheduleNotification 样式):「检测到内存占用异常,已生成诊断报告」+ [打开反馈] [忽略] <span class="badge b-green">推荐</span></div>
+  <div class="od">不打断工作;进反馈弹窗后,内存报告自动附上,完整快照单独勾选并显示隐私说明。每会话最多提示 1 次。</div></div>
+  <div class="opt"><div class="ot">B · 模态弹窗立即询问</div>
+  <div class="od">触达最强,但内存高≠用户此刻愿意被打断;误报一次就很伤信任。</div></div>
+  <div class="opt"><div class="ot">C · 完全静默,只在用户自己打开反馈时展示「检测到过内存异常」</div>
+  <div class="od">零打扰,但多数用户不会主动开反馈,「主动提示可发送给开发者」的诉求落空。</div></div>
+</div>
+
+<!-- ============ 7 分期 ============ -->
+<h2 id="phases">7 · 实施分期与测试(按 5-step SOP)</h2>
+<table>
+  <tr><th>阶段</th><th>内容</th><th>配套测试(unit + autotest 成对)</th></tr>
+  <tr><td><strong>P1 · 采样层</strong></td><td><code>MemoryWatcher</code>(主进程)+ worker 自报告消息 + 渲染侧报告;事件注册进 <code>perf-trace-names.ts</code>;<code>infra/trace.md</code> § 2 更新;<code>ONWARD_MEM_WATCH*</code> 变量注册进 <code>docs/debug-env-variables.md</code></td><td>unit:样本归一化 / 单位换算(吸取 VS Code 双重换算教训);autotest:启动后断言 N 个采样事件落盘且字段完整(三平台)</td></tr>
+  <tr><td><strong>P2 · 检测器 + 报告</strong></td><td>纯函数压力检测器 + 环形缓冲 + 轻量内存报告生成 + 通知条 + i18n(en / zh-CN)</td><td>unit:检测器决策表(none/warn/critical × 护栏组合)全覆盖;autotest:合成注入内存样本 → 断言触发、报告落盘、通知出现</td></tr>
+  <tr><td><strong>P3 · 快照 + 反馈整合</strong></td><td>同意流程 + <code>webContents.takeHeapSnapshot</code> / <code>v8.writeHeapSnapshot</code> + OOM 防护(单飞/冷却/余量)+ 诊断包旁路 + 尺寸上限与最旧清除</td><td>unit:防护决策(余量/冷却/单飞);autotest:手动触发端到端抓一份真实快照并校验文件魔数与大小上限</td></tr>
+  <tr><td><strong>P4 · 开发期基线</strong></td><td>压力场景脚本(大 diff / 长终端会话 / 多标签)+ 增长曲线基线,并入回归</td><td>autotest:压测后内存回落断言(状态完整性 N 次聚合口径)</td></tr>
+</table>
+<p>跨平台:V8 / <code>process.memoryUsage</code> 三平台一致(核心优势);差异点—— macOS 无 <code>residentSet</code>(用 <code>private</code>)、Windows 无 Unix 信号(手动触发走 IPC / 菜单)、Windows renderer 有约 8 GB 硬上限。</p>
+
+<!-- ============ 8 隐私 ============ -->
+<h2 id="privacy">8 · 隐私设计(对标 Chrome 同意模型)</h2>
+<table>
+  <tr><th>产物</th><th>包含内容</th><th>处理方式</th></tr>
+  <tr><td>内存时间序列(第 1 层)</td><td>仅数字(字节数、计数),无路径、无内容</td><td>随诊断包默认携带</td></tr>
+  <tr><td>轻量内存报告(3-A)</td><td>数字 + 进程/线程名;不含用户内容</td><td>自动生成,随诊断包默认携带</td></tr>
+  <tr><td>完整 .heapsnapshot(3-B)</td><td><span class="badge b-red">等价于明文内存转储</span>:打开文件全文、终端回滚、prompt、URL、可能的密钥——CTF 实证一行 <code>strings | grep</code> 即可提取</td><td>① 默认不抓;② 抓取前一次确认;③ <strong>永不自动进包</strong>,反馈时单独勾选;④ 大白话写明最坏情况;⑤ 本地留存有尺寸上限与最旧清除</td></tr>
+</table>
+<p>脱敏工具(如 heap-snapshot-sanitizer)会同时抹掉「字符串滞留」类泄漏的诊断价值(编辑器类应用最常见的泄漏形态),且残余泄漏面仍在(属性名、作为 key 的路径)——所以不走「脱敏后自动上传」,坚持「知情同意 + 手动发送」。</p>
+
+<hr class="sep">
+
+<!-- ============ 9 元数据 ============ -->
+<h2 id="meta">9 · 文档元数据与更新历史</h2>
+<table class="meta-table">
+  <tr><th>项</th><th>值</th></tr>
+  <tr><td>生成分支</td><td><code>20260727-feat4</code></td></tr>
+  <tr><td>反映的应用版本 / 提交</td><td>2.1.0(基线采样对象为正式版 2.1.0-daily.20260731.1)/ <code>470a003</code></td></tr>
+  <tr><td>文档版本</td><td>v1.1</td></tr>
+</table>
+<table class="meta-table">
+  <tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr>
+  <tr><td>v1.0</td><td>2026-08-07</td><td>20260727-feat4</td><td>首版:活实例基线测量、代码现状核实、同类产品调研汇总、三层闭环方案与 4 项待决策</td></tr>
+  <tr><td>v1.1</td><td>2026-08-07</td><td>20260727-feat4</td><td>4 项决策全部按推荐项确认(默认开启 30 s 采样走 diagnostic 通道 / 分级抓取 / 1.5 GB 或 V8 60% 双口径 / 非阻断通知条);三层闭环已实现落地(MemoryWatcher + 纯函数检测器 + worker 自采样 + 同意门控快照 + 反馈包旁路),配套 run-memory-watch autotest(MW-01..09,3/3 稳定)与 memory-pressure-detector 单测(MPD-U-01..19)</td></tr>
+</table>
+</main>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+  var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+  function onScroll() {
+    var idx = 0;
+    for (var i = 0; i < targets.length; i++) {
+      if (targets[i] && targets[i].getBoundingClientRect().top <= 80) idx = i;
+    }
+    links.forEach(function (a, i) { a.classList.toggle('active', i === idx); });
+  }
+  document.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+})();
+</script>
+</body>
+</html>

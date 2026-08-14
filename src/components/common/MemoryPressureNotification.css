@@ -1,0 +1,71 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.memory-pressure-notification {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 480px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid rgba(210, 153, 34, 0.5);
+  border-radius: 10px;
+  box-shadow: var(--shadow-1);
+  animation: memory-pressure-fade-in 0.15s ease;
+}
+
+@keyframes memory-pressure-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.memory-pressure-notification-icon {
+  flex-shrink: 0;
+  color: #d29922;
+}
+
+.memory-pressure-notification-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  min-width: 0;
+}
+
+.memory-pressure-notification-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.memory-pressure-notification-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.memory-pressure-notification-btn:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.memory-pressure-notification-btn.primary {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}

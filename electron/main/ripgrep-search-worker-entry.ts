@@ -8,6 +8,9 @@ import { parentPort } from 'worker_threads'
 import { basename } from 'path'
 
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { startWorkerMemorySampler } from './worker-memory-sampler'
+
+startWorkerMemorySampler('ripgrep-search')
 
 type TracePayload = Record<string, unknown>
 

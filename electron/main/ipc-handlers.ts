@@ -5,7 +5,7 @@
 
 import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'electron'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
-import { existsSync, lstatSync, readFileSync, writeFileSync, statSync } from 'fs'
+import { copyFileSync, existsSync, lstatSync, readFileSync, writeFileSync, statSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
 import { collectQuitActivitySummary } from './quit-activity-scan'
 import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
@@ -54,6 +54,7 @@ import { getSettingsStorage, SettingsState, ShortcutConfig } from './settings-st
 import { getShortcutManager } from './shortcut-manager'
 import { getAppInfo } from './app-info'
 import { createDiagnosticBundle } from './diagnostic-bundle'
+import { memoryWatcher } from './memory-watcher'
 import { isUsableTerminalCwd } from './terminal-cwd-validation'
 import { getFeedbackStorage } from './feedback-storage'
 import { gitRuntimeManager } from './git-runtime-manager'
@@ -872,6 +873,24 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.handle(IPC.DEBUG_GET_APP_METRICS, () => {
     return app.getAppMetrics()
+  })
+
+  // --- Memory diagnostics closed loop (MemoryWatcher) ---
+  // Renderer preload self-report: fire-and-forget, ~1 message / 30 s.
+  ipcMain.on(IPC.MEMORY_RENDERER_SAMPLE, (event, sample: unknown) => {
+    memoryWatcher.ingestRendererSample(event.sender.id, sample)
+  })
+  ipcMain.handle(IPC.MEMORY_GET_WATCH_STATE, () => {
+    return memoryWatcher.getStateForDebug()
+  })
+  // Autotest-only: feed the pure pressure detector a synthetic renderer
+  // sample so the threshold → report → notification chain is drivable
+  // deterministically (a real 1.5 GB allocation would be slow and flaky).
+  ipcMain.handle(IPC.DEBUG_MEMORY_INJECT_SAMPLE, (_, sample: unknown) => {
+    if (process.env.ONWARD_AUTOTEST !== '1') {
+      return { success: false, error: 'debug:memory-inject-sample requires ONWARD_AUTOTEST=1' }
+    }
+    return { success: true, ...memoryWatcher.injectSyntheticSample(sample) }
   })
   // Autotest-only: drive the exact GPU-crash broadcast path the real
   // app.on('child-process-gone') listener uses, since a genuine GPU process
@@ -1931,7 +1950,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // production cannot accidentally bypass the dialog).
   ipcMain.handle(
     IPC.FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE,
-    async (_, payload?: { forceOutputPath?: string; expectedMarker?: { uuid: string; label?: string } }) => {
+    async (
+      _,
+      payload?: {
+        forceOutputPath?: string
+        expectedMarker?: { uuid: string; label?: string }
+        includeHeapSnapshot?: boolean
+      }
+    ) => {
       try {
         const appInfo = getAppInfo()
         const userDataDir = app.getPath('userData')
@@ -1983,6 +2009,23 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
           console.warn('[DiagnosticBundle] traceStore.rotate failed (continuing):', String(error))
         }
 
+        // Closed-loop rule: every user-initiated diagnostic export snapshots
+        // the memory time series too (memory-report-*.jsonl lands in the
+        // trace dir, so createDiagnosticBundle picks it up in the same scan).
+        memoryWatcher.writeMemoryReport('bundle-export')
+
+        // Consent-gated heavy capture: only when the user ticked the
+        // heap-snapshot checkbox in the Feedback modal. The renderer pauses
+        // for a few seconds during capture (documented next to the checkbox)
+        // and main blocks during its own v8.writeHeapSnapshot — both are the
+        // consented cost. Snapshots stay OUT of the ZIP (the zip path reads
+        // whole entries into memory); they are copied as sidecar files next
+        // to the bundle below.
+        let heapCapture: Awaited<ReturnType<typeof memoryWatcher.captureHeapSnapshotsForBundle>> | null = null
+        if (payload?.includeHeapSnapshot === true) {
+          heapCapture = await memoryWatcher.captureHeapSnapshotsForBundle()
+        }
+
         // expectedMarker is honoured only in autotest mode — it drives the
         // verifier's V10 closed-loop check (autotest emits a marker via
         // debug:emit-bundle-marker, then expects it to round-trip into the
@@ -2029,6 +2072,31 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
             success: bundle.success,
             bytes: bundle.bytes ?? 0
           })
+        }
+
+        // Copy consented heap snapshots next to the produced bundle so the
+        // user hands the developer one folder's worth of files. copyFileSync
+        // streams at the OS layer — no JS-heap cost for a multi-hundred-MB
+        // snapshot.
+        if (heapCapture && bundle.success && bundle.path) {
+          const sidecarBase = bundle.path.replace(/\.zip$/i, '')
+          const attached: Array<{ target: string; path: string; bytes: number }> = []
+          for (const snap of heapCapture.snapshots) {
+            const sidecarPath = `${sidecarBase}-${snap.target}.heapsnapshot`
+            try {
+              copyFileSync(snap.path, sidecarPath)
+              attached.push({ target: snap.target, path: sidecarPath, bytes: snap.bytes })
+            } catch (error) {
+              console.warn(`[DiagnosticBundle] heap snapshot copy failed (${snap.target}):`, String(error))
+            }
+          }
+          if (attached.length > 0) {
+            performanceTrace.record(PERF_TRACE_EVENT.MAIN_DIAGNOSTIC_BUNDLE_HEAP_ATTACHED, {
+              count: attached.length,
+              totalBytes: attached.reduce((sum, s) => sum + s.bytes, 0)
+            })
+          }
+          return { ...bundle, heapSnapshots: attached, heapSnapshotSkipped: heapCapture.skipped }
         }
 
         return bundle
@@ -3165,6 +3233,9 @@ async function runCleanupIpcHandlers(): Promise<void> {
   ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_RESET)
   ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_SET_MOCK_ISSUES)
   ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL)
+  ipcMain.removeAllListeners(IPC.MEMORY_RENDERER_SAMPLE)
+  ipcMain.removeHandler(IPC.MEMORY_GET_WATCH_STATE)
+  ipcMain.removeHandler(IPC.DEBUG_MEMORY_INJECT_SAMPLE)
   ipcMain.removeHandler(IPC.DEBUG_SHELL_RESET)
   ipcMain.removeHandler(IPC.DEBUG_SHELL_GET_LAST_OPENED_PATH)
   ipcMain.removeHandler(IPC.DEBUG_SHELL_GET_LAST_REVEALED_PATH)

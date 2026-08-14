@@ -14,6 +14,8 @@ import { PromptNotebook } from './components/PromptNotebook/PromptNotebook'
 import { TerminalGrid } from './components/TerminalGrid/TerminalGrid'
 import { Settings } from './components/Settings'
 import { GitWatcherErrorBanner } from './components/common/GitWatcherErrorBanner'
+import { MemoryPressureNotification } from './components/common/MemoryPressureNotification'
+import type { MemoryPressureAlert } from './types/electron'
 import { ChangeLogModal } from './components/ChangeLogModal'
 import { useScheduleEngine } from './hooks/useScheduleEngine'
 import type { ScheduleNotification } from './hooks/useScheduleEngine'
@@ -1304,6 +1306,9 @@ function AppContent({
   const [changeLogResult, setChangeLogResult] = useState<CurrentChangelogResult | null>(null)
   const [changeLogLoading, setChangeLogLoading] = useState(false)
   const [showFeedbackModal, setShowFeedbackModal] = useState(false)
+  // Memory diagnostics closed loop: main pushes at most one pressure alert
+  // per session (MemoryWatcher guards); the bar stays until acted on.
+  const [memoryPressureAlert, setMemoryPressureAlert] = useState<MemoryPressureAlert | null>(null)
   // Track the panel state before Settings opened for each tab during the current Settings session.
   const panelBeforeSettingsByTabRef = useRef<Record<string, 'prompt' | null>>({})
   const showSettingsRef = useRef(false)
@@ -1412,6 +1417,26 @@ function AppContent({
 
   const handleCloseFeedbackModal = useCallback(() => {
     setShowFeedbackModal(false)
+  }, [])
+
+  // Subscribe to main-side memory pressure alerts (MemoryWatcher Tier 3).
+  useEffect(() => {
+    const unsubscribe = window.electronAPI?.memory?.onPressureAlert?.((alert) => {
+      setMemoryPressureAlert(alert)
+    })
+    return () => {
+      unsubscribe?.()
+    }
+  }, [])
+
+  const handleMemoryPressureOpenFeedback = useCallback(() => {
+    setMemoryPressureAlert(null)
+    setShowChangeLog(false)
+    setShowFeedbackModal(true)
+  }, [])
+
+  const handleMemoryPressureDismiss = useCallback(() => {
+    setMemoryPressureAlert(null)
   }, [])
   // Conditionally close Settings on Task/Tab switch
   // Only closes if the relevant panel state is 'prompt'; otherwise keeps Settings open
@@ -1993,6 +2018,11 @@ function AppContent({
         isLoading={changeLogLoading}
       />
       <FeedbackModal isOpen={showFeedbackModal} onClose={handleCloseFeedbackModal} />
+      <MemoryPressureNotification
+        alert={memoryPressureAlert}
+        onOpenFeedback={handleMemoryPressureOpenFeedback}
+        onDismiss={handleMemoryPressureDismiss}
+      />
       <DownsizeConfirmDialog
         open={pendingDialog !== null}
         terminals={downsizeTerminals}

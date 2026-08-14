@@ -1324,6 +1324,8 @@ export interface FeedbackDiagnosticBundleResult {
     missingFiles: string[]
   }
   verification?: FeedbackDiagnosticBundleVerification
+  heapSnapshots?: Array<{ target: string; path: string; bytes: number }>
+  heapSnapshotSkipped?: string[]
 }
 
 export interface FeedbackAPI {
@@ -1335,8 +1337,27 @@ export interface FeedbackAPI {
   removeRecord: (recordId: string) => Promise<FeedbackState>
   exportDiagnosticBundle: (
     forceOutputPath?: string,
-    expectedMarker?: { uuid: string; label?: string }
+    expectedMarker?: { uuid: string; label?: string },
+    options?: { includeHeapSnapshot?: boolean }
   ) => Promise<FeedbackDiagnosticBundleResult>
+}
+
+export interface MemoryPressureAlert {
+  level: 'warn' | 'critical'
+  reason: string
+  footprintMb: number | null
+  heapRatioPct: number | null
+}
+
+export interface MemoryAPI {
+  onPressureAlert: (callback: (alert: MemoryPressureAlert) => void) => () => void
+  getWatchState: () => Promise<Record<string, unknown>>
+  /** Autotest-only (main side rejects without ONWARD_AUTOTEST=1): feed the pressure detector a synthetic sample. */
+  injectSampleForAutotest: (sample: {
+    workingSetKb?: number
+    heapUsedKb?: number
+    heapLimitKb?: number
+  }) => Promise<{ success: boolean; accepted?: boolean; error?: string }>
 }
 
 // Coding Agent integration types
@@ -1425,6 +1446,7 @@ export interface ElectronAPI {
   browser: BrowserAPI
   htmlPreview: HtmlPreviewAPI
   feedback: FeedbackAPI
+  memory: MemoryAPI
   codingAgentConfig: CodingAgentConfigAPI
   codingAgent: CodingAgentAPI
   telemetry: TelemetryAPI

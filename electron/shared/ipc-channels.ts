@@ -116,6 +116,12 @@ export const IPC = {
   FEEDBACK_SYNC: 'feedback:sync',
   FEEDBACK_UPDATE_PREFERENCES: 'feedback:update-preferences',
 
+  // memory diagnostics closed loop (MemoryWatcher)
+  MEMORY_RENDERER_SAMPLE: 'memory:renderer-sample',
+  MEMORY_PRESSURE_ALERT: 'memory:pressure-alert',
+  MEMORY_GET_WATCH_STATE: 'memory:get-watch-state',
+  DEBUG_MEMORY_INJECT_SAMPLE: 'debug:memory-inject-sample',
+
   // git
   GIT_CHECK_INSTALLED: 'git:check-installed',
   GIT_DIFF_CACHE_INVALIDATED: 'git:diff-cache-invalidated',

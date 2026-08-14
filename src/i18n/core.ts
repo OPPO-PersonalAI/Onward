@@ -314,6 +314,15 @@ const en = {
   'feedback.diagnosticBundle.error': 'Failed to generate diagnostic bundle: {{error}}',
   'feedback.diagnosticBundle.canceled': 'Save canceled.',
   'feedback.diagnosticBundle.verifyFailed': 'Diagnostic bundle written to {{path}} but self-verification failed: {{checks}}. Re-run before sharing.',
+  'feedback.diagnosticBundle.includeHeapLabel': 'Attach full memory snapshot (.heapsnapshot)',
+  'feedback.diagnosticBundle.includeHeapWarning': 'The snapshot contains everything currently in memory as plain text: the full content of open files, terminal history, and possibly tokens or passwords. The app will pause for a few seconds while it is captured. It is saved next to the bundle on your machine and is never uploaded automatically — share it only if you are comfortable doing so.',
+  'feedback.diagnosticBundle.successWithSnapshot': 'Diagnostic bundle saved: {{path}} · Memory snapshot: {{snapshotPaths}}',
+
+  'memoryWatch.notification.title': 'Unusual memory usage detected',
+  'memoryWatch.notification.messageFootprint': 'The app is using about {{footprintMb}} MB of memory. A lightweight diagnostic report has been generated — you can send it to the developers via Feedback.',
+  'memoryWatch.notification.messageHeap': 'The JS heap has reached {{heapRatioPct}}% of its limit. A lightweight diagnostic report has been generated — you can send it to the developers via Feedback.',
+  'memoryWatch.notification.openFeedback': 'Open Feedback',
+  'memoryWatch.notification.dismiss': 'Dismiss',
 
   'sidebar.promptNotebook': 'Prompt notebook',
   'sidebar.layout.single': 'Single terminal',
@@ -1785,6 +1794,15 @@ const zhCN: LocaleTranslations = {
   'feedback.diagnosticBundle.error': '诊断包生成失败：{{error}}',
   'feedback.diagnosticBundle.canceled': '已取消保存。',
   'feedback.diagnosticBundle.verifyFailed': '诊断包已写入 {{path}}，但自检未通过：{{checks}}。请重新生成后再分享。',
+  'feedback.diagnosticBundle.includeHeapLabel': '附加完整内存快照（.heapsnapshot）',
+  'feedback.diagnosticBundle.includeHeapWarning': '快照会以明文形式包含当前内存中的全部内容：打开文件的完整内容、终端历史记录，可能还包括令牌或密码。抓取过程中应用会停顿数秒。快照只保存在你的电脑上（与诊断包放在一起），绝不会自动上传——请确认可以接受后再分享。',
+  'feedback.diagnosticBundle.successWithSnapshot': '诊断包已保存：{{path}} · 内存快照：{{snapshotPaths}}',
+
+  'memoryWatch.notification.title': '检测到内存占用异常',
+  'memoryWatch.notification.messageFootprint': '应用当前占用约 {{footprintMb}} MB 内存。已生成轻量诊断报告，可通过「反馈」发送给开发者。',
+  'memoryWatch.notification.messageHeap': 'JS 堆已达到上限的 {{heapRatioPct}}%。已生成轻量诊断报告，可通过「反馈」发送给开发者。',
+  'memoryWatch.notification.openFeedback': '打开反馈',
+  'memoryWatch.notification.dismiss': '忽略',
 
   'sidebar.promptNotebook': 'Prompt 笔记本',
   'sidebar.layout.single': '单窗口',

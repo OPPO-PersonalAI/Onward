@@ -77,6 +77,9 @@ import type {
 import {
   awaitWatcherQuiescenceWithSettle
 } from './git-state-mirror-teardown'
+import { startWorkerMemorySampler } from './worker-memory-sampler'
+
+startWorkerMemorySampler('git-state-mirror')
 
 const execFileAsync = promisify(execFile)
 

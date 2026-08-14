@@ -100,6 +100,11 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
   type BundleStatus = 'idle' | 'generating' | 'success' | 'verifyFailed' | 'error' | 'canceled'
   const [bundleStatus, setBundleStatus] = useState<BundleStatus>('idle')
   const [bundleMessage, setBundleMessage] = useState<string | null>(null)
+  // Memory diagnostics closed loop: full heap snapshots are consent-gated
+  // and default OFF — a .heapsnapshot is a plaintext memory dump (open file
+  // contents, terminal scrollback, possibly tokens). Chrome-style consent:
+  // explicit checkbox + worst-case warning, never auto-attached.
+  const [includeHeapSnapshot, setIncludeHeapSnapshot] = useState(false)
 
   useSubpageEscape({ isOpen, onEscape: onClose })
 
@@ -215,7 +220,9 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
     // Product telemetry: user triggered a diagnostic-bundle export.
     trackFeatureUse('diagnostic-bundle')
     try {
-      const result = await window.electronAPI.feedback.exportDiagnosticBundle()
+      const result = await window.electronAPI.feedback.exportDiagnosticBundle(undefined, undefined, {
+        includeHeapSnapshot
+      })
       if (result.canceled) {
         setBundleStatus('canceled')
         setBundleMessage(t('feedback.diagnosticBundle.canceled'))
@@ -223,7 +230,16 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
       }
       if (result.success && result.path) {
         setBundleStatus('success')
-        setBundleMessage(t('feedback.diagnosticBundle.success', { path: result.path }))
+        if (result.heapSnapshots && result.heapSnapshots.length > 0) {
+          setBundleMessage(
+            t('feedback.diagnosticBundle.successWithSnapshot', {
+              path: result.path,
+              snapshotPaths: result.heapSnapshots.map((s) => s.path).join(', ')
+            })
+          )
+        } else {
+          setBundleMessage(t('feedback.diagnosticBundle.success', { path: result.path }))
+        }
         return
       }
       // ZIP wrote but self-verification rejected it: keep the file on
@@ -249,7 +265,7 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
       setBundleStatus('error')
       setBundleMessage(t('feedback.diagnosticBundle.error', { error: String(error) }))
     }
-  }, [t])
+  }, [t, includeHeapSnapshot])
 
   const handleSubmit = useCallback(async () => {
     setFormError(null)
@@ -426,6 +442,28 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
           role="note"
         >
           {t('feedback.diagnosticBundle.notice')}
+        </div>
+
+        <div className="feedback-diagnostic-bundle-heap" data-testid="feedback-diagnostic-bundle-heap">
+          <label className="feedback-diagnostic-bundle-heap-label">
+            <input
+              type="checkbox"
+              checked={includeHeapSnapshot}
+              onChange={(event) => setIncludeHeapSnapshot(event.target.checked)}
+              disabled={bundleStatus === 'generating'}
+              data-testid="feedback-include-heap-checkbox"
+            />
+            <span>{t('feedback.diagnosticBundle.includeHeapLabel')}</span>
+          </label>
+          {includeHeapSnapshot ? (
+            <div
+              className="feedback-diagnostic-bundle-heap-warning"
+              data-testid="feedback-heap-privacy-warning"
+              role="note"
+            >
+              {t('feedback.diagnosticBundle.includeHeapWarning')}
+            </div>
+          ) : null}
         </div>
 
         {bundleMessage ? (

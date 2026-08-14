@@ -17,6 +17,9 @@ import {
   type GitChangeCategory,
   type TerminalGitStatus
 } from './git-status-classify'
+import { startWorkerMemorySampler } from './worker-memory-sampler'
+
+startWorkerMemorySampler('git-status')
 
 type GitBranchAndStatus = {
   branch: string | null

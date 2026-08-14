@@ -6,6 +6,9 @@
 import { mkdir, writeFile } from 'fs/promises'
 import { dirname } from 'path'
 import { parentPort } from 'worker_threads'
+import { startWorkerMemorySampler } from './worker-memory-sampler'
+
+startWorkerMemorySampler('app-state')
 
 type WorkerMethod = 'saveSnapshot'
 

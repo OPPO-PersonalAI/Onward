@@ -7,6 +7,9 @@ import { readdir } from 'fs/promises'
 import { relative, resolve, sep } from 'path'
 import { parentPort } from 'worker_threads'
 import { resolveInRoot } from './path-containment'
+import { startWorkerMemorySampler } from './worker-memory-sampler'
+
+startWorkerMemorySampler('project-fs')
 
 type ProjectEntry = {
   name: string

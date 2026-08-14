@@ -789,6 +789,28 @@ the buffer mode and the scrollback extent were both invisible. See
 | `MAIN_PROJECT_TREE_WATCH_SUBSCRIBE` | `main:project-tree-watch.subscribe` | `i` | `project-tree-watch-manager.ts::subscribe()` — @parcel/watcher subscribe outcome (`ok` / `failed` / `disposed-race`); primary breadcrumb for "Cmd+P never sees new files" |
 | `MAIN_PROJECT_TREE_WATCH_INAPP_MUTATION` | `main:project-tree-watch.inapp-mutation` | `i` | `project-tree-watch-manager.ts::notifyMutation()` — in-app `project.createFile`/`renamePath`/`deletePath` direct-notify to the file index, bypassing the OS watcher so the app's own edits propagate even with zero native FS events |
 
+#### Memory diagnostics closed loop (2026-08-07, MemoryWatcher)
+
+Design: `docs/html/memory-diagnostics-closed-loop-design.html`. Tier-1 sampling rides the
+default-on diagnostic channel (`ONWARD_MEM_WATCH=0` disables; interval
+`ONWARD_MEM_WATCH_INTERVAL_SEC`, default 30 s) so every user bundle carries the memory time
+series. All numeric payload fields carry unit suffixes (`Kb` / `Mb` / `Ms` / `Pct`).
+Locked by `run-memory-watch-autotest.sh` (MW-*) + `memory-pressure-detector.test.mts` (MPD-U-*).
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `MAIN_MEM_WATCH_SAMPLE` | `main:mem-watch.sample` | `i` | `electron/main/memory-watcher.ts::tick()` — per-tick `app.getAppMetrics()` (all Electron processes) + main `v8.getHeapStatistics()` + `process.memoryUsage()`. Payload `{ schema, processes: [{type,pid,workingSetKb,peakWorkingSetKb,cpuPercent}], rendererPid, mainHeapUsedKb, mainHeapLimitKb, mainRssKb, mainExternalKb, mainDetachedContexts }`. |
+| `MAIN_MEM_WATCH_COUNTERS` | `main:mem-watch.counters` | `C` | Same tick — compact MB counter series so Perfetto renders the memory curve without SQL. |
+| `WORKER_MEM_WATCH_SAMPLE` | `worker:mem-watch.sample` | `i` | `electron/main/worker-memory-sampler.ts::startWorkerMemorySampler()` — each of the 7 worker threads self-reports (they share the main pid, invisible to `getAppMetrics`). Payload `{ worker, heapUsedKb, heapTotalKb, heapLimitKb, mallocedKb, externalKb, detachedContexts }`. |
+| `RENDERER_MEM_WATCH_SAMPLE` | `renderer:mem-watch.sample` | `i` | Preload self-report → `memory:renderer-sample` IPC → `memory-watcher.ts::ingestRendererSample()`. Payload splits JS heap (`heapUsedKb/heapTotalKb/heapLimitKb`) from Blink (`blinkAllocatedKb/blinkTotalKb`) and the resource cache (`resourceCacheKb/…LiveKb/…ImageKb/…ScriptKb/…CssKb/…FontKb` via `webFrame.getResourceUsage()`), the classic misattributed-renderer-RSS split. |
+| `MAIN_MEM_WATCH_PRESSURE_DETECTED` | `main:mem-watch.pressure-detected` | `i` | `memory-watcher.ts::evaluateAndAct()` — edge-triggered on level transitions of the pure detector (`memory-pressure-detector.ts::evaluateMemoryPressure`). Payload `{ level, reason, footprintKb, heapRatioPct, windowSamples }`. |
+| `MAIN_MEM_WATCH_REPORT_WRITTEN` | `main:mem-watch.report-written` | `i` | `memory-watcher.ts::writeMemoryReport()` — lightweight `memory-report-*.jsonl` written into the trace dir (auto-ships with the next bundle). Payload `{ trigger, reportBytes, sampleCount }`. |
+| `MAIN_MEM_WATCH_DUMP_WRITTEN` | `main:mem-watch.dump-written` | `i` | `memory-watcher.ts::captureHeapSnapshotsForBundle()` — consent-gated `.heapsnapshot` finished (renderer via `webContents.takeHeapSnapshot`, main via `v8.writeHeapSnapshot`). Payload `{ target, snapshotBytes, elapsedMs }`. |
+| `MAIN_MEM_WATCH_DUMP_SKIPPED` | `main:mem-watch.dump-skipped` | `i` | Same — OOM-spiral guard refused a capture. Payload `{ target, reason: in-flight \| insufficient-headroom \| disabled \| no-window \| write-failed }`. "Why is there no snapshot in this bundle" must be answerable from the trace. |
+| `MAIN_MEM_WATCH_PROMPT_SKIPPED` | `main:mem-watch.prompt-skipped` | `i` | `memory-watcher.ts::evaluateAndAct()` — pressure present but a guard refused the user prompt; edge-triggered on skip-reason changes. Payload `{ reason: uptime \| session-cap \| cooldown, level }`. |
+| `RENDERER_MEM_WATCH_NOTIFICATION` | `renderer:mem-watch.notification-action` | `i` | `src/components/common/MemoryPressureNotification.tsx` — notification lifecycle. Payload `{ action: shown \| open-feedback \| dismiss, level }`. Diagnostic tier. |
+| `MAIN_DIAGNOSTIC_BUNDLE_HEAP_ATTACHED` | `main:diagnostic-bundle.heap-snapshot-attached` | `i` | `ipc-handlers.ts` `FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE` — consented snapshots copied as sidecar files next to the exported bundle. Payload `{ count, totalBytes }`. |
+
 ---
 
 ## 3. Planned coverage gaps
