@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useI18n } from '../../../i18n/useI18n'
 import { useGlobalSearch, type SearchMatch } from './useGlobalSearch'
 import { useFilenameSearch, type FilenameSearchController } from './useFilenameSearch'
+import { computeScrollFollowTop, shouldHoverClaimSelection } from '../../../utils/list-keyboard-nav'
 import './SearchPanel.css'
 
 type SearchType = 'content' | 'filename'
@@ -89,13 +90,18 @@ export function SearchPanel({
     isLoadingMore: filenameLoadingMore,
     loadMore: loadMoreFilenames,
     activeIndex: filenameActiveIndex,
-    setActiveIndex: setFilenameActiveIndex
+    setActiveIndex: setFilenameActiveIndex,
+    moveActive: moveFilenameActive
   } = filenameSearch
 
   const [isIndexing, setIsIndexing] = useState(false)
   const [showGlobs, setShowGlobs] = useState(false)
   const [activeMatch, setActiveMatch] = useState<{ file: string; line: number } | null>(null)
   const resultsScrollRef = useRef<HTMLDivElement>(null)
+  // While true, pointer-enter events are ignored. Set on every arrow key and
+  // cleared only by a real pointer move, so rows sliding under a stationary
+  // cursor cannot steal the selection the keyboard just set.
+  const keyboardIsDrivingRef = useRef(false)
 
   const internalInputRef = useRef<HTMLInputElement>(null)
   const inputRef = externalInputRef ?? internalInputRef
@@ -128,6 +134,40 @@ export function SearchPanel({
       cancelled = true
     }
   }, [buildFileIndex, isFileIndexReady, isActive, rootPath, searchType])
+
+  // Keep the selected row on screen. Without this the highlight walks past the
+  // bottom edge and the user, seeing nothing move, reads a 1ms-fast list as a
+  // frozen one — measured at 17 of 20 keypresses landing off-screen.
+  //
+  // useLayoutEffect, not useEffect: the scroll must land in the SAME frame that
+  // paints the moved highlight. With a passive effect the browser paints the
+  // new highlight first and scrolls one frame later, which shows a visible
+  // flash of the selection sitting outside the viewport.
+  useLayoutEffect(() => {
+    if (searchType !== 'filename') return
+    const list = resultsScrollRef.current
+    if (!list) return
+    const row = list.querySelectorAll<HTMLElement>('.global-search-filename-item')[filenameActiveIndex]
+    if (!row) return
+    // Derive the row's offset INSIDE the scroll container from rects rather
+    // than `offsetTop`. offsetTop is measured against the nearest positioned
+    // ancestor, which here is the modal — so it silently includes the tab bar,
+    // query row and status bar and scrolls the list ~120px too far, pushing
+    // low-numbered rows above the viewport. Rects are immune to that.
+    const listRect = list.getBoundingClientRect()
+    const rowRect = row.getBoundingClientRect()
+    const itemTop = rowRect.top - listRect.top + list.scrollTop
+    const nextTop = computeScrollFollowTop({
+      scrollTop: list.scrollTop,
+      viewportHeight: list.clientHeight,
+      itemTop,
+      itemHeight: rowRect.height,
+      margin: 4
+    })
+    // Assigning an unchanged value would still cancel momentum scrolling, so
+    // only write when the row is genuinely out of view.
+    if (nextTop !== list.scrollTop) list.scrollTop = nextTop
+  }, [filenameActiveIndex, filenameResults, searchType])
 
   // Infinite append: pull the next page when the list nears its bottom. The
   // 120px cushion starts the fetch before the user hits the end, so the rows
@@ -178,16 +218,16 @@ export function SearchPanel({
 
     if (event.key === 'ArrowDown') {
       event.preventDefault()
-      // Arrowing onto the last loaded row pulls the next page, so keyboard
-      // users reach page 2 the same way scrollers do — without this, the
-      // keyboard path would silently dead-end at the page boundary.
-      if (filenameActiveIndex >= filenameResults.length - 1 && filenameHasMore) {
-        loadMoreFilenames()
-      }
-      setFilenameActiveIndex((previous) => Math.min(previous + 1, filenameResults.length - 1))
+      keyboardIsDrivingRef.current = true
+      // moveActive owns paging: it prefetches a screenful ahead and, if the
+      // selection still outruns the loaded rows, completes the step once they
+      // arrive. The previous inline `Math.min(...)` silently clamped at the
+      // page boundary, so that one keypress produced no movement at all.
+      moveFilenameActive(1)
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
-      setFilenameActiveIndex((previous) => Math.max(previous - 1, 0))
+      keyboardIsDrivingRef.current = true
+      moveFilenameActive(-1)
     } else if (event.key === 'Enter') {
       event.preventDefault()
       const target = filenameResults[filenameActiveIndex]
@@ -195,7 +235,7 @@ export function SearchPanel({
         handleFilenameSelect(target)
       }
     }
-  }, [currentQuery, fileGroups, filenameActiveIndex, filenameHasMore, filenameResults, handleFilenameSelect, handleMatchClick, loadMoreFilenames, onClose, searchType, setCurrentQuery])
+  }, [currentQuery, fileGroups, filenameActiveIndex, filenameResults, handleFilenameSelect, handleMatchClick, moveFilenameActive, onClose, searchType, setCurrentQuery])
 
   const renderHighlightedLine = useCallback((lineContent: string, match: SearchMatch) => {
     const start = match.column - 1
@@ -377,7 +417,12 @@ export function SearchPanel({
         <span>{searchType === 'content' ? contentStatusText : filenameStatusText}</span>
       </div>
 
-      <div className="global-search-results" ref={resultsScrollRef} onScroll={handleResultsScroll}>
+      <div
+        className="global-search-results"
+        ref={resultsScrollRef}
+        onScroll={handleResultsScroll}
+        onMouseMove={() => { keyboardIsDrivingRef.current = false }}
+      >
         {searchType === 'content' && (
           <>
             {!contentQuery.trim() && (
@@ -451,7 +496,10 @@ export function SearchPanel({
                   className={`global-search-filename-item ${index === filenameActiveIndex ? 'active' : ''}`}
                   onClick={() => handleFilenameSelect(filePath)}
                   onContextMenu={(event) => onFileContextMenu?.(event, filePath)}
-                  onMouseEnter={() => setFilenameActiveIndex(index)}
+                  onMouseEnter={() => {
+                    if (!shouldHoverClaimSelection(keyboardIsDrivingRef.current)) return
+                    setFilenameActiveIndex(index)
+                  }}
                 >
                   <span className="global-search-filename-name">{name}</span>
                   <span className="global-search-filename-path">{dir}</span>
@@ -476,6 +524,32 @@ export function SearchPanel({
           </>
         )}
       </div>
+
+      {/*
+        Keyboard affordance. The arrow keys always worked; nothing on screen
+        said so, and with the selection scrolling off-view users had no way to
+        tell the list was responding at all. Showing the position doubles as
+        proof of life when the highlighted row is momentarily out of sight.
+      */}
+      {searchType === 'filename' && filenameResults.length > 0 && (
+        <div className="global-search-hints">
+          <span className="global-search-hint">
+            <kbd>↑</kbd><kbd>↓</kbd> {t('projectEditor.globalSearchHintNavigate')}
+          </span>
+          <span className="global-search-hint">
+            <kbd>↵</kbd> {t('projectEditor.globalSearchHintOpen')}
+          </span>
+          <span className="global-search-hint">
+            <kbd>esc</kbd> {t('projectEditor.globalSearchHintClose')}
+          </span>
+          <span className="global-search-hint-position">
+            {t('projectEditor.globalSearchHintPosition', {
+              index: filenameActiveIndex + 1,
+              total: filenameTotal
+            })}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

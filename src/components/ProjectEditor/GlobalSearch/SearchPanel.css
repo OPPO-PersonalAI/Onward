@@ -193,6 +193,10 @@
 }
 
 .global-search-results {
+  /* Establishes the containing block for the rows, so descendant offset math
+     and any future absolutely-positioned affordance resolve against the scroll
+     container rather than the modal. */
+  position: relative;
   flex: 1;
   /* `min-height: 0` lets this flex child shrink below its content and scroll
      instead of pushing the panel past its container's bottom edge — the same
@@ -214,6 +218,52 @@
 
 .global-search-panel-modal .global-search-input-area {
   padding-bottom: 2px;
+}
+
+/*
+ * Pinned keyboard hint bar. `flex: 0 0 auto` keeps it out of the result list's
+ * flex negotiation so a long list can never squeeze it away — it is the only
+ * on-screen evidence that the arrow keys do anything.
+ */
+.global-search-hints {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-2) 40%, transparent);
+  font-size: 11px;
+  color: var(--text-3);
+  user-select: none;
+}
+
+.global-search-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.global-search-hints kbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 1px 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* Pushed to the far edge so the counter reads as status, not as another hint. */
+.global-search-hint-position {
+  margin-left: auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .global-search-load-more {

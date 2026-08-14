@@ -67,6 +67,7 @@ import { testProjectEditorHtmlPreview } from './test-project-editor-html-preview
 import { testOpenBrowser } from './test-open-browser'
 import { testGlobalSearch } from './test-global-search'
 import { testFileIndexCacheUi } from './test-file-index-cache-ui'
+import { testQuickOpenKeyLatency } from './test-quick-open-key-latency'
 import { testSettingsUpdate } from './test-settings-update'
 import { testGitHistoryMultiTerminalScope } from './test-git-history-multi-terminal-scope'
 import { testGitHistoryRefDecoration } from './test-git-history-ref-decoration'
@@ -560,6 +561,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.898:begin')
       const results = await testFileIndexCacheUi(ctx)
       collectSuiteResults('FileIndexCacheUi', results)
+      await sleep(300)
+    }
+
+    if (!ctx.cancelled() && shouldRun('quick-open-key-latency', { explicitOnly: true })) {
+      log('phase0.899:begin')
+      const results = await testQuickOpenKeyLatency(ctx)
+      collectSuiteResults('QuickOpenKeyLatency', results)
       await sleep(300)
     }
 

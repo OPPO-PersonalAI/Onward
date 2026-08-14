@@ -7,6 +7,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { perfTrace } from '../../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../../utils/perf-trace-names'
 import { FILE_INDEX_SEARCH_PAGE_SIZE } from '../../../utils/file-index-constants'
+import { stepActiveIndex } from '../../../utils/list-keyboard-nav'
+
+/**
+ * Start fetching the next page once the selection is within this many rows of
+ * the end. Roughly one screenful, so the rows are already loaded by the time a
+ * held-down arrow key arrives at the boundary.
+ */
+const PREFETCH_DISTANCE_ROWS = 10
 
 /**
  * Paged filename search, shared by the sidebar Search panel and the Cmd+P
@@ -32,6 +40,12 @@ export interface FilenameSearchController {
   loadMore: () => void
   activeIndex: number
   setActiveIndex: (next: number | ((previous: number) => number)) => void
+  /**
+   * Move the selection by `delta`, transparently paging when it runs off the
+   * loaded rows. Prefer this over setActiveIndex for keyboard navigation: it is
+   * what keeps a keypress at the page boundary from being silently swallowed.
+   */
+  moveActive: (delta: number) => void
   reset: () => void
 }
 
@@ -58,15 +72,31 @@ export function useFilenameSearch({
   // results (or a stale "load more" can append rows from the previous query).
   const requestTokenRef = useRef(0)
   const resultsRef = useRef<string[]>([])
+  const totalRef = useRef(0)
   const loadingMoreRef = useRef(false)
+  // Mirrors activeIndex synchronously. A held-down arrow key delivers many
+  // events before React re-renders; reading state would make every one of them
+  // compute from the same stale index and collapse into a single row of travel.
+  const activeIndexRef = useRef(0)
+  const loadMoreRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     resultsRef.current = results
   }, [results])
 
+  useEffect(() => {
+    totalRef.current = total
+  }, [total])
+
+  useEffect(() => {
+    activeIndexRef.current = activeIndex
+  }, [activeIndex])
+
   const reset = useCallback(() => {
     requestTokenRef.current += 1
     loadingMoreRef.current = false
+    pendingAdvanceRef.current = 0
+    activeIndexRef.current = 0
     setQueryState('')
     setResults([])
     setTotal(0)
@@ -87,6 +117,7 @@ export function useFilenameSearch({
         if (cancelled || token !== requestTokenRef.current) return
         setResults(page.items)
         setTotal(page.total)
+        activeIndexRef.current = 0
         setActiveIndex(0)
         setIsSearching(false)
         perfTrace(PERF_TRACE_EVENT.RENDERER_FILE_INDEX_SEARCH_PAGE, {
@@ -152,9 +183,54 @@ export function useFilenameSearch({
       })
   }, [isActive, pageSize, query, rootPath, total])
 
+  useEffect(() => {
+    loadMoreRef.current = loadMore
+  }, [loadMore])
+
   const setQuery = useCallback((next: string) => {
     setQueryState(next)
   }, [])
+
+  // A step that could not complete because its row was not loaded yet. Applied
+  // when the page lands, so the user never has to press the key twice.
+  const pendingAdvanceRef = useRef(0)
+
+  const moveActive = useCallback((delta: number) => {
+    // Compute from refs rather than inside the state updater: a setState
+    // updater must stay pure (React may call it twice), and triggering a fetch
+    // from inside one would fire the request twice under StrictMode.
+    const step = stepActiveIndex({
+      activeIndex: activeIndexRef.current,
+      itemCount: resultsRef.current.length,
+      hasMore: resultsRef.current.length < totalRef.current,
+      delta,
+      prefetchDistance: PREFETCH_DISTANCE_ROWS
+    })
+    activeIndexRef.current = step.nextIndex
+    setActiveIndex(step.nextIndex)
+    if (step.deferred) pendingAdvanceRef.current += delta
+    if (step.shouldLoadMore) loadMoreRef.current()
+  }, [])
+
+  // Complete any deferred step once the newly fetched rows are in.
+  useEffect(() => {
+    if (pendingAdvanceRef.current === 0) return
+    if (results.length === 0) {
+      pendingAdvanceRef.current = 0
+      return
+    }
+    const pending = pendingAdvanceRef.current
+    pendingAdvanceRef.current = 0
+    const step = stepActiveIndex({
+      activeIndex: activeIndexRef.current,
+      itemCount: results.length,
+      hasMore: results.length < total,
+      delta: pending,
+      prefetchDistance: PREFETCH_DISTANCE_ROWS
+    })
+    activeIndexRef.current = step.nextIndex
+    setActiveIndex(step.nextIndex)
+  }, [results, total])
 
   return {
     query,
@@ -167,6 +243,7 @@ export function useFilenameSearch({
     loadMore,
     activeIndex,
     setActiveIndex,
+    moveActive,
     reset
   }
 }
